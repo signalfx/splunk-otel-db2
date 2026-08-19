@@ -1,0 +1,7 @@
+* @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers
+
+.github/CODEOWNERS @signalfx/gdi-java-maintainers
+
+*.md   @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers @signalfx/gdi-docs
+docs/  @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers @signalfx/gdi-docs
+README* @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers @signalfx/gdi-docs
