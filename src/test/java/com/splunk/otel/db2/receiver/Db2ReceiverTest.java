@@ -106,8 +106,9 @@ class Db2ReceiverTest {
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("db2.user.connection.count not found"));
 
-            assertThat(connections.getLongGaugeData().getPoints()).isNotEmpty();
-            connections.getLongGaugeData().getPoints().forEach(point ->
+            // upDownCounter is exported as a sum (non-monotonic)
+            assertThat(connections.getLongSumData().getPoints()).isNotEmpty();
+            connections.getLongSumData().getPoints().forEach(point ->
                 assertThat(point.getAttributes().get(AttributeKey.stringKey("db.namespace"))).isEqualTo("TESTDB")
             );
         });

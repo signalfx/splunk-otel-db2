@@ -1,0 +1,91 @@
+---
+# Single source of truth for all metrics emitted by splunk-otel-db2.
+# Run `./gradlew generateMetrics` to regenerate Db2Metrics.java from this file.
+#
+# instrument types:
+#   long_gauge         — sampled point-in-time value (can go up or down, not cumulative)
+#   double_gauge       — same but floating-point
+#   long_counter       — monotonically increasing cumulative total
+#   double_counter     — same but floating-point
+#   long_updown_counter — cumulative value that can increase or decrease
+
+attributes:
+  db.system.name:
+    type: string
+    description: Database system identifier
+    value: db2
+  db.namespace:
+    type: string
+    description: Database name
+  db2.buffer_pool:
+    type: string
+    description: Buffer pool name
+  db2.read_type:
+    type: string
+    description: Read type (data or index)
+    enum: [data, index]
+  db2.member:
+    type: string
+    description: DB2 member number in a multi-member topology
+  db2.tablespace:
+    type: string
+    description: Tablespace name
+  db2.tablespace.state:
+    type: string
+    description: Tablespace allocation category
+    enum: [used, free, capacity]
+
+metrics:
+  db2.user.connection.count:
+    instrument: long_updown_counter
+    description: Number of active connections to the database
+    unit: "{connections}"
+    attributes: [db.system.name, db.namespace]
+
+  db2.deadlocks:
+    instrument: long_counter
+    description: Total deadlocks detected since DB2 startup
+    unit: "{deadlocks}"
+    attributes: [db.system.name, db.namespace]
+
+  db2.lock.waits:
+    instrument: long_counter
+    description: Total lock waits since DB2 startup
+    unit: "{waits}"
+    attributes: [db.system.name, db.namespace]
+
+  db2.lock.wait.time:
+    instrument: double_counter
+    description: Total time spent waiting for locks since DB2 startup
+    unit: s
+    attributes: [db.system.name, db.namespace]
+
+  db2.lock.timeouts:
+    instrument: long_counter
+    description: Total lock timeouts since DB2 startup
+    unit: "{timeouts}"
+    attributes: [db.system.name, db.namespace]
+
+  db2.buffer_pool.hit_ratio:
+    instrument: double_gauge
+    description: Buffer pool hit ratio percentage
+    unit: "%"
+    attributes: [db.system.name, db.namespace, db2.buffer_pool, db2.member]
+
+  db2.buffer_pool.reads:
+    instrument: long_counter
+    description: Buffer pool logical reads
+    unit: "{reads}"
+    attributes: [db.system.name, db.namespace, db2.buffer_pool, db2.member, db2.read_type]
+
+  db2.buffer_pool.physical_reads:
+    instrument: long_counter
+    description: Buffer pool physical reads
+    unit: "{reads}"
+    attributes: [db.system.name, db.namespace, db2.buffer_pool, db2.member, db2.read_type]
+
+  db2.tablespace.size:
+    instrument: long_gauge
+    description: Tablespace size in bytes
+    unit: By
+    attributes: [db.system.name, db.namespace, db2.tablespace, db2.member, db2.tablespace.state]

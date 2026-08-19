@@ -32,11 +32,14 @@ public class Db2Connection {
     private void connect() throws SQLException {
         String url = String.format("jdbc:db2://%s:%d/%s",
             config.getHost(), config.getPort(), config.getDatabase());
-        log.info("Connecting to DB2 at {}", url);
+        log.info("Connecting to DB2 at {} (tls.insecure={})", url, config.getTls().isInsecure());
         Properties props = new Properties();
         props.setProperty("user", config.getUsername());
         props.setProperty("password", config.getPassword());
         props.setProperty("clientProgramName", APP_NAME);
+        if (!config.getTls().isInsecure()) {
+            props.setProperty("sslConnection", "true");
+        }
         connection = DriverManager.getConnection(url, props);
         try (Statement st = connection.createStatement()) {
             st.execute("CALL WLM_SET_CLIENT_INFO(NULL, NULL, NULL, 'splunk-otel-db2', NULL)");

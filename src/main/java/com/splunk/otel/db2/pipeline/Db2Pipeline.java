@@ -1,6 +1,7 @@
 package com.splunk.otel.db2.pipeline;
 
 import com.splunk.otel.db2.config.Db2Config;
+import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.exporter.Db2Exporter;
 import com.splunk.otel.db2.processor.Db2Processor;
 import com.splunk.otel.db2.receiver.Db2Receiver;
@@ -50,11 +51,15 @@ public class Db2Pipeline {
     }
 
     private Resource buildResource(Db2Config config) {
-        return Resource.create(Attributes.of(
-            AttributeKey.stringKey("service.name"),   "splunk-otel-db2",
-            AttributeKey.stringKey("db.system.name"), "db2",
-            AttributeKey.stringKey("db.namespace"),   config.getReceivers().getDb2().getDatabase()
-        ));
+        Db2ReceiverConfig rc = config.getReceivers().getDb2();
+        return Resource.getDefault().merge(Resource.create(Attributes.of(
+            AttributeKey.stringKey("service.name"),        "splunk-otel-db2",
+            AttributeKey.stringKey("service.instance.id"), rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase(),
+            AttributeKey.stringKey("server.address"),      rc.getHost(),
+            AttributeKey.longKey("server.port"),           (long) rc.getPort(),
+            AttributeKey.stringKey("db.system.name"),      "db2",
+            AttributeKey.stringKey("db.namespace"),        rc.getDatabase()
+        )));
     }
 
     private SdkMeterProvider buildMeterProvider(MetricReader reader, Resource resource) {

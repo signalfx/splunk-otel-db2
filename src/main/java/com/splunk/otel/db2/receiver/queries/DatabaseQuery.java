@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver.queries;
 
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributeKey;
+import com.splunk.otel.db2.generated.Db2Metrics;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.ObservableDoubleMeasurement;
 import io.opentelemetry.api.metrics.ObservableLongMeasurement;
@@ -16,11 +17,12 @@ import java.util.function.Supplier;
 public class DatabaseQuery {
     private static final Logger log = LoggerFactory.getLogger(DatabaseQuery.class);
 
+    // -1 = aggregate all members; avoids duplicate attribute sets from multi-member topologies
     private static final String SQL =
         "SELECT APPLS_CUR_CONS, DEADLOCKS, LOCK_WAITS, " +
         "LOCK_WAIT_TIME / 1000.0 AS LOCK_WAIT_TIME_S, " +
         "LOCK_TIMEOUTS " +
-        "FROM TABLE(MON_GET_DATABASE(-2)) AS T";
+        "FROM TABLE(MON_GET_DATABASE(-1)) AS T";
 
     private final Supplier<Connection> connSupplier;
     private final String dbName;
@@ -36,18 +38,12 @@ public class DatabaseQuery {
             AttributeKey.stringKey("db.namespace"), dbName
         );
 
-        ObservableLongMeasurement connections = meter.gaugeBuilder("db2.user.connection.count")
-            .ofLongs().setDescription("Number of active connections to the database").setUnit("{connections}").buildObserver();
-        ObservableLongMeasurement deadlocks = meter.gaugeBuilder("db2.deadlocks")
-            .ofLongs().setDescription("Total deadlocks detected").setUnit("{deadlocks}").buildObserver();
-        ObservableLongMeasurement lockWaits = meter.gaugeBuilder("db2.lock.waits")
-            .ofLongs().setDescription("Total lock waits").setUnit("{waits}").buildObserver();
-        ObservableDoubleMeasurement lockWaitTime = meter.gaugeBuilder("db2.lock.wait.time")
-            .setDescription("Total time spent waiting for locks").setUnit("s").buildObserver();
-        ObservableLongMeasurement lockTimeouts = meter.gaugeBuilder("db2.lock.timeouts")
-            .ofLongs().setDescription("Total lock timeouts").setUnit("{timeouts}").buildObserver();
+        ObservableLongMeasurement connections  = Db2Metrics.userConnectionCount(meter);
+        ObservableLongMeasurement deadlocks    = Db2Metrics.deadlocks(meter);
+        ObservableLongMeasurement lockWaits    = Db2Metrics.lockWaits(meter);
+        ObservableDoubleMeasurement lockWaitTime = Db2Metrics.lockWaitTime(meter);
+        ObservableLongMeasurement lockTimeouts = Db2Metrics.lockTimeouts(meter);
 
-        // single DB round-trip for all five gauges
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();

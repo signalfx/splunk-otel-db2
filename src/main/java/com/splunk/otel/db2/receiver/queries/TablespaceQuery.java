@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver.queries;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
+import com.splunk.otel.db2.generated.Db2Metrics;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import org.slf4j.Logger;
@@ -15,8 +16,10 @@ import java.util.function.Supplier;
 public class TablespaceQuery {
     private static final Logger log = LoggerFactory.getLogger(TablespaceQuery.class);
 
+    // -2 = all members; MEMBER attribute differentiates per-member rows
     private static final String SQL =
-        "SELECT TBSP_NAME, TBSP_USED_PAGES * TBSP_PAGE_SIZE AS USED_BYTES, " +
+        "SELECT TBSP_NAME, MEMBER, " +
+        "TBSP_USED_PAGES * TBSP_PAGE_SIZE AS USED_BYTES, " +
         "TBSP_FREE_PAGES * TBSP_PAGE_SIZE AS FREE_BYTES, " +
         "TBSP_TOTAL_PAGES * TBSP_PAGE_SIZE AS TOTAL_BYTES " +
         "FROM TABLE(MON_GET_TABLESPACE(NULL, -2)) AS T";
@@ -30,10 +33,8 @@ public class TablespaceQuery {
     }
 
     public void register(Meter meter) {
-        ObservableLongMeasurement size = meter.gaugeBuilder("db2.tablespace.size")
-            .ofLongs().setDescription("Tablespace size in bytes").setUnit("By").buildObserver();
+        ObservableLongMeasurement size = Db2Metrics.tablespaceSize(meter);
 
-        // single DB round-trip; db2.tablespace.state=used|free|capacity differentiates size dimensions
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();
@@ -41,24 +42,16 @@ public class TablespaceQuery {
                      ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         String tsName = rs.getString("TBSP_NAME").trim();
-                        Attributes usedAttrs = Attributes.of(
+                        String member = String.valueOf(rs.getInt("MEMBER"));
+                        Attributes base = Attributes.of(
                             AttributeKey.stringKey("db.system.name"), "db2",
                             AttributeKey.stringKey("db.namespace"), dbName,
                             AttributeKey.stringKey("db2.tablespace"), tsName,
-                            AttributeKey.stringKey("db2.tablespace.state"), "used"
+                            AttributeKey.stringKey("db2.member"), member
                         );
-                        Attributes freeAttrs = Attributes.of(
-                            AttributeKey.stringKey("db.system.name"), "db2",
-                            AttributeKey.stringKey("db.namespace"), dbName,
-                            AttributeKey.stringKey("db2.tablespace"), tsName,
-                            AttributeKey.stringKey("db2.tablespace.state"), "free"
-                        );
-                        Attributes capacityAttrs = Attributes.of(
-                            AttributeKey.stringKey("db.system.name"), "db2",
-                            AttributeKey.stringKey("db.namespace"), dbName,
-                            AttributeKey.stringKey("db2.tablespace"), tsName,
-                            AttributeKey.stringKey("db2.tablespace.state"), "capacity"
-                        );
+                        Attributes usedAttrs     = Attributes.builder().putAll(base).put(AttributeKey.stringKey("db2.tablespace.state"), "used").build();
+                        Attributes freeAttrs     = Attributes.builder().putAll(base).put(AttributeKey.stringKey("db2.tablespace.state"), "free").build();
+                        Attributes capacityAttrs = Attributes.builder().putAll(base).put(AttributeKey.stringKey("db2.tablespace.state"), "capacity").build();
                         size.record(rs.getLong("USED_BYTES"), usedAttrs);
                         size.record(rs.getLong("FREE_BYTES"), freeAttrs);
                         size.record(rs.getLong("TOTAL_BYTES"), capacityAttrs);
