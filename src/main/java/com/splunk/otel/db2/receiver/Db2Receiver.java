@@ -1,7 +1,10 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
+import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
+import com.splunk.otel.db2.receiver.queries.TablespaceQuery;
 import com.splunk.otel.db2.receiver.queries.TopQueryQuery;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
@@ -55,7 +58,9 @@ public class Db2Receiver {
             }
         };
 
-        // metric queries will be registered here in subsequent PRs
+        new DatabaseQuery(connSupplier, config.getDatabase(), meter);
+        new BufferpoolQuery(connSupplier, config.getDatabase(), meter);
+        new TablespaceQuery(connSupplier, config.getDatabase(), meter);
 
         if (otelLogger != null) {
             TopQueryQuery    topQuery    = new TopQueryQuery(connSupplier, config.getDatabase(), otelLogger, config.getTopQueryCount());
