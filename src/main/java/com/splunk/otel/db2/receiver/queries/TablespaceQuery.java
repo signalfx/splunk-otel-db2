@@ -29,13 +29,13 @@ public class TablespaceQuery {
     }
 
     public void register(Meter meter) {
-        meter.gaugeBuilder("db.db2.tablespace.used")
+        meter.gaugeBuilder("db2.tablespace.used")
             .ofLongs()
             .setDescription("Tablespace used bytes")
             .setUnit("By")
             .buildWithCallback(obs -> query(obs, null, "USED_BYTES"));
 
-        meter.gaugeBuilder("db.db2.tablespace.free")
+        meter.gaugeBuilder("db2.tablespace.free")
             .ofLongs()
             .setDescription("Tablespace free bytes")
             .setUnit("By")
@@ -53,7 +53,7 @@ public class TablespaceQuery {
                     Attributes attrs = Attributes.of(
                         AttributeKey.stringKey("db.system"), "db2",
                         AttributeKey.stringKey("db.name"), dbName,
-                        AttributeKey.stringKey("db.db2.tablespace"), tsName
+                        AttributeKey.stringKey("db2.tablespace"), tsName
                     );
                     obs.record(rs.getLong(column), attrs);
                 }

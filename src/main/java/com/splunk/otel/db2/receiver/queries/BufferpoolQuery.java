@@ -33,7 +33,7 @@ public class BufferpoolQuery {
     }
 
     public void register(Meter meter) {
-        meter.gaugeBuilder("db.db2.buffer_pool.hit_ratio")
+        meter.gaugeBuilder("db2.buffer_pool.hit_ratio")
             .setDescription("Buffer pool hit ratio percentage")
             .setUnit("%")
             .buildWithCallback(obs -> {
@@ -46,7 +46,7 @@ public class BufferpoolQuery {
                             Attributes attrs = Attributes.of(
                                 AttributeKey.stringKey("db.system"), "db2",
                                 AttributeKey.stringKey("db.name"), dbName,
-                                AttributeKey.stringKey("db.db2.buffer_pool"), bpName
+                                AttributeKey.stringKey("db2.buffer_pool"), bpName
                             );
                             obs.record(rs.getDouble("HIT_RATIO"), attrs);
                         }
@@ -56,7 +56,7 @@ public class BufferpoolQuery {
                 }
             });
 
-        meter.gaugeBuilder("db.db2.buffer_pool.data_reads")
+        meter.gaugeBuilder("db2.buffer_pool.data_reads")
             .ofLongs()
             .setDescription("Buffer pool data logical reads")
             .setUnit("{reads}")
@@ -70,7 +70,7 @@ public class BufferpoolQuery {
                             Attributes attrs = Attributes.of(
                                 AttributeKey.stringKey("db.system"), "db2",
                                 AttributeKey.stringKey("db.name"), dbName,
-                                AttributeKey.stringKey("db.db2.buffer_pool"), bpName
+                                AttributeKey.stringKey("db2.buffer_pool"), bpName
                             );
                             obs.record(rs.getLong("POOL_DATA_L_READS"), attrs);
                         }

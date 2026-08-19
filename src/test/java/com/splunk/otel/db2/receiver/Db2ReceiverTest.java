@@ -77,15 +77,15 @@ class Db2ReceiverTest {
                 .map(MetricData::getName)
                 .collect(Collectors.toSet());
             assertThat(names).contains(
-                "db.db2.connections",
-                "db.db2.deadlocks",
-                "db.db2.lock_waits",
-                "db.db2.lock_wait_time",
-                "db.db2.lock_timeouts",
-                "db.db2.buffer_pool.hit_ratio",
-                "db.db2.buffer_pool.data_reads",
-                "db.db2.tablespace.used",
-                "db.db2.tablespace.free"
+                "db2.user.connection.count",
+                "db2.deadlocks",
+                "db2.lock.wait.count",
+                "db2.lock.wait_time.total",
+                "db2.lock_timeout",
+                "db2.buffer_pool.hit_ratio",
+                "db2.buffer_pool.data_reads",
+                "db2.tablespace.used",
+                "db2.tablespace.free"
             );
         });
     }
@@ -101,9 +101,9 @@ class Db2ReceiverTest {
         Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
             List<MetricData> metrics = exporter.getFinishedMetricItems();
             MetricData connections = metrics.stream()
-                .filter(m -> m.getName().equals("db.db2.connections"))
+                .filter(m -> m.getName().equals("db2.user.connection.count"))
                 .findFirst()
-                .orElseThrow(() -> new AssertionError("db.db2.connections not found"));
+                .orElseThrow(() -> new AssertionError("db2.user.connection.count not found"));
 
             assertThat(connections.getLongGaugeData().getPoints()).isNotEmpty();
             connections.getLongGaugeData().getPoints().forEach(point ->
@@ -113,20 +113,20 @@ class Db2ReceiverTest {
     }
 
     @Test
-    void configYamlSchemaMatchesGoReceiverFieldNames() {
-        Set<String> expectedMetricNames = Set.of(
-            "db.db2.connections",
-            "db.db2.deadlocks",
-            "db.db2.lock_waits",
-            "db.db2.lock_wait_time",
-            "db.db2.lock_timeouts",
-            "db.db2.buffer_pool.hit_ratio",
-            "db.db2.buffer_pool.data_reads",
-            "db.db2.tablespace.used",
-            "db.db2.tablespace.free"
+    void metricNamesPrefixedWithDb2() {
+        Set<String> metricNames = Set.of(
+            "db2.user.connection.count",
+            "db2.deadlocks",
+            "db2.lock.wait.count",
+            "db2.lock.wait_time.total",
+            "db2.lock_timeout",
+            "db2.buffer_pool.hit_ratio",
+            "db2.buffer_pool.data_reads",
+            "db2.tablespace.used",
+            "db2.tablespace.free"
         );
-        assertThat(expectedMetricNames).allSatisfy(name ->
-            assertThat(name).startsWith("db.db2.")
+        assertThat(metricNames).allSatisfy(name ->
+            assertThat(name).startsWith("db2.")
         );
     }
 }
