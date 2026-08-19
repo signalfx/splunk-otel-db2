@@ -4,6 +4,7 @@ import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.testing.exporter.InMemoryMetricExporter;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.Db2Container;
@@ -15,16 +16,16 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Integration test — spins up a real DB2 container and verifies the
- * pipeline can connect, run a query, and start/stop cleanly.
- *
- * Metric query integration tests will be added in subsequent PRs
- * as each query class is implemented.
+ * pipeline can connect, collect metrics, and start/stop cleanly.
  *
  * Run with: ./gradlew integrationTest
  * Skipped by default in ./gradlew build (requires Docker).
@@ -41,15 +42,19 @@ class Db2ReceiverIntegrationTest {
         .withDatabaseName("testdb")
         .withStartupTimeout(Duration.ofMinutes(10));
 
-    @Test
-    void receiverConnectsAndStartsCleanly() throws Exception {
+    private Db2ReceiverConfig buildConfig() {
         Db2ReceiverConfig config = new Db2ReceiverConfig();
         config.setHostname(db2.getHost());
         config.setHostport(db2.getMappedPort(50000));
         config.setUsername(db2.getUsername());
         config.setPassword(db2.getPassword());
         config.setDatabase(db2.getDatabaseName().toUpperCase());
+        config.setCollectionInterval("2s");
+        return config;
+    }
 
+    @Test
+    void receiverConnectsAndStartsCleanly() {
         InMemoryMetricExporter exporter = InMemoryMetricExporter.create();
         SdkMeterProvider meterProvider = SdkMeterProvider.builder()
             .registerMetricReader(
@@ -59,9 +64,111 @@ class Db2ReceiverIntegrationTest {
             )
             .build();
 
-        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"),
+        Db2Receiver receiver = new Db2Receiver(buildConfig(), meterProvider.get("splunk-otel-db2"),
             (io.opentelemetry.api.logs.Logger) null);
         receiver.start();
+        receiver.stop();
+        meterProvider.shutdown();
+    }
+
+    @Test
+    void databaseMetricsAreEmitted() {
+        InMemoryMetricExporter exporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(exporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2Receiver receiver = new Db2Receiver(buildConfig(), meterProvider.get("splunk-otel-db2"), (io.opentelemetry.api.logs.Logger) null);
+        receiver.start();
+
+        Awaitility.await()
+            .atMost(15, TimeUnit.SECONDS)
+            .until(() -> metricNames(exporter).containsAll(List.of(
+                "db2.connection.count",
+                "db2.lock.wait.count",
+                "db2.deadlock.count",
+                "db2.sort.count"
+            )));
+
+        assertThat(metricNames(exporter)).contains(
+            "db2.connection.count",
+            "db2.connection.active",
+            "db2.connection.max",
+            "db2.lock.wait.count",
+            "db2.lock.wait_time",
+            "db2.lock.timeout.count",
+            "db2.lock.escalation.count",
+            "db2.lock.space_used",
+            "db2.deadlock.count",
+            "db2.sort.count",
+            "db2.sort.overflow.count"
+        );
+
+        receiver.stop();
+        meterProvider.shutdown();
+    }
+
+    @Test
+    void bufferpoolMetricsAreEmitted() {
+        InMemoryMetricExporter exporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(exporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2Receiver receiver = new Db2Receiver(buildConfig(), meterProvider.get("splunk-otel-db2"), (io.opentelemetry.api.logs.Logger) null);
+        receiver.start();
+
+        Awaitility.await()
+            .atMost(15, TimeUnit.SECONDS)
+            .until(() -> metricNames(exporter).contains("db2.buffer_pool.logical_reads"));
+
+        assertThat(metricNames(exporter)).contains(
+            "db2.buffer_pool.logical_reads",
+            "db2.buffer_pool.physical_reads",
+            "db2.buffer_pool.writes",
+            "db2.buffer_pool.read_time",
+            "db2.buffer_pool.write_time"
+        );
+
+        receiver.stop();
+        meterProvider.shutdown();
+    }
+
+    @Test
+    void tablespaceMetricsAreEmitted() {
+        InMemoryMetricExporter exporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(exporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2Receiver receiver = new Db2Receiver(buildConfig(), meterProvider.get("splunk-otel-db2"), (io.opentelemetry.api.logs.Logger) null);
+        receiver.start();
+
+        Awaitility.await()
+            .atMost(15, TimeUnit.SECONDS)
+            .until(() -> metricNames(exporter).contains("db2.tablespace.size"));
+
+        // verify all three usage dimensions are present
+        assertThat(exporter.getFinishedMetricItems()).anySatisfy(metric -> {
+            assertThat(metric.getName()).isEqualTo("db2.tablespace.size");
+            assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
+                assertThat(pt.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.stringKey("db2.tablespace.usage")))
+                    .isIn("capacity", "used", "free"));
+        });
+
         receiver.stop();
         meterProvider.shutdown();
     }
@@ -75,7 +182,6 @@ class Db2ReceiverIntegrationTest {
         try (Connection conn = DriverManager.getConnection(db2.getJdbcUrl(), props)) {
             assertThat(conn.isValid(5)).isTrue();
 
-            // verify MON_GET_DATABASE is accessible — used by DatabaseQuery in a future PR
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery(
                      "SELECT APPLS_CUR_CONS FROM TABLE(MON_GET_DATABASE(-1)) AS T")) {
@@ -94,19 +200,23 @@ class Db2ReceiverIntegrationTest {
         try (Connection conn = DriverManager.getConnection(db2.getJdbcUrl(), props);
              Statement st = conn.createStatement()) {
 
-            // MON_GET_BUFFERPOOL — used by BufferpoolQuery in a future PR
             try (ResultSet rs = st.executeQuery(
                     "SELECT COUNT(*) AS CNT FROM TABLE(MON_GET_BUFFERPOOL(NULL, -2)) AS T")) {
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getLong("CNT")).isGreaterThan(0L);
             }
 
-            // MON_GET_TABLESPACE — used by TablespaceQuery in a future PR
             try (ResultSet rs = st.executeQuery(
                     "SELECT COUNT(*) AS CNT FROM TABLE(MON_GET_TABLESPACE(NULL, -2)) AS T")) {
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getLong("CNT")).isGreaterThan(0L);
             }
         }
+    }
+
+    private static List<String> metricNames(InMemoryMetricExporter exporter) {
+        return exporter.getFinishedMetricItems().stream()
+            .map(m -> m.getName())
+            .collect(Collectors.toList());
     }
 }
