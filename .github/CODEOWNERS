@@ -1,7 +1,7 @@
-* @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers
+* @signalfx/gdi-db2-maintainers
 
-.github/CODEOWNERS @signalfx/gdi-java-maintainers
+.github/CODEOWNERS @signalfx/gdi-db2-maintainers
 
-*.md   @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers @signalfx/gdi-docs
-docs/  @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers @signalfx/gdi-docs
-README* @signalfx/gdi-java-maintainers @signalfx/gdi-java-approvers @signalfx/gdi-docs
+*.md    @signalfx/gdi-db2-maintainers
+docs/   @signalfx/gdi-db2-maintainers
+README* @signalfx/gdi-db2-maintainers
