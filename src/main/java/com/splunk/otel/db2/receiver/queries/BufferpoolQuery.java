@@ -3,6 +3,8 @@ package com.splunk.otel.db2.receiver.queries;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.ObservableDoubleMeasurement;
+import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,51 +35,31 @@ public class BufferpoolQuery {
     }
 
     public void register(Meter meter) {
-        meter.gaugeBuilder("db2.buffer_pool.hit_ratio")
-            .setDescription("Buffer pool hit ratio percentage")
-            .setUnit("%")
-            .buildWithCallback(obs -> {
-                try {
-                    Connection conn = connSupplier.get();
-                    try (PreparedStatement ps = conn.prepareStatement(SQL);
-                         ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            String bpName = rs.getString("BP_NAME").trim();
-                            Attributes attrs = Attributes.of(
-                                AttributeKey.stringKey("db.system"), "db2",
-                                AttributeKey.stringKey("db.name"), dbName,
-                                AttributeKey.stringKey("db2.buffer_pool"), bpName
-                            );
-                            obs.record(rs.getDouble("HIT_RATIO"), attrs);
-                        }
-                    }
-                } catch (Exception e) {
-                    log.error("Failed to query MON_GET_BUFFERPOOL: {}", e.getMessage());
-                }
-            });
+        ObservableDoubleMeasurement hitRatio = meter.gaugeBuilder("db2.buffer_pool.hit_ratio")
+            .setDescription("Buffer pool hit ratio percentage").setUnit("%").buildObserver();
+        ObservableLongMeasurement dataReads = meter.gaugeBuilder("db2.buffer_pool.data_reads")
+            .ofLongs().setDescription("Buffer pool data logical reads").setUnit("{reads}").buildObserver();
 
-        meter.gaugeBuilder("db2.buffer_pool.data_reads")
-            .ofLongs()
-            .setDescription("Buffer pool data logical reads")
-            .setUnit("{reads}")
-            .buildWithCallback(obs -> {
-                try {
-                    Connection conn = connSupplier.get();
-                    try (PreparedStatement ps = conn.prepareStatement(SQL);
-                         ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) {
-                            String bpName = rs.getString("BP_NAME").trim();
-                            Attributes attrs = Attributes.of(
-                                AttributeKey.stringKey("db.system"), "db2",
-                                AttributeKey.stringKey("db.name"), dbName,
-                                AttributeKey.stringKey("db2.buffer_pool"), bpName
-                            );
-                            obs.record(rs.getLong("POOL_DATA_L_READS"), attrs);
-                        }
+        // single DB round-trip for both buffer pool gauges
+        meter.batchCallback(() -> {
+            try {
+                Connection conn = connSupplier.get();
+                try (PreparedStatement ps = conn.prepareStatement(SQL);
+                     ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String bpName = rs.getString("BP_NAME").trim();
+                        Attributes attrs = Attributes.of(
+                            AttributeKey.stringKey("db.system"), "db2",
+                            AttributeKey.stringKey("db.name"), dbName,
+                            AttributeKey.stringKey("db2.buffer_pool"), bpName
+                        );
+                        hitRatio.record(rs.getDouble("HIT_RATIO"), attrs);
+                        dataReads.record(rs.getLong("POOL_DATA_L_READS"), attrs);
                     }
-                } catch (Exception e) {
-                    log.error("Failed to query MON_GET_BUFFERPOOL data_reads: {}", e.getMessage());
                 }
-            });
+            } catch (Exception e) {
+                log.error("Failed to query MON_GET_BUFFERPOOL: {}", e.getMessage());
+            }
+        }, hitRatio, dataReads);
     }
 }

@@ -3,6 +3,7 @@ package com.splunk.otel.db2.receiver.queries;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,37 +30,31 @@ public class TablespaceQuery {
     }
 
     public void register(Meter meter) {
-        meter.gaugeBuilder("db2.tablespace.used")
-            .ofLongs()
-            .setDescription("Tablespace used bytes")
-            .setUnit("By")
-            .buildWithCallback(obs -> query(obs, null, "USED_BYTES"));
+        ObservableLongMeasurement used = meter.gaugeBuilder("db2.tablespace.used")
+            .ofLongs().setDescription("Tablespace used bytes").setUnit("By").buildObserver();
+        ObservableLongMeasurement free = meter.gaugeBuilder("db2.tablespace.free")
+            .ofLongs().setDescription("Tablespace free bytes").setUnit("By").buildObserver();
 
-        meter.gaugeBuilder("db2.tablespace.free")
-            .ofLongs()
-            .setDescription("Tablespace free bytes")
-            .setUnit("By")
-            .buildWithCallback(obs -> query(obs, null, "FREE_BYTES"));
-    }
-
-    private void query(io.opentelemetry.api.metrics.ObservableLongMeasurement obs,
-                       Object unused, String column) {
-        try {
-            Connection conn = connSupplier.get();
-            try (PreparedStatement ps = conn.prepareStatement(SQL);
-                 ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String tsName = rs.getString("TBSP_NAME").trim();
-                    Attributes attrs = Attributes.of(
-                        AttributeKey.stringKey("db.system"), "db2",
-                        AttributeKey.stringKey("db.name"), dbName,
-                        AttributeKey.stringKey("db2.tablespace"), tsName
-                    );
-                    obs.record(rs.getLong(column), attrs);
+        // single DB round-trip for both tablespace gauges
+        meter.batchCallback(() -> {
+            try {
+                Connection conn = connSupplier.get();
+                try (PreparedStatement ps = conn.prepareStatement(SQL);
+                     ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String tsName = rs.getString("TBSP_NAME").trim();
+                        Attributes attrs = Attributes.of(
+                            AttributeKey.stringKey("db.system"), "db2",
+                            AttributeKey.stringKey("db.name"), dbName,
+                            AttributeKey.stringKey("db2.tablespace"), tsName
+                        );
+                        used.record(rs.getLong("USED_BYTES"), attrs);
+                        free.record(rs.getLong("FREE_BYTES"), attrs);
+                    }
                 }
+            } catch (Exception e) {
+                log.error("Failed to query MON_GET_TABLESPACE: {}", e.getMessage());
             }
-        } catch (Exception e) {
-            log.error("Failed to query MON_GET_TABLESPACE for {}: {}", column, e.getMessage());
-        }
+        }, used, free);
     }
 }

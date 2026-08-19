@@ -29,7 +29,7 @@ public class Db2Connection {
         return connection;
     }
 
-    private synchronized void connect() throws SQLException {
+    private void connect() throws SQLException {
         String url = String.format("jdbc:db2://%s:%d/%s",
             config.getHost(), config.getPort(), config.getDatabase());
         log.info("Connecting to DB2 at {}", url);

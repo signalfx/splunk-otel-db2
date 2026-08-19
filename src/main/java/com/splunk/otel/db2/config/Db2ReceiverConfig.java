@@ -39,9 +39,12 @@ public class Db2ReceiverConfig {
     private static Duration parseDuration(String s, long defaultSeconds) {
         if (s == null) return Duration.ofSeconds(defaultSeconds);
         s = s.trim();
-        if (s.endsWith("s")) return Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
-        if (s.endsWith("m")) return Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
-        throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s' or '5m'");
+        Duration d;
+        if (s.endsWith("s")) d = Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
+        else if (s.endsWith("m")) d = Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
+        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s' or '5m'");
+        if (d.getSeconds() <= 0) throw new IllegalArgumentException("Interval must be at least 1s, got '" + s + "'");
+        return d;
     }
 
     public int getTopQueryCount() { return topQueryCount; }
