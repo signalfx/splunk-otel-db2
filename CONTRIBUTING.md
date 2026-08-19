@@ -6,7 +6,6 @@ our community. Read through this document before submitting any issues or pull
 requests to ensure we have all the necessary information to effectively respond
 to your bug report or contribution.
 
-In addition to this document, review our [Code of Conduct](CODE_OF_CONDUCT.md).
 For any code of conduct questions or comments, send an email to oss@splunk.com.
 
 ## Reporting Bugs/Feature Requests
@@ -29,7 +28,7 @@ When filing an issue, do *NOT* include:
 
 ## Reporting Security Issues
 
-See [SECURITY.md](SECURITY.md#reporting-security-issues) for instructions.
+To report a security issue, send an email to security@splunk.com.
 
 ## Contributing via Pull Requests
 
@@ -56,9 +55,6 @@ To send us a pull request:
    interface.
 7. Pay attention to any automated CI failures reported in the pull request, and
    stay involved in the conversation.
-
-Before your contribution can be accepted, you will be asked to sign our
-[Splunk Contributor License Agreement (CLA)](https://github.com/splunk/cla-agreement/blob/main/CLA.md).
 
 ## Licensing
 
