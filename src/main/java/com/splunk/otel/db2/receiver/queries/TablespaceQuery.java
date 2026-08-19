@@ -41,9 +41,9 @@ public class TablespaceQuery {
     }
 
     private void collect() {
-        try (Connection conn = connSupplier.get();
-             Statement st   = conn.createStatement();
-             ResultSet rs   = st.executeQuery(SQL)) {
+        Connection conn = connSupplier.get();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(SQL)) {
             while (rs.next()) {
                 String tbspName  = rs.getString("TBSP_NAME");
                 String tbspType  = rs.getString("TBSP_TYPE");
@@ -56,7 +56,7 @@ public class TablespaceQuery {
                 long freePages  = rs.getLong("TBSP_FREE_PAGES");
 
                 Attributes base = Attributes.builder()
-                    .put("db.name",              dbName)
+                    .put("db.namespace",         dbName)
                     .put("db2.member",           member)
                     .put("db2.tablespace",       tbspName)
                     .put("db2.tablespace.type",  tbspType)

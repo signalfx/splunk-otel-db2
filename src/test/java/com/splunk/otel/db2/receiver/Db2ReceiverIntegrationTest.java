@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class Db2ReceiverIntegrationTest {
 
     @Container
-    static final Db2Container db2 = new Db2Container("icr.io/db2_community/db2:latest")
+    static final Db2Container db2 = new Db2Container("icr.io/db2_community/db2:11.5.9.0")
         .acceptLicense()
         .withUsername("db2inst1")
         .withPassword("password")

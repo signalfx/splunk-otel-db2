@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
@@ -24,19 +23,19 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class Db2ReceiverTest {
 
     private InMemoryMetricExporter exporter;
     private SdkMeterProvider meterProvider;
-    private Connection mockConn;
     private Db2ReceiverConfig config;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
         exporter = InMemoryMetricExporter.create();
-
         meterProvider = SdkMeterProvider.builder()
             .registerMetricReader(
                 PeriodicMetricReader.builder(exporter)
@@ -45,27 +44,10 @@ class Db2ReceiverTest {
             )
             .build();
 
-        mockConn = Mockito.mock(Connection.class);
         config = new Db2ReceiverConfig();
         config.setDatabase("TESTDB");
         config.setUsername("db2inst1");
         config.setPassword("password");
-
-        // default: statements return empty result sets
-        when(mockConn.prepareStatement(anyString())).thenAnswer(inv -> {
-            PreparedStatement stmt = Mockito.mock(PreparedStatement.class);
-            ResultSet rs = Mockito.mock(ResultSet.class);
-            when(rs.next()).thenReturn(false);
-            when(stmt.executeQuery()).thenReturn(rs);
-            return stmt;
-        });
-        when(mockConn.createStatement()).thenAnswer(inv -> {
-            Statement stmt = Mockito.mock(Statement.class);
-            ResultSet rs = Mockito.mock(ResultSet.class);
-            when(rs.next()).thenReturn(false);
-            when(stmt.executeQuery(anyString())).thenReturn(rs);
-            return stmt;
-        });
     }
 
     @Test
@@ -88,16 +70,30 @@ class Db2ReceiverTest {
     }
 
     @Test
-    void databaseQueryRegistersExpectedMetrics() throws Exception {
-        Connection conn = Mockito.mock(Connection.class);
-        Statement st = Mockito.mock(Statement.class);
-        ResultSet rs = Mockito.mock(ResultSet.class);
-        when(conn.createStatement()).thenReturn(st);
-        when(st.executeQuery(anyString())).thenReturn(rs);
-        when(rs.next()).thenReturn(true, false);
-        when(rs.getInt("MEMBER")).thenReturn(0);
-        when(rs.getLong(anyString())).thenReturn(1L);
+    void databaseQueryDoesNotCloseSharedConnection() throws Exception {
+        Connection conn = mockConnectionWithOneRow();
+        new DatabaseQuery(() -> conn, "TESTDB", meterProvider.get("splunk-otel-db2"));
 
+        Awaitility.await().atMost(2, TimeUnit.SECONDS)
+            .until(() -> metricNames(exporter).contains("db2.connection.count"));
+
+        verify(conn, never()).close();
+    }
+
+    @Test
+    void bufferpoolQueryDoesNotCloseSharedConnection() throws Exception {
+        Connection conn = mockBufferpoolConnection();
+        new BufferpoolQuery(() -> conn, "TESTDB", meterProvider.get("splunk-otel-db2"));
+
+        Awaitility.await().atMost(2, TimeUnit.SECONDS)
+            .until(() -> metricNames(exporter).contains("db2.buffer_pool.logical_reads"));
+
+        verify(conn, never()).close();
+    }
+
+    @Test
+    void databaseQueryRegistersExpectedMetrics() throws Exception {
+        Connection conn = mockConnectionWithOneRow();
         new DatabaseQuery(() -> conn, "TESTDB", meterProvider.get("splunk-otel-db2"));
 
         Awaitility.await().atMost(2, TimeUnit.SECONDS)
@@ -120,16 +116,7 @@ class Db2ReceiverTest {
 
     @Test
     void bufferpoolQueryRegistersExpectedMetrics() throws Exception {
-        Connection conn = Mockito.mock(Connection.class);
-        Statement st = Mockito.mock(Statement.class);
-        ResultSet rs = Mockito.mock(ResultSet.class);
-        when(conn.createStatement()).thenReturn(st);
-        when(st.executeQuery(anyString())).thenReturn(rs);
-        when(rs.next()).thenReturn(true, false);
-        when(rs.getInt("MEMBER")).thenReturn(0);
-        when(rs.getString("BP_NAME")).thenReturn("IBMDEFAULTBP");
-        when(rs.getLong(anyString())).thenReturn(1L);
-
+        Connection conn = mockBufferpoolConnection();
         new BufferpoolQuery(() -> conn, "TESTDB", meterProvider.get("splunk-otel-db2"));
 
         Awaitility.await().atMost(2, TimeUnit.SECONDS)
@@ -146,9 +133,46 @@ class Db2ReceiverTest {
 
     @Test
     void tablespaceQueryRegistersExpectedMetrics() throws Exception {
+        Connection conn = mockTablespaceConnection();
+        new TablespaceQuery(() -> conn, "TESTDB", meterProvider.get("splunk-otel-db2"));
+
+        Awaitility.await().atMost(2, TimeUnit.SECONDS)
+            .until(() -> metricNames(exporter).contains("db2.tablespace.size"));
+
+        assertThat(metricNames(exporter)).contains("db2.tablespace.size");
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    private Connection mockConnectionWithOneRow() throws Exception {
         Connection conn = Mockito.mock(Connection.class);
-        Statement st = Mockito.mock(Statement.class);
-        ResultSet rs = Mockito.mock(ResultSet.class);
+        Statement st   = Mockito.mock(Statement.class);
+        ResultSet rs   = Mockito.mock(ResultSet.class);
+        when(conn.createStatement()).thenReturn(st);
+        when(st.executeQuery(anyString())).thenReturn(rs);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getInt("MEMBER")).thenReturn(0);
+        when(rs.getLong(anyString())).thenReturn(1L);
+        return conn;
+    }
+
+    private Connection mockBufferpoolConnection() throws Exception {
+        Connection conn = Mockito.mock(Connection.class);
+        Statement st   = Mockito.mock(Statement.class);
+        ResultSet rs   = Mockito.mock(ResultSet.class);
+        when(conn.createStatement()).thenReturn(st);
+        when(st.executeQuery(anyString())).thenReturn(rs);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getInt("MEMBER")).thenReturn(0);
+        when(rs.getString("BP_NAME")).thenReturn("IBMDEFAULTBP");
+        when(rs.getLong(anyString())).thenReturn(1L);
+        return conn;
+    }
+
+    private Connection mockTablespaceConnection() throws Exception {
+        Connection conn = Mockito.mock(Connection.class);
+        Statement st   = Mockito.mock(Statement.class);
+        ResultSet rs   = Mockito.mock(ResultSet.class);
         when(conn.createStatement()).thenReturn(st);
         when(st.executeQuery(anyString())).thenReturn(rs);
         when(rs.next()).thenReturn(true, false);
@@ -160,13 +184,7 @@ class Db2ReceiverTest {
         when(rs.getLong("TBSP_TOTAL_PAGES")).thenReturn(1000L);
         when(rs.getLong("TBSP_USED_PAGES")).thenReturn(600L);
         when(rs.getLong("TBSP_FREE_PAGES")).thenReturn(400L);
-
-        new TablespaceQuery(() -> conn, "TESTDB", meterProvider.get("splunk-otel-db2"));
-
-        Awaitility.await().atMost(2, TimeUnit.SECONDS)
-            .until(() -> metricNames(exporter).contains("db2.tablespace.size"));
-
-        assertThat(metricNames(exporter)).contains("db2.tablespace.size");
+        return conn;
     }
 
     private static List<String> metricNames(InMemoryMetricExporter exporter) {

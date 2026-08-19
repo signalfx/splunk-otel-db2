@@ -6,31 +6,37 @@ status:
     development: [metrics]
 
 resource_attributes:
-  db.name:
-    description: The name of the database.
+  db.namespace:
+    description: The name of the database (maps to db.namespace in OTel semconv).
     type: string
     enabled: true
-  db2.member:
-    description: The DB2 member number in a pureScale or DPF environment.
-    type: int
+  db.system.name:
+    description: The database management system. Always ibm.db2 for this receiver.
+    type: string
     enabled: true
 
 attributes:
+  db.namespace:
+    description: The name of the database.
+    type: string
+  db2.bufferpool:
+    description: Name of the buffer pool.
+    type: string
+  db2.member:
+    description: The DB2 member number in a pureScale or DPF environment.
+    type: int
   db2.read_type:
     description: Type of buffer pool read operation.
     type: string
     enum: [data, index, xda]
-  db2.bufferpool:
-    description: Name of the buffer pool.
-    type: string
   db2.tablespace:
     description: Name of the tablespace.
     type: string
-  db2.tablespace.type:
-    description: Type of the tablespace (DMS, SMS, etc.).
-    type: string
   db2.tablespace.state:
     description: State of the tablespace (e.g. NORMAL).
+    type: string
+  db2.tablespace.type:
+    description: Type of the tablespace (DMS, SMS, etc.).
     type: string
   db2.tablespace.usage:
     description: Tablespace size breakdown dimension.
@@ -38,178 +44,189 @@ attributes:
     enum: [capacity, used, free]
 
 metrics:
-  # ── Database-level (MON_GET_DATABASE) ─────────────────────────────────────
-
-  db2.connection.count:
-    enabled: true
-    description: Number of current connections to the database.
-    unit: "{connection}"
-    sum:
-      value_type: int
-      monotonic: false
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.connection.active:
-    enabled: true
-    description: Number of connections currently executing in the database engine.
-    unit: "{connection}"
-    sum:
-      value_type: int
-      monotonic: false
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.connection.max:
-    enabled: true
-    description: Highest number of simultaneous connections since the database was activated.
-    unit: "{connection}"
-    sum:
-      value_type: int
-      monotonic: false
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.lock.wait.count:
-    enabled: true
-    description: Total number of times an application waited for a lock.
-    unit: "{wait}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.lock.wait_time:
-    enabled: true
-    description: Total elapsed time in milliseconds spent waiting for locks.
-    unit: "ms"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.lock.timeout.count:
-    enabled: true
-    description: Number of times a request to lock an object timed out.
-    unit: "{timeout}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.lock.escalation.count:
-    enabled: true
-    description: Number of times a lock was escalated from row to table level.
-    unit: "{escalation}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.lock.space_used:
-    enabled: true
-    description: Total amount of lock list memory in use, in bytes.
-    unit: "By"
-    sum:
-      value_type: int
-      monotonic: false
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.deadlock.count:
-    enabled: true
-    description: Total number of deadlocks that have occurred.
-    unit: "{deadlock}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.sort.count:
-    enabled: true
-    description: Total number of sorts that have been executed.
-    unit: "{sort}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  db2.sort.overflow.count:
-    enabled: true
-    description: Total number of sorts that ran out of sort heap and required disk space.
-    unit: "{sort}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: []
-
-  # ── Buffer pool (MON_GET_BUFFERPOOL) ──────────────────────────────────────
-
   db2.buffer_pool.logical_reads:
-    enabled: true
+    attributes: [db.namespace, db2.bufferpool, db2.member, db2.read_type]
     description: Number of logical read requests for pages in the buffer pool.
-    unit: "{read}"
+    enabled: true
+    stability: development
     sum:
-      value_type: int
-      monotonic: true
       aggregation_temporality: cumulative
-    attributes: [db2.bufferpool, db2.read_type]
+      monotonic: true
+      value_type: int
+    unit: "{read}"
 
   db2.buffer_pool.physical_reads:
-    enabled: true
+    attributes: [db.namespace, db2.bufferpool, db2.member, db2.read_type]
     description: Number of physical read requests for pages from disk into the buffer pool.
-    unit: "{read}"
-    sum:
-      value_type: int
-      monotonic: true
-      aggregation_temporality: cumulative
-    attributes: [db2.bufferpool, db2.read_type]
-
-  db2.buffer_pool.writes:
     enabled: true
-    description: Number of times buffer pool pages were written to disk.
-    unit: "{write}"
+    stability: development
     sum:
-      value_type: int
-      monotonic: true
       aggregation_temporality: cumulative
-    attributes: [db2.bufferpool]
+      monotonic: true
+      value_type: int
+    unit: "{read}"
 
   db2.buffer_pool.read_time:
-    enabled: true
+    attributes: [db.namespace, db2.bufferpool, db2.member]
     description: Total elapsed time in milliseconds spent reading from disk into the buffer pool.
-    unit: "ms"
+    enabled: true
+    stability: development
     sum:
-      value_type: int
-      monotonic: true
       aggregation_temporality: cumulative
-    attributes: [db2.bufferpool]
+      monotonic: true
+      value_type: int
+    unit: "ms"
 
   db2.buffer_pool.write_time:
-    enabled: true
+    attributes: [db.namespace, db2.bufferpool, db2.member]
     description: Total elapsed time in milliseconds spent writing from the buffer pool to disk.
-    unit: "ms"
+    enabled: true
+    stability: development
     sum:
-      value_type: int
-      monotonic: true
       aggregation_temporality: cumulative
-    attributes: [db2.bufferpool]
+      monotonic: true
+      value_type: int
+    unit: "ms"
 
-  # ── Tablespace (MON_GET_TABLESPACE) ───────────────────────────────────────
+  db2.buffer_pool.writes:
+    attributes: [db.namespace, db2.bufferpool, db2.member]
+    description: Number of times buffer pool pages were written to disk (data + index + XDA).
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{write}"
+
+  db2.connection.active:
+    attributes: [db.namespace, db2.member]
+    description: Number of connections currently executing in the database engine.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{connection}"
+
+  db2.connection.count:
+    attributes: [db.namespace, db2.member]
+    description: Number of current connections to the database.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{connection}"
+
+  db2.connection.max:
+    attributes: [db.namespace, db2.member]
+    description: Highest number of simultaneous connections since the database was activated.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{connection}"
+
+  db2.deadlock.count:
+    attributes: [db.namespace, db2.member]
+    description: Total number of deadlocks that have occurred.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{deadlock}"
+
+  db2.lock.escalation.count:
+    attributes: [db.namespace, db2.member]
+    description: Number of times a lock was escalated from row to table level.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{escalation}"
+
+  db2.lock.space_used:
+    attributes: [db.namespace, db2.member]
+    description: Total amount of lock list memory in use, in bytes.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.lock.timeout.count:
+    attributes: [db.namespace, db2.member]
+    description: Number of times a request to lock an object timed out.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{timeout}"
+
+  db2.lock.wait.count:
+    attributes: [db.namespace, db2.member]
+    description: Total number of times an application waited for a lock.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{wait}"
+
+  db2.lock.wait_time:
+    attributes: [db.namespace, db2.member]
+    description: Total elapsed time in milliseconds spent waiting for locks.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "ms"
+
+  db2.sort.count:
+    attributes: [db.namespace, db2.member]
+    description: Total number of sorts that have been executed.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{sort}"
+
+  db2.sort.overflow.count:
+    attributes: [db.namespace, db2.member]
+    description: Total number of sorts that ran out of sort heap and required disk space.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{sort}"
 
   db2.tablespace.size:
-    enabled: true
+    attributes: [db.namespace, db2.member, db2.tablespace, db2.tablespace.state, db2.tablespace.type, db2.tablespace.usage]
     description: Size of the tablespace in bytes, broken down by usage.
-    unit: "By"
+    enabled: true
+    stability: development
     sum:
-      value_type: int
-      monotonic: false
       aggregation_temporality: cumulative
-    attributes: [db2.tablespace, db2.tablespace.type, db2.tablespace.state, db2.tablespace.usage]
+      monotonic: false
+      value_type: int
+    unit: "By"

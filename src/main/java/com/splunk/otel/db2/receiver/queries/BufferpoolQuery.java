@@ -19,7 +19,7 @@ public class BufferpoolQuery {
         "POOL_DATA_L_READS, POOL_DATA_P_READS, " +
         "POOL_INDEX_L_READS, POOL_INDEX_P_READS, " +
         "POOL_XDA_L_READS, POOL_XDA_P_READS, " +
-        "POOL_DATA_WRITES, POOL_INDEX_WRITES, " +
+        "POOL_DATA_WRITES, POOL_INDEX_WRITES, POOL_XDA_WRITES, " +
         "POOL_READ_TIME, POOL_WRITE_TIME " +
         "FROM TABLE(MON_GET_BUFFERPOOL(NULL, -2)) AS T";
 
@@ -68,33 +68,33 @@ public class BufferpoolQuery {
     }
 
     private void collect() {
-        try (Connection conn = connSupplier.get();
-             Statement st   = conn.createStatement();
-             ResultSet rs   = st.executeQuery(SQL)) {
+        Connection conn = connSupplier.get();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(SQL)) {
             while (rs.next()) {
                 String bpName = rs.getString("BP_NAME");
                 int    member = rs.getInt("MEMBER");
 
                 Attributes dataAttrs = Attributes.builder()
-                    .put("db.name",        dbName)
+                    .put("db.namespace",   dbName)
                     .put("db2.member",     member)
                     .put("db2.bufferpool", bpName)
                     .put("db2.read_type",  "data")
                     .build();
                 Attributes indexAttrs = Attributes.builder()
-                    .put("db.name",        dbName)
+                    .put("db.namespace",   dbName)
                     .put("db2.member",     member)
                     .put("db2.bufferpool", bpName)
                     .put("db2.read_type",  "index")
                     .build();
                 Attributes xdaAttrs = Attributes.builder()
-                    .put("db.name",        dbName)
+                    .put("db.namespace",   dbName)
                     .put("db2.member",     member)
                     .put("db2.bufferpool", bpName)
                     .put("db2.read_type",  "xda")
                     .build();
                 Attributes bpAttrs = Attributes.builder()
-                    .put("db.name",        dbName)
+                    .put("db.namespace",   dbName)
                     .put("db2.member",     member)
                     .put("db2.bufferpool", bpName)
                     .build();
@@ -107,8 +107,11 @@ public class BufferpoolQuery {
                 physicalReads.record(rs.getLong("POOL_INDEX_P_READS"), indexAttrs);
                 physicalReads.record(rs.getLong("POOL_XDA_P_READS"),   xdaAttrs);
 
-                writes   .record(rs.getLong("POOL_DATA_WRITES") + rs.getLong("POOL_INDEX_WRITES"), bpAttrs);
-                readTime .record(rs.getLong("POOL_READ_TIME"),  bpAttrs);
+                long totalWrites = rs.getLong("POOL_DATA_WRITES")
+                                 + rs.getLong("POOL_INDEX_WRITES")
+                                 + rs.getLong("POOL_XDA_WRITES");
+                writes   .record(totalWrites,                  bpAttrs);
+                readTime .record(rs.getLong("POOL_READ_TIME"), bpAttrs);
                 writeTime.record(rs.getLong("POOL_WRITE_TIME"), bpAttrs);
             }
         } catch (Exception e) {

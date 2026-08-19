@@ -14,11 +14,12 @@ import java.util.function.Supplier;
 public class DatabaseQuery {
     private static final Logger log = LoggerFactory.getLogger(DatabaseQuery.class);
 
+    // -2 = all active members (consistent with BufferpoolQuery / TablespaceQuery)
     private static final String SQL =
         "SELECT MEMBER, APPLS_CUR_CONS, APPLS_IN_DB2, CONNECTIONS_TOP, " +
         "LOCK_WAITS, LOCK_WAIT_TIME, DEADLOCKS, LOCK_TIMEOUTS, " +
         "LOCK_ESCALS, LOCK_LIST_IN_USE, TOTAL_SORTS, SORT_OVERFLOWS " +
-        "FROM TABLE(MON_GET_DATABASE(-1)) AS T";
+        "FROM TABLE(MON_GET_DATABASE(-2)) AS T";
 
     private final Supplier<Connection> connSupplier;
     private final String dbName;
@@ -106,13 +107,13 @@ public class DatabaseQuery {
     }
 
     private void collect() {
-        try (Connection conn = connSupplier.get();
-             Statement st   = conn.createStatement();
-             ResultSet rs   = st.executeQuery(SQL)) {
+        Connection conn = connSupplier.get();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(SQL)) {
             while (rs.next()) {
                 Attributes attrs = Attributes.builder()
-                    .put("db.name",    dbName)
-                    .put("db2.member", rs.getInt("MEMBER"))
+                    .put("db.namespace", dbName)
+                    .put("db2.member",   rs.getInt("MEMBER"))
                     .build();
                 currentConnections.record(rs.getLong("APPLS_CUR_CONS"),  attrs);
                 activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);

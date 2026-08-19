@@ -18,11 +18,5 @@ exporters:
   otlp:
     endpoint: "http://localhost:4317"
 
-service:
-  pipelines:
-    metrics:
-      receivers: [db2]
-      exporters: [otlp]
-    logs:
-      receivers: [db2]
-      exporters: [otlp]
+# Note: pipeline wiring (metrics + logs → otlp) is handled by Db2Pipeline directly.
+# There is no OTel Collector service block — this receiver runs as a standalone process.

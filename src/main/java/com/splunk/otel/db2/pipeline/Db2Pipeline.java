@@ -57,7 +57,7 @@ public class Db2Pipeline {
             AttributeKey.stringKey("service.instance.id"), rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase(),
             AttributeKey.stringKey("server.address"),      rc.getHost(),
             AttributeKey.longKey("server.port"),           (long) rc.getPort(),
-            AttributeKey.stringKey("db.system.name"),      "db2",
+            AttributeKey.stringKey("db.system.name"),      "ibm.db2",
             AttributeKey.stringKey("db.namespace"),        rc.getDatabase()
         )));
     }
