@@ -1,6 +1,8 @@
 package com.splunk.otel.db2.config;
 
+import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -32,7 +34,7 @@ public class Db2Config {
 
     @SuppressWarnings("unchecked")
     public static Db2Config load(String path) throws IOException {
-        Yaml yaml = new Yaml();
+        Yaml yaml = new Yaml(new SafeConstructor(new LoaderOptions()));
         try (InputStream is = new FileInputStream(path)) {
             Map<String, Object> root = yaml.load(is);
             Db2Config cfg = new Db2Config();

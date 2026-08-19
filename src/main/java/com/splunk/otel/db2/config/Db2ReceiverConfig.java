@@ -39,9 +39,9 @@ public class Db2ReceiverConfig {
     private static Duration parseDuration(String s, long defaultSeconds) {
         if (s == null) return Duration.ofSeconds(defaultSeconds);
         s = s.trim();
-        if (s.endsWith("s")) return Duration.ofSeconds(Long.parseLong(s.replace("s", "")));
-        if (s.endsWith("m")) return Duration.ofMinutes(Long.parseLong(s.replace("m", "")));
-        return Duration.ofSeconds(defaultSeconds);
+        if (s.endsWith("s")) return Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
+        if (s.endsWith("m")) return Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
+        throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s' or '5m'");
     }
 
     public int getTopQueryCount() { return topQueryCount; }
@@ -71,7 +71,10 @@ public class Db2ReceiverConfig {
         if (value.startsWith("${env:") && value.endsWith("}")) {
             String key = value.substring(6, value.length() - 1);
             String env = System.getenv(key);
-            return env != null ? env : value;
+            if (env == null) {
+                throw new IllegalStateException("Required environment variable '" + key + "' is not set");
+            }
+            return env;
         }
         return value;
     }

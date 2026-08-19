@@ -12,7 +12,7 @@ public class Db2Processor {
         // Drop internal OTel SDK metrics (not DB2 metrics)
         builder.registerView(
             InstrumentSelector.builder()
-                .setMeterName("io.opentelemetry.*")
+                .setMeterName("io.opentelemetry.sdk.metrics")
                 .build(),
             View.builder().setName("drop").build()
         );

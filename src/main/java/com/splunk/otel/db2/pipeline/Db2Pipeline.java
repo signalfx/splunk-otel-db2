@@ -79,7 +79,6 @@ public class Db2Pipeline {
     public void start() {
         receiver.start();
         log.info("DB2 pipeline started — metrics + logs → {}", "OTel Collector");
-        Runtime.getRuntime().addShutdownHook(new Thread(this::stop));
     }
 
     public void stop() {

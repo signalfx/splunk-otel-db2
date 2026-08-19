@@ -34,48 +34,34 @@ public class DatabaseQuery {
             AttributeKey.stringKey("db.name"), dbName
         );
 
-        meter.gaugeBuilder("db.db2.connections")
-            .ofLongs()
-            .setDescription("Number of active connections to the database")
-            .setUnit("{connections}")
-            .buildWithCallback(obs -> record(obs, attrs, "APPLS_CUR_CONS"));
+        ObservableLongMeasurement connections = meter.gaugeBuilder("db.db2.connections")
+            .ofLongs().setDescription("Number of active connections to the database").setUnit("{connections}").buildObserver();
+        ObservableLongMeasurement deadlocks = meter.gaugeBuilder("db.db2.deadlocks")
+            .ofLongs().setDescription("Total deadlocks detected").setUnit("{deadlocks}").buildObserver();
+        ObservableLongMeasurement lockWaits = meter.gaugeBuilder("db.db2.lock_waits")
+            .ofLongs().setDescription("Total lock waits").setUnit("{waits}").buildObserver();
+        ObservableLongMeasurement lockWaitTime = meter.gaugeBuilder("db.db2.lock_wait_time")
+            .ofLongs().setDescription("Total time spent waiting for locks in milliseconds").setUnit("ms").buildObserver();
+        ObservableLongMeasurement lockTimeouts = meter.gaugeBuilder("db.db2.lock_timeouts")
+            .ofLongs().setDescription("Total lock timeouts").setUnit("{timeouts}").buildObserver();
 
-        meter.gaugeBuilder("db.db2.deadlocks")
-            .ofLongs()
-            .setDescription("Total deadlocks detected")
-            .setUnit("{deadlocks}")
-            .buildWithCallback(obs -> record(obs, attrs, "DEADLOCKS"));
-
-        meter.gaugeBuilder("db.db2.lock_waits")
-            .ofLongs()
-            .setDescription("Total lock waits")
-            .setUnit("{waits}")
-            .buildWithCallback(obs -> record(obs, attrs, "LOCK_WAITS"));
-
-        meter.gaugeBuilder("db.db2.lock_wait_time")
-            .ofLongs()
-            .setDescription("Total time spent waiting for locks in milliseconds")
-            .setUnit("ms")
-            .buildWithCallback(obs -> record(obs, attrs, "LOCK_WAIT_TIME"));
-
-        meter.gaugeBuilder("db.db2.lock_timeouts")
-            .ofLongs()
-            .setDescription("Total lock timeouts")
-            .setUnit("{timeouts}")
-            .buildWithCallback(obs -> record(obs, attrs, "LOCK_TIMEOUTS"));
-    }
-
-    private void record(ObservableLongMeasurement obs, Attributes attrs, String column) {
-        try {
-            Connection conn = connSupplier.get();
-            try (PreparedStatement ps = conn.prepareStatement(SQL);
-                 ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    obs.record(rs.getLong(column), attrs);
+        // single DB round-trip for all five gauges
+        meter.batchCallback(() -> {
+            try {
+                Connection conn = connSupplier.get();
+                try (PreparedStatement ps = conn.prepareStatement(SQL);
+                     ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        connections.record(rs.getLong("APPLS_CUR_CONS"), attrs);
+                        deadlocks.record(rs.getLong("DEADLOCKS"), attrs);
+                        lockWaits.record(rs.getLong("LOCK_WAITS"), attrs);
+                        lockWaitTime.record(rs.getLong("LOCK_WAIT_TIME"), attrs);
+                        lockTimeouts.record(rs.getLong("LOCK_TIMEOUTS"), attrs);
+                    }
                 }
+            } catch (Exception e) {
+                log.error("Failed to query MON_GET_DATABASE: {}", e.getMessage());
             }
-        } catch (Exception e) {
-            log.error("Failed to query MON_GET_DATABASE for {}: {}", column, e.getMessage());
-        }
+        }, connections, deadlocks, lockWaits, lockWaitTime, lockTimeouts);
     }
 }

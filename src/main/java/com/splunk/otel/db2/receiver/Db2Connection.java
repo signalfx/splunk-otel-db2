@@ -22,14 +22,14 @@ public class Db2Connection {
         this.config = config;
     }
 
-    public Connection getOrConnect() throws SQLException {
-        if (connection == null || connection.isClosed()) {
+    public synchronized Connection getOrConnect() throws SQLException {
+        if (connection == null || !connection.isValid(2)) {
             connect();
         }
         return connection;
     }
 
-    private void connect() throws SQLException {
+    private synchronized void connect() throws SQLException {
         String url = String.format("jdbc:db2://%s:%d/%s",
             config.getHost(), config.getPort(), config.getDatabase());
         log.info("Connecting to DB2 at {}", url);
