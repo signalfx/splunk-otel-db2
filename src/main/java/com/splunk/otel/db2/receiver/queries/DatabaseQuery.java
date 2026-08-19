@@ -3,6 +3,7 @@ package com.splunk.otel.db2.receiver.queries;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.ObservableDoubleMeasurement;
 import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,7 +17,8 @@ public class DatabaseQuery {
     private static final Logger log = LoggerFactory.getLogger(DatabaseQuery.class);
 
     private static final String SQL =
-        "SELECT APPLS_CUR_CONS, DEADLOCKS, LOCK_WAITS, LOCK_WAIT_TIME, " +
+        "SELECT APPLS_CUR_CONS, DEADLOCKS, LOCK_WAITS, " +
+        "LOCK_WAIT_TIME / 1000.0 AS LOCK_WAIT_TIME_S, " +
         "LOCK_TIMEOUTS " +
         "FROM TABLE(MON_GET_DATABASE(-2)) AS T";
 
@@ -40,8 +42,8 @@ public class DatabaseQuery {
             .ofLongs().setDescription("Total deadlocks detected").setUnit("{deadlocks}").buildObserver();
         ObservableLongMeasurement lockWaits = meter.gaugeBuilder("db2.lock.wait.count")
             .ofLongs().setDescription("Total lock waits").setUnit("{waits}").buildObserver();
-        ObservableLongMeasurement lockWaitTime = meter.gaugeBuilder("db2.lock.wait_time.total")
-            .ofLongs().setDescription("Total time spent waiting for locks in milliseconds").setUnit("ms").buildObserver();
+        ObservableDoubleMeasurement lockWaitTime = meter.gaugeBuilder("db2.lock.wait_time.total")
+            .setDescription("Total time spent waiting for locks").setUnit("s").buildObserver();
         ObservableLongMeasurement lockTimeouts = meter.gaugeBuilder("db2.lock_timeout")
             .ofLongs().setDescription("Total lock timeouts").setUnit("{timeouts}").buildObserver();
 
@@ -55,7 +57,7 @@ public class DatabaseQuery {
                         connections.record(rs.getLong("APPLS_CUR_CONS"), attrs);
                         deadlocks.record(rs.getLong("DEADLOCKS"), attrs);
                         lockWaits.record(rs.getLong("LOCK_WAITS"), attrs);
-                        lockWaitTime.record(rs.getLong("LOCK_WAIT_TIME"), attrs);
+                        lockWaitTime.record(rs.getDouble("LOCK_WAIT_TIME_S"), attrs);
                         lockTimeouts.record(rs.getLong("LOCK_TIMEOUTS"), attrs);
                     }
                 }
