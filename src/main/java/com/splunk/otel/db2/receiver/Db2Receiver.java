@@ -79,7 +79,15 @@ public class Db2Receiver {
     }
 
     public void stop() {
+        stopScheduler();
+        closeConnection();
+    }
+
+    public void stopScheduler() {
         if (scheduler != null) scheduler.shutdownNow();
+    }
+
+    public void closeConnection() {
         db2Connection.close();
         log.info("DB2 receiver stopped");
     }

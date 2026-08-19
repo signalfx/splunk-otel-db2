@@ -87,9 +87,12 @@ public class Db2Pipeline {
     }
 
     public void stop() {
-        receiver.stop();
+        // Stop log scheduling first, then flush metrics (meterProvider.shutdown performs a final
+        // collection), and only then close the DB connection to avoid a dangling reconnect.
+        receiver.stopScheduler();
         meterProvider.shutdown();
         if (loggerProvider != null) loggerProvider.shutdown();
+        receiver.closeConnection();
         log.info("DB2 pipeline stopped");
     }
 }

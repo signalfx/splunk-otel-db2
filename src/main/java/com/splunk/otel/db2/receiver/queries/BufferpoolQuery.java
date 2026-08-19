@@ -68,51 +68,53 @@ public class BufferpoolQuery {
     }
 
     private void collect() {
-        Connection conn = connSupplier.get();
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(SQL)) {
-            while (rs.next()) {
-                String bpName = rs.getString("BP_NAME");
-                int    member = rs.getInt("MEMBER");
+        try {
+            Connection conn = connSupplier.get();
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(SQL)) {
+                while (rs.next()) {
+                    String bpName = rs.getString("BP_NAME");
+                    int    member = rs.getInt("MEMBER");
 
-                Attributes dataAttrs = Attributes.builder()
-                    .put("db.namespace",   dbName)
-                    .put("db2.member",     member)
-                    .put("db2.bufferpool", bpName)
-                    .put("db2.read_type",  "data")
-                    .build();
-                Attributes indexAttrs = Attributes.builder()
-                    .put("db.namespace",   dbName)
-                    .put("db2.member",     member)
-                    .put("db2.bufferpool", bpName)
-                    .put("db2.read_type",  "index")
-                    .build();
-                Attributes xdaAttrs = Attributes.builder()
-                    .put("db.namespace",   dbName)
-                    .put("db2.member",     member)
-                    .put("db2.bufferpool", bpName)
-                    .put("db2.read_type",  "xda")
-                    .build();
-                Attributes bpAttrs = Attributes.builder()
-                    .put("db.namespace",   dbName)
-                    .put("db2.member",     member)
-                    .put("db2.bufferpool", bpName)
-                    .build();
+                    Attributes dataAttrs = Attributes.builder()
+                        .put("db.namespace",   dbName)
+                        .put("db2.member",     member)
+                        .put("db2.bufferpool", bpName)
+                        .put("db2.read_type",  "data")
+                        .build();
+                    Attributes indexAttrs = Attributes.builder()
+                        .put("db.namespace",   dbName)
+                        .put("db2.member",     member)
+                        .put("db2.bufferpool", bpName)
+                        .put("db2.read_type",  "index")
+                        .build();
+                    Attributes xdaAttrs = Attributes.builder()
+                        .put("db.namespace",   dbName)
+                        .put("db2.member",     member)
+                        .put("db2.bufferpool", bpName)
+                        .put("db2.read_type",  "xda")
+                        .build();
+                    Attributes bpAttrs = Attributes.builder()
+                        .put("db.namespace",   dbName)
+                        .put("db2.member",     member)
+                        .put("db2.bufferpool", bpName)
+                        .build();
 
-                logicalReads .record(rs.getLong("POOL_DATA_L_READS"),  dataAttrs);
-                logicalReads .record(rs.getLong("POOL_INDEX_L_READS"), indexAttrs);
-                logicalReads .record(rs.getLong("POOL_XDA_L_READS"),   xdaAttrs);
+                    logicalReads .record(rs.getLong("POOL_DATA_L_READS"),  dataAttrs);
+                    logicalReads .record(rs.getLong("POOL_INDEX_L_READS"), indexAttrs);
+                    logicalReads .record(rs.getLong("POOL_XDA_L_READS"),   xdaAttrs);
 
-                physicalReads.record(rs.getLong("POOL_DATA_P_READS"),  dataAttrs);
-                physicalReads.record(rs.getLong("POOL_INDEX_P_READS"), indexAttrs);
-                physicalReads.record(rs.getLong("POOL_XDA_P_READS"),   xdaAttrs);
+                    physicalReads.record(rs.getLong("POOL_DATA_P_READS"),  dataAttrs);
+                    physicalReads.record(rs.getLong("POOL_INDEX_P_READS"), indexAttrs);
+                    physicalReads.record(rs.getLong("POOL_XDA_P_READS"),   xdaAttrs);
 
-                long totalWrites = rs.getLong("POOL_DATA_WRITES")
-                                 + rs.getLong("POOL_INDEX_WRITES")
-                                 + rs.getLong("POOL_XDA_WRITES");
-                writes   .record(totalWrites,                  bpAttrs);
-                readTime .record(rs.getLong("POOL_READ_TIME"), bpAttrs);
-                writeTime.record(rs.getLong("POOL_WRITE_TIME"), bpAttrs);
+                    long totalWrites = rs.getLong("POOL_DATA_WRITES")
+                                     + rs.getLong("POOL_INDEX_WRITES")
+                                     + rs.getLong("POOL_XDA_WRITES");
+                    writes   .record(totalWrites,                   bpAttrs);
+                    readTime .record(rs.getLong("POOL_READ_TIME"),  bpAttrs);
+                    writeTime.record(rs.getLong("POOL_WRITE_TIME"), bpAttrs);
+                }
             }
         } catch (Exception e) {
             log.warn("BufferpoolQuery collection failed: {}", e.getMessage());

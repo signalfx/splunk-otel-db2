@@ -107,25 +107,27 @@ public class DatabaseQuery {
     }
 
     private void collect() {
-        Connection conn = connSupplier.get();
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(SQL)) {
-            while (rs.next()) {
-                Attributes attrs = Attributes.builder()
-                    .put("db.namespace", dbName)
-                    .put("db2.member",   rs.getInt("MEMBER"))
-                    .build();
-                currentConnections.record(rs.getLong("APPLS_CUR_CONS"),  attrs);
-                activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);
-                maxConnections    .record(rs.getLong("CONNECTIONS_TOP"),  attrs);
-                lockWaits         .record(rs.getLong("LOCK_WAITS"),       attrs);
-                lockWaitTime      .record(rs.getLong("LOCK_WAIT_TIME"),   attrs);
-                deadlocks         .record(rs.getLong("DEADLOCKS"),        attrs);
-                lockTimeouts      .record(rs.getLong("LOCK_TIMEOUTS"),    attrs);
-                lockEscalations   .record(rs.getLong("LOCK_ESCALS"),      attrs);
-                lockListInUse     .record(rs.getLong("LOCK_LIST_IN_USE"), attrs);
-                totalSorts        .record(rs.getLong("TOTAL_SORTS"),      attrs);
-                sortOverflows     .record(rs.getLong("SORT_OVERFLOWS"),   attrs);
+        try {
+            Connection conn = connSupplier.get();
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(SQL)) {
+                while (rs.next()) {
+                    Attributes attrs = Attributes.builder()
+                        .put("db.namespace", dbName)
+                        .put("db2.member",   rs.getInt("MEMBER"))
+                        .build();
+                    currentConnections.record(rs.getLong("APPLS_CUR_CONS"),  attrs);
+                    activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);
+                    maxConnections    .record(rs.getLong("CONNECTIONS_TOP"),  attrs);
+                    lockWaits         .record(rs.getLong("LOCK_WAITS"),       attrs);
+                    lockWaitTime      .record(rs.getLong("LOCK_WAIT_TIME"),   attrs);
+                    deadlocks         .record(rs.getLong("DEADLOCKS"),        attrs);
+                    lockTimeouts      .record(rs.getLong("LOCK_TIMEOUTS"),    attrs);
+                    lockEscalations   .record(rs.getLong("LOCK_ESCALS"),      attrs);
+                    lockListInUse     .record(rs.getLong("LOCK_LIST_IN_USE"), attrs);
+                    totalSorts        .record(rs.getLong("TOTAL_SORTS"),      attrs);
+                    sortOverflows     .record(rs.getLong("SORT_OVERFLOWS"),   attrs);
+                }
             }
         } catch (Exception e) {
             log.warn("DatabaseQuery collection failed: {}", e.getMessage());

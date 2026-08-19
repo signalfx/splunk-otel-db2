@@ -1,6 +1,6 @@
 # splunk-otel-db2
 
-A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and query logs from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud.
+A standalone OpenTelemetry receiver for IBM Db2. Collects metrics from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud. Query log collection (top queries, active sessions) is planned for a future release.
 
 ## Requirements
 

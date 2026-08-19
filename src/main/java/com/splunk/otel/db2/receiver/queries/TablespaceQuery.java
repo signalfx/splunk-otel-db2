@@ -41,34 +41,36 @@ public class TablespaceQuery {
     }
 
     private void collect() {
-        Connection conn = connSupplier.get();
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(SQL)) {
-            while (rs.next()) {
-                String tbspName  = rs.getString("TBSP_NAME");
-                String tbspType  = rs.getString("TBSP_TYPE");
-                String tbspState = rs.getString("TBSP_STATE");
-                int    member    = rs.getInt("MEMBER");
-                long   pageSize  = rs.getLong("TBSP_PAGE_SIZE");
+        try {
+            Connection conn = connSupplier.get();
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(SQL)) {
+                while (rs.next()) {
+                    String tbspName  = rs.getString("TBSP_NAME");
+                    String tbspType  = rs.getString("TBSP_TYPE");
+                    String tbspState = rs.getString("TBSP_STATE");
+                    int    member    = rs.getInt("MEMBER");
+                    long   pageSize  = rs.getLong("TBSP_PAGE_SIZE");
 
-                long totalPages = rs.getLong("TBSP_TOTAL_PAGES");
-                long usedPages  = rs.getLong("TBSP_USED_PAGES");
-                long freePages  = rs.getLong("TBSP_FREE_PAGES");
+                    long totalPages = rs.getLong("TBSP_TOTAL_PAGES");
+                    long usedPages  = rs.getLong("TBSP_USED_PAGES");
+                    long freePages  = rs.getLong("TBSP_FREE_PAGES");
 
-                Attributes base = Attributes.builder()
-                    .put("db.namespace",         dbName)
-                    .put("db2.member",           member)
-                    .put("db2.tablespace",       tbspName)
-                    .put("db2.tablespace.type",  tbspType)
-                    .put("db2.tablespace.state", tbspState)
-                    .build();
+                    Attributes base = Attributes.builder()
+                        .put("db.namespace",         dbName)
+                        .put("db2.member",           member)
+                        .put("db2.tablespace",       tbspName)
+                        .put("db2.tablespace.type",  tbspType)
+                        .put("db2.tablespace.state", tbspState)
+                        .build();
 
-                tablespaceSize.record(totalPages * pageSize,
-                    Attributes.builder().putAll(base).put("db2.tablespace.usage", "capacity").build());
-                tablespaceSize.record(usedPages * pageSize,
-                    Attributes.builder().putAll(base).put("db2.tablespace.usage", "used").build());
-                tablespaceSize.record(freePages * pageSize,
-                    Attributes.builder().putAll(base).put("db2.tablespace.usage", "free").build());
+                    tablespaceSize.record(totalPages * pageSize,
+                        Attributes.builder().putAll(base).put("db2.tablespace.usage", "capacity").build());
+                    tablespaceSize.record(usedPages * pageSize,
+                        Attributes.builder().putAll(base).put("db2.tablespace.usage", "used").build());
+                    tablespaceSize.record(freePages * pageSize,
+                        Attributes.builder().putAll(base).put("db2.tablespace.usage", "free").build());
+                }
             }
         } catch (Exception e) {
             log.warn("TablespaceQuery collection failed: {}", e.getMessage());

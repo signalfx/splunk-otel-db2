@@ -59,6 +59,24 @@ class Db2ReceiverTest {
     }
 
     @Test
+    void connectionIsClosedAfterMeterShutdown() throws Exception {
+        // Verifies shutdown order: stopScheduler → meterProvider.shutdown → closeConnection.
+        // Connection.close() must be the final operation.
+        Db2Connection mockDb2Conn = Mockito.mock(Db2Connection.class);
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), mockDb2Conn);
+        receiver.start();
+
+        receiver.stopScheduler();
+        verify(mockDb2Conn, never()).close();
+
+        meterProvider.shutdown();
+        verify(mockDb2Conn, never()).close();
+
+        receiver.closeConnection();
+        verify(mockDb2Conn, Mockito.times(1)).close();
+    }
+
+    @Test
     void receiverConfigHasExpectedDatabase() {
         assertThat(config.getDatabase()).isEqualTo("TESTDB");
     }

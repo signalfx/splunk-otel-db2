@@ -72,7 +72,33 @@ public class Db2Config {
                 }
             }
 
+            validate(cfg);
             return cfg;
         }
+    }
+
+    private static void validate(Db2Config cfg) {
+        Db2ReceiverConfig rc = cfg.getReceivers().getDb2();
+        // Resolve env refs eagerly so missing variables fail at startup, not mid-collection.
+        String username = rc.getUsername();
+        String password = rc.getPassword();
+        String database = rc.getDatabase();
+        String hostname = rc.getHostname();
+
+        if (username == null || username.isEmpty())
+            throw new IllegalStateException("receivers.db2.username is required");
+        if (password == null || password.isEmpty())
+            throw new IllegalStateException("receivers.db2.password is required");
+        if (database == null || database.isEmpty())
+            throw new IllegalStateException("receivers.db2.database is required");
+        if (hostname == null || hostname.isEmpty())
+            throw new IllegalStateException("receivers.db2.hostname is required");
+        if (rc.getPort() <= 0 || rc.getPort() > 65535)
+            throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
+        rc.getCollectionIntervalDuration(); // triggers duration parse validation
+
+        String endpoint = cfg.getExporters().getOtlp().getEndpoint();
+        if (endpoint == null || endpoint.isBlank())
+            throw new IllegalStateException("exporters.otlp.endpoint is required");
     }
 }
