@@ -33,18 +33,20 @@ public final class SqlObfuscator {
         while (i < len) {
             char c = sql.charAt(i);
 
-            // -- line comment: strip entirely to prevent leaking sensitive data in comments
+            // -- line comment
             if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
                 int end = sql.indexOf('\n', i);
                 if (end == -1) end = len;
-                i = end; // discard comment content
+                out.append(sql, i, end);
+                i = end;
                 continue;
             }
 
-            // /* block comment */ (DB2 supports nested block comments): strip entirely
+            // /* block comment */ (DB2 supports nested block comments)
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
                 int end = indexOfBlockCommentEnd(sql, i + 2, 1);
-                i = end; // discard comment content
+                out.append(sql, i, end);
+                i = end;
                 continue;
             }
 
