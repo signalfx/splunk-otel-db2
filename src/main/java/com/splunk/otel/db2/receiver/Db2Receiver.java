@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
+import com.splunk.otel.db2.receiver.queries.TopQueryQuery;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
 import org.slf4j.LoggerFactory;
@@ -57,18 +58,16 @@ public class Db2Receiver {
         // metric queries will be registered here in subsequent PRs
 
         if (otelLogger != null) {
-            QuerySampleQuery querySample = new QuerySampleQuery(
-                connSupplier, config.getDatabase(), otelLogger,
-                config.getMaxQuerySampleCount(), config.isUseSnapshotMonitor()
-            );
+            TopQueryQuery    topQuery    = new TopQueryQuery(connSupplier, config.getDatabase(), otelLogger, config.getTopQueryCount());
+            QuerySampleQuery querySample = new QuerySampleQuery(connSupplier, config.getDatabase(), otelLogger, config.getMaxQuerySampleCount(), config.isUseSnapshotMonitor());
 
-            scheduler = Executors.newScheduledThreadPool(1, r -> {
+            scheduler = Executors.newScheduledThreadPool(2, r -> {
                 Thread t = new Thread(r, "db2-log-collector");
                 t.setDaemon(true);
                 return t;
             });
-            scheduler.scheduleAtFixedRate(querySample::collect, 0,
-                config.getQuerySampleIntervalDuration().getSeconds(), TimeUnit.SECONDS);
+            scheduler.scheduleAtFixedRate(topQuery::collect,    0, config.getTopQueryIntervalDuration().getSeconds(),    TimeUnit.SECONDS);
+            scheduler.scheduleAtFixedRate(querySample::collect, 0, config.getQuerySampleIntervalDuration().getSeconds(), TimeUnit.SECONDS);
         }
 
         log.info("DB2 receiver started");
