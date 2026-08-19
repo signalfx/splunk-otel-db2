@@ -3,14 +3,6 @@ plugins {
     id 'application'
 }
 
-def generatedSrcDir = "$buildDir/generated/sources/metrics/main/java"
-
-sourceSets {
-    main {
-        java { srcDir generatedSrcDir }
-    }
-}
-
 group = 'com.splunk.otel'
 version = '0.1.0'
 
@@ -58,29 +50,8 @@ dependencies {
     testImplementation 'org.awaitility:awaitility:4.2.1'
 }
 
-task generateMetrics(type: JavaExec) {
-    description = 'Generate Db2Metrics.java from metadata.yaml'
-    // MetricsGenerator lives in buildSrc — use its compiled output + buildSrc deps (snakeyaml)
-    classpath = files(
-        "$rootDir/buildSrc/build/classes/java/main",
-        "$rootDir/buildSrc/build/resources/main"
-    ) + fileTree("$rootDir/buildSrc/build/libs") + configurations.detachedConfiguration(
-        dependencies.create('org.yaml:snakeyaml:2.2')
-    )
-    mainClass = 'com.splunk.otel.db2.codegen.MetricsGenerator'
-    args = [
-        "$rootDir/metadata.yaml",
-        generatedSrcDir
-    ]
-    inputs.file "$rootDir/metadata.yaml"
-    outputs.dir generatedSrcDir
-}
-
-compileJava.dependsOn generateMetrics
-
 test {
     useJUnitPlatform()
-    // skip integration tests by default (need real DB2)
     excludes = ['**/*IntegrationTest*']
 }
 
