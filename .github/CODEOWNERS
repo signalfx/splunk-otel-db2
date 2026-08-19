@@ -1,0 +1,7 @@
+* @signalfx/splunk-otel-db2-maintainers @signalfx/gdi-data-collection
+
+.github/CODEOWNERS @signalfx/splunk-otel-db2-maintainers
+
+*.md    @signalfx/splunk-otel-db2-maintainers
+docs/   @signalfx/splunk-otel-db2-maintainers
+README* @signalfx/splunk-otel-db2-maintainers
