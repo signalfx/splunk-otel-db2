@@ -1,0 +1,28 @@
+receivers:
+  db2:
+    hostname: "localhost"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "SAMPLE"
+    collection_interval: "30s"
+    top_query_count: 250
+    max_query_sample_count: 1000
+    query_sample_interval: "10s"
+    top_query_interval: "60s"
+    use_snapshot_monitor: false
+    tls:
+      insecure: true
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+
+service:
+  pipelines:
+    metrics:
+      receivers: [db2]
+      exporters: [otlp]
+    logs:
+      receivers: [db2]
+      exporters: [otlp]
