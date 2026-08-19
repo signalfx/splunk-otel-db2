@@ -11,8 +11,12 @@ public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
-        String configPath = System.getProperty("config", "config/config.yaml");
-        if (args.length > 0) configPath = args[0];
+        if (args.length == 0) {
+            System.err.println("Usage: splunk-otel-db2 <config-file>");
+            System.err.println("Example: splunk-otel-db2 /etc/splunk-otel-db2/config.yaml");
+            System.exit(1);
+        }
+        String configPath = args[0];
 
         log.info("Loading config from {}", configPath);
         Db2Config config = Db2Config.load(configPath);

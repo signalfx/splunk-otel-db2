@@ -14,8 +14,8 @@ A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and query logs
 # Build
 make build
 
-# Configure
-cp config/config.yaml my-config.yaml
+# Configure — copy the example and fill in your values
+cp testdata/config.yaml my-config.yaml
 # Edit my-config.yaml with your DB2 host, credentials, and OTLP endpoint
 
 # Run
