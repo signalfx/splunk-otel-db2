@@ -156,7 +156,7 @@ class Db2ReceiverTest {
         when(rs.getString("TBSP_NAME")).thenReturn("USERSPACE1");
         when(rs.getString("TBSP_TYPE")).thenReturn("DMS");
         when(rs.getString("TBSP_STATE")).thenReturn("NORMAL");
-        when(rs.getLong("PAGE_SIZE")).thenReturn(4096L);
+        when(rs.getLong("TBSP_PAGE_SIZE")).thenReturn(4096L);
         when(rs.getLong("TBSP_TOTAL_PAGES")).thenReturn(1000L);
         when(rs.getLong("TBSP_USED_PAGES")).thenReturn(600L);
         when(rs.getLong("TBSP_FREE_PAGES")).thenReturn(400L);

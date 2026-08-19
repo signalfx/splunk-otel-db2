@@ -14,9 +14,9 @@ import java.util.function.Supplier;
 public class TablespaceQuery {
     private static final Logger log = LoggerFactory.getLogger(TablespaceQuery.class);
 
-    // PAGE_SIZE in bytes; *_TOTAL/USED/FREE_PAGES counts are in pages
+    // TBSP_PAGE_SIZE in bytes; *_TOTAL/USED/FREE_PAGES counts are in pages
     private static final String SQL =
-        "SELECT MEMBER, TBSP_NAME, TBSP_TYPE, TBSP_STATE, PAGE_SIZE, " +
+        "SELECT MEMBER, TBSP_NAME, TBSP_TYPE, TBSP_STATE, TBSP_PAGE_SIZE, " +
         "TBSP_TOTAL_PAGES, TBSP_USED_PAGES, TBSP_FREE_PAGES " +
         "FROM TABLE(MON_GET_TABLESPACE(NULL, -2)) AS T";
 
@@ -49,7 +49,7 @@ public class TablespaceQuery {
                 String tbspType  = rs.getString("TBSP_TYPE");
                 String tbspState = rs.getString("TBSP_STATE");
                 int    member    = rs.getInt("MEMBER");
-                long   pageSize  = rs.getLong("PAGE_SIZE");
+                long   pageSize  = rs.getLong("TBSP_PAGE_SIZE");
 
                 long totalPages = rs.getLong("TBSP_TOTAL_PAGES");
                 long usedPages  = rs.getLong("TBSP_USED_PAGES");
