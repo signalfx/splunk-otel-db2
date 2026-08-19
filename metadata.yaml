@@ -1,91 +1,154 @@
----
-# Single source of truth for all metrics emitted by splunk-otel-db2.
-# Run `./gradlew generateMetrics` to regenerate Db2Metrics.java from this file.
-#
-# instrument types:
-#   long_gauge         — sampled point-in-time value (can go up or down, not cumulative)
-#   double_gauge       — same but floating-point
-#   long_counter       — monotonically increasing cumulative total
-#   double_counter     — same but floating-point
-#   long_updown_counter — cumulative value that can increase or decrease
+type: db2
+display_name: IBM DB2 Receiver
+description: |
+  Collects metrics from IBM DB2 via JDBC using MON_GET_* table functions.
+  Supports DB2 11.5+ on Linux/UNIX/Windows single-member and pureScale topologies.
+
+status:
+  class: receiver
+  stability:
+    alpha: [metrics, logs]
+  distributions: [splunk]
+  codeowners:
+    active: [ssirothi]
+
+resource_attributes:
+  server.address:
+    description: Hostname or IP address of the DB2 server.
+    enabled: true
+    type: string
+  server.port:
+    description: TCP port of the DB2 server.
+    enabled: true
+    type: int
+  db.system.name:
+    description: Database system identifier. Always "db2".
+    enabled: true
+    type: string
+  db.namespace:
+    description: Name of the database.
+    enabled: true
+    type: string
+  service.instance.id:
+    description: Unique identifier of the DB2 instance (host:port/database).
+    enabled: true
+    type: string
 
 attributes:
   db.system.name:
+    description: Database system identifier.
     type: string
-    description: Database system identifier
-    value: db2
+    requirement_level: recommended
   db.namespace:
+    description: Name of the database.
     type: string
-    description: Database name
+    requirement_level: recommended
   db2.buffer_pool:
+    description: Buffer pool name.
     type: string
-    description: Buffer pool name
+    requirement_level: recommended
   db2.read_type:
+    description: Read type — logical reads from buffer pool or physical reads from disk.
     type: string
-    description: Read type (data or index)
+    requirement_level: recommended
     enum: [data, index]
   db2.member:
+    description: DB2 member number in a multi-member or pureScale topology.
     type: string
-    description: DB2 member number in a multi-member topology
+    requirement_level: opt_in
   db2.tablespace:
+    description: Tablespace name.
     type: string
-    description: Tablespace name
+    requirement_level: recommended
   db2.tablespace.state:
+    description: Tablespace size category.
     type: string
-    description: Tablespace allocation category
+    requirement_level: recommended
     enum: [used, free, capacity]
 
 metrics:
   db2.user.connection.count:
-    instrument: long_updown_counter
-    description: Number of active connections to the database
+    enabled: true
+    description: Number of currently active connections to the database.
     unit: "{connections}"
+    sum:
+      value_type: int
+      monotonic: false
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace]
 
   db2.deadlocks:
-    instrument: long_counter
-    description: Total deadlocks detected since DB2 startup
+    enabled: true
+    description: Total deadlocks detected since DB2 startup.
     unit: "{deadlocks}"
+    sum:
+      value_type: int
+      monotonic: true
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace]
 
   db2.lock.waits:
-    instrument: long_counter
-    description: Total lock waits since DB2 startup
+    enabled: true
+    description: Total lock waits since DB2 startup.
     unit: "{waits}"
+    sum:
+      value_type: int
+      monotonic: true
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace]
 
   db2.lock.wait.time:
-    instrument: double_counter
-    description: Total time spent waiting for locks since DB2 startup
+    enabled: true
+    description: Total time spent waiting for locks since DB2 startup.
     unit: s
+    sum:
+      value_type: double
+      monotonic: true
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace]
 
   db2.lock.timeouts:
-    instrument: long_counter
-    description: Total lock timeouts since DB2 startup
+    enabled: true
+    description: Total lock timeouts since DB2 startup.
     unit: "{timeouts}"
+    sum:
+      value_type: int
+      monotonic: true
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace]
 
   db2.buffer_pool.hit_ratio:
-    instrument: double_gauge
-    description: Buffer pool hit ratio percentage
+    enabled: true
+    description: Buffer pool hit ratio percentage.
     unit: "%"
+    gauge:
+      value_type: double
     attributes: [db.system.name, db.namespace, db2.buffer_pool, db2.member]
 
   db2.buffer_pool.reads:
-    instrument: long_counter
-    description: Buffer pool logical reads
+    enabled: true
+    description: Buffer pool logical reads since DB2 startup.
     unit: "{reads}"
+    sum:
+      value_type: int
+      monotonic: true
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace, db2.buffer_pool, db2.member, db2.read_type]
 
   db2.buffer_pool.physical_reads:
-    instrument: long_counter
-    description: Buffer pool physical reads
+    enabled: true
+    description: Buffer pool physical disk reads since DB2 startup.
     unit: "{reads}"
+    sum:
+      value_type: int
+      monotonic: true
+      aggregation_temporality: cumulative
     attributes: [db.system.name, db.namespace, db2.buffer_pool, db2.member, db2.read_type]
 
   db2.tablespace.size:
-    instrument: long_gauge
-    description: Tablespace size in bytes
+    enabled: true
+    description: Tablespace size in bytes.
     unit: By
+    gauge:
+      value_type: int
     attributes: [db.system.name, db.namespace, db2.tablespace, db2.member, db2.tablespace.state]
