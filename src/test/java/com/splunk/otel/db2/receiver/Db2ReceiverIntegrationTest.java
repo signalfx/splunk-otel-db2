@@ -16,8 +16,15 @@ import org.testcontainers.containers.Db2Container;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -25,7 +32,9 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Integration test — spins up a real DB2 container via Testcontainers.
+ * Integration test — spins up a real DB2 container via Testcontainers,
+ * seeds it with a schema + data, runs read/write load, then asserts
+ * that the receiver emits correct metrics with real non-zero values.
  *
  * Run with: ./gradlew integrationTest
  * Skipped by default in ./gradlew build (requires Docker).
@@ -42,12 +51,19 @@ class Db2ReceiverIntegrationTest {
         .withDatabaseName("testdb")
         .withStartupTimeout(Duration.ofMinutes(10));
 
+    private static final int ROW_COUNT   = 5_000;
+    private static final int READ_PASSES = 20;
+
     private InMemoryMetricExporter exporter;
-    private SdkMeterProvider meterProvider;
-    private Db2Receiver receiver;
+    private SdkMeterProvider       meterProvider;
+    private Db2Receiver            receiver;
+
+    // ── lifecycle ──────────────────────────────────────────────────────────────
 
     @BeforeAll
-    void setUp() {
+    void setUp() throws Exception {
+        seedDatabase();
+
         exporter = InMemoryMetricExporter.create();
         meterProvider = SdkMeterProvider.builder()
             .registerMetricReader(
@@ -70,9 +86,11 @@ class Db2ReceiverIntegrationTest {
 
     @AfterAll
     void tearDown() {
-        if (receiver != null) receiver.stop();
+        if (receiver    != null) receiver.stop();
         if (meterProvider != null) meterProvider.shutdown();
     }
+
+    // ── tests ──────────────────────────────────────────────────────────────────
 
     @Test
     void allExpectedMetricsAreEmitted() {
@@ -100,63 +118,115 @@ class Db2ReceiverIntegrationTest {
     }
 
     @Test
-    void metricsCarryDbNamespaceAttribute() {
+    void connectionCountIsAtLeastOne() {
+        // seeding + receiver open at least 2 connections
         Awaitility.await()
             .atMost(Duration.ofSeconds(30))
             .pollInterval(Duration.ofSeconds(2))
             .untilAsserted(() -> {
-                List<MetricData> items = exporter.getFinishedMetricItems();
-                assertThat(items).isNotEmpty();
-
-                for (MetricData metric : items) {
-                    Stream<? extends PointData> points = allPoints(metric);
-                    points.forEach(point -> {
-                        String ns = point.getAttributes().get(AttributeKey.stringKey("db.namespace"));
-                        assertThat(ns)
-                            .as("db.namespace on %s", metric.getName())
-                            .isNotNull()
-                            .isNotBlank();
-                    });
-                }
+                MetricData m = requireMetric("db2.user.connection.count");
+                m.getLongSumData().getPoints().forEach(p ->
+                    assertThat(p.getValue())
+                        .as("connection count should be >= 1")
+                        .isGreaterThanOrEqualTo(1L)
+                );
             });
     }
 
     @Test
-    void bufferPoolMetricsHaveBufferPoolAttribute() {
+    void bufferPoolReadsAreNonZeroAfterLoad() {
+        // ROW_COUNT rows were read READ_PASSES times in seedDatabase() — logical reads must be > 0
         Awaitility.await()
             .atMost(Duration.ofSeconds(30))
             .pollInterval(Duration.ofSeconds(2))
             .untilAsserted(() -> {
-                List<MetricData> items = exporter.getFinishedMetricItems();
-                MetricData reads = items.stream()
-                    .filter(m -> m.getName().equals("db2.buffer_pool.reads"))
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("db2.buffer_pool.reads not found"));
-
-                allPoints(reads).forEach(point -> {
-                    assertThat(point.getAttributes().get(AttributeKey.stringKey("db2.buffer_pool")))
-                        .as("db2.buffer_pool attribute")
-                        .isNotNull();
-                    assertThat(point.getAttributes().get(AttributeKey.stringKey("db2.read_type")))
-                        .as("db2.read_type attribute")
-                        .isIn("data", "index");
-                });
+                MetricData m = requireMetric("db2.buffer_pool.reads");
+                long totalReads = longSumPoints(m).mapToLong(p -> p.getValue()).sum();
+                assertThat(totalReads)
+                    .as("buffer pool logical reads should be > 0 after load")
+                    .isGreaterThan(0L);
             });
     }
 
     @Test
-    void tablespaceMetricsHaveStateAttribute() {
+    void bufferPoolHitRatioIsBetweenZeroAndHundred() {
         Awaitility.await()
             .atMost(Duration.ofSeconds(30))
             .pollInterval(Duration.ofSeconds(2))
             .untilAsserted(() -> {
-                List<MetricData> items = exporter.getFinishedMetricItems();
-                MetricData size = items.stream()
-                    .filter(m -> m.getName().equals("db2.tablespace.size"))
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("db2.tablespace.size not found"));
+                MetricData m = requireMetric("db2.buffer_pool.hit_ratio");
+                m.getDoubleGaugeData().getPoints().forEach(p ->
+                    assertThat(p.getValue())
+                        .as("hit ratio should be 0–100")
+                        .isBetween(0.0, 100.0)
+                );
+            });
+    }
 
-                Set<String> states = allPoints(size)
+    @Test
+    void tablespaceUsedIsGreaterThanZero() {
+        // inserted ROW_COUNT rows — tablespace.used must be > 0
+        Awaitility.await()
+            .atMost(Duration.ofSeconds(30))
+            .pollInterval(Duration.ofSeconds(2))
+            .untilAsserted(() -> {
+                MetricData m = requireMetric("db2.tablespace.size");
+                long usedBytes = longGaugePoints(m)
+                    .filter(p -> "used".equals(p.getAttributes().get(AttributeKey.stringKey("db2.tablespace.state"))))
+                    .mapToLong(p -> p.getValue())
+                    .sum();
+                assertThat(usedBytes)
+                    .as("tablespace used bytes should be > 0 after row inserts")
+                    .isGreaterThan(0L);
+            });
+    }
+
+    @Test
+    void tablespaceCapacityExceedsUsed() {
+        Awaitility.await()
+            .atMost(Duration.ofSeconds(30))
+            .pollInterval(Duration.ofSeconds(2))
+            .untilAsserted(() -> {
+                MetricData m = requireMetric("db2.tablespace.size");
+                AttributeKey<String> stateKey = AttributeKey.stringKey("db2.tablespace.state");
+
+                long used     = longGaugePoints(m).filter(p -> "used"    .equals(p.getAttributes().get(stateKey))).mapToLong(p -> p.getValue()).sum();
+                long capacity = longGaugePoints(m).filter(p -> "capacity".equals(p.getAttributes().get(stateKey))).mapToLong(p -> p.getValue()).sum();
+
+                assertThat(capacity)
+                    .as("tablespace capacity should be >= used")
+                    .isGreaterThanOrEqualTo(used);
+            });
+    }
+
+    @Test
+    void bufferPoolMetricsHaveCorrectDimensionAttributes() {
+        Awaitility.await()
+            .atMost(Duration.ofSeconds(30))
+            .pollInterval(Duration.ofSeconds(2))
+            .untilAsserted(() -> {
+                MetricData reads = requireMetric("db2.buffer_pool.reads");
+                Set<String> readTypes = longSumPoints(reads)
+                    .map(p -> p.getAttributes().get(AttributeKey.stringKey("db2.read_type")))
+                    .collect(Collectors.toSet());
+                assertThat(readTypes).containsAll(Set.of("data", "index"));
+
+                allPoints(reads).forEach(p ->
+                    assertThat(p.getAttributes().get(AttributeKey.stringKey("db2.buffer_pool")))
+                        .as("db2.buffer_pool attribute must be present")
+                        .isNotNull()
+                );
+            });
+    }
+
+    @Test
+    void tablespaceStateHasAllThreeCategories() {
+        Awaitility.await()
+            .atMost(Duration.ofSeconds(30))
+            .pollInterval(Duration.ofSeconds(2))
+            .untilAsserted(() -> {
+                MetricData m = requireMetric("db2.tablespace.size");
+                Set<String> states = longGaugePoints(m)
                     .map(p -> p.getAttributes().get(AttributeKey.stringKey("db2.tablespace.state")))
                     .collect(Collectors.toSet());
                 assertThat(states).containsAll(Set.of("used", "free", "capacity"));
@@ -164,32 +234,124 @@ class Db2ReceiverIntegrationTest {
     }
 
     @Test
-    void connectionCountIsNonNegative() {
+    void allMetricsCarryDbNamespaceAttribute() {
         Awaitility.await()
             .atMost(Duration.ofSeconds(30))
             .pollInterval(Duration.ofSeconds(2))
             .untilAsserted(() -> {
                 List<MetricData> items = exporter.getFinishedMetricItems();
-                MetricData connections = items.stream()
-                    .filter(m -> m.getName().equals("db2.user.connection.count"))
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("db2.user.connection.count not found"));
-
-                connections.getLongSumData().getPoints().forEach(point ->
-                    assertThat(point.getValue()).isGreaterThanOrEqualTo(1L) // at least our own connection
-                );
+                assertThat(items).isNotEmpty();
+                for (MetricData metric : items) {
+                    allPoints(metric).forEach(point ->
+                        assertThat(point.getAttributes().get(AttributeKey.stringKey("db.namespace")))
+                            .as("db.namespace on %s", metric.getName())
+                            .isNotNull().isNotBlank()
+                    );
+                }
             });
     }
 
-    private static Stream<? extends PointData> allPoints(MetricData metric) {
-        switch (metric.getType()) {
-            case LONG_SUM:         return metric.getLongSumData().getPoints().stream();
-            case DOUBLE_SUM:       return metric.getDoubleSumData().getPoints().stream();
-            case LONG_GAUGE:       return metric.getLongGaugeData().getPoints().stream();
-            case DOUBLE_GAUGE:     return metric.getDoubleGaugeData().getPoints().stream();
-            case HISTOGRAM:        return metric.getHistogramData().getPoints().stream();
-            case EXPONENTIAL_HISTOGRAM: return metric.getExponentialHistogramData().getPoints().stream();
-            default:               return Stream.empty();
+    // ── seed ───────────────────────────────────────────────────────────────────
+
+    /**
+     * Creates a test schema + table, inserts ROW_COUNT rows, then runs
+     * full-table scans READ_PASSES times to drive buffer pool logical reads
+     * to a measurable value.
+     */
+    private void seedDatabase() throws Exception {
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        try (Connection conn = DriverManager.getConnection(db2.getJdbcUrl(), props)) {
+            conn.setAutoCommit(false);
+
+            try (Statement st = conn.createStatement()) {
+                // schema
+                st.execute(
+                    "CREATE TABLE IF NOT EXISTS DB2INST1.SPLUNK_LOAD_TEST (" +
+                    "  ID         INTEGER NOT NULL," +
+                    "  CATEGORY   VARCHAR(32)," +
+                    "  VALUE      DECIMAL(15,2)," +
+                    "  CREATED_AT TIMESTAMP DEFAULT CURRENT TIMESTAMP," +
+                    "  PRIMARY KEY (ID)" +
+                    ")"
+                );
+                conn.commit();
+            }
+
+            // insert ROW_COUNT rows in batches of 500
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO DB2INST1.SPLUNK_LOAD_TEST (ID, CATEGORY, VALUE) VALUES (?, ?, ?)")) {
+                int batch = 0;
+                for (int i = 1; i <= ROW_COUNT; i++) {
+                    ps.setInt(1, i);
+                    ps.setString(2, "category_" + (i % 10));
+                    ps.setBigDecimal(3, new java.math.BigDecimal(i * 1.5));
+                    ps.addBatch();
+                    if (++batch == 500) {
+                        ps.executeBatch();
+                        conn.commit();
+                        batch = 0;
+                    }
+                }
+                if (batch > 0) { ps.executeBatch(); conn.commit(); }
+            }
+
+            // full-table scans + aggregations to drive buffer pool reads
+            for (int pass = 0; pass < READ_PASSES; pass++) {
+                try (Statement st = conn.createStatement()) {
+                    // full scan
+                    try (ResultSet rs = st.executeQuery(
+                            "SELECT COUNT(*), SUM(VALUE), MAX(VALUE) FROM DB2INST1.SPLUNK_LOAD_TEST")) {
+                        rs.next();
+                    }
+                    // category group-by — forces index + data reads
+                    try (ResultSet rs = st.executeQuery(
+                            "SELECT CATEGORY, COUNT(*), AVG(VALUE) " +
+                            "FROM DB2INST1.SPLUNK_LOAD_TEST " +
+                            "GROUP BY CATEGORY ORDER BY CATEGORY")) {
+                        while (rs.next()) { /* drain */ }
+                    }
+                    // range scan
+                    try (ResultSet rs = st.executeQuery(
+                            "SELECT ID, VALUE FROM DB2INST1.SPLUNK_LOAD_TEST " +
+                            "WHERE ID BETWEEN 1 AND " + (ROW_COUNT / 2))) {
+                        while (rs.next()) { /* drain */ }
+                    }
+                }
+            }
+            conn.commit();
         }
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    private MetricData requireMetric(String name) {
+        return exporter.getFinishedMetricItems().stream()
+            .filter(m -> m.getName().equals(name))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(name + " not found in exported metrics"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Stream<? extends PointData> allPoints(MetricData metric) {
+        switch (metric.getType()) {
+            case LONG_SUM:               return metric.getLongSumData().getPoints().stream();
+            case DOUBLE_SUM:             return metric.getDoubleSumData().getPoints().stream();
+            case LONG_GAUGE:             return metric.getLongGaugeData().getPoints().stream();
+            case DOUBLE_GAUGE:           return metric.getDoubleGaugeData().getPoints().stream();
+            case HISTOGRAM:              return metric.getHistogramData().getPoints().stream();
+            case EXPONENTIAL_HISTOGRAM:  return metric.getExponentialHistogramData().getPoints().stream();
+            default:                     return Stream.empty();
+        }
+    }
+
+    private Stream<io.opentelemetry.sdk.metrics.data.LongPointData> longSumPoints(MetricData m) {
+        return m.getLongSumData().getPoints().stream();
+    }
+
+    private Stream<io.opentelemetry.sdk.metrics.data.LongPointData> longGaugePoints(MetricData m) {
+        return m.getLongGaugeData().getPoints().stream();
     }
 }
