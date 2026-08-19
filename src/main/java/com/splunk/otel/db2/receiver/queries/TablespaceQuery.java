@@ -30,14 +30,10 @@ public class TablespaceQuery {
     }
 
     public void register(Meter meter) {
-        ObservableLongMeasurement used = meter.gaugeBuilder("db2.tablespace.used")
-            .ofLongs().setDescription("Tablespace used bytes").setUnit("By").buildObserver();
-        ObservableLongMeasurement free = meter.gaugeBuilder("db2.tablespace.free")
-            .ofLongs().setDescription("Tablespace free bytes").setUnit("By").buildObserver();
-        ObservableLongMeasurement total = meter.gaugeBuilder("db2.tablespace.total")
-            .ofLongs().setDescription("Tablespace total bytes").setUnit("By").buildObserver();
+        ObservableLongMeasurement size = meter.gaugeBuilder("db2.tablespace.size")
+            .ofLongs().setDescription("Tablespace size in bytes").setUnit("By").buildObserver();
 
-        // single DB round-trip for all three tablespace gauges
+        // single DB round-trip; db2.tablespace.state=used|free|capacity differentiates size dimensions
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();
@@ -45,19 +41,32 @@ public class TablespaceQuery {
                      ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         String tsName = rs.getString("TBSP_NAME").trim();
-                        Attributes attrs = Attributes.of(
+                        Attributes usedAttrs = Attributes.of(
                             AttributeKey.stringKey("db.system.name"), "db2",
                             AttributeKey.stringKey("db.namespace"), dbName,
-                            AttributeKey.stringKey("db2.tablespace"), tsName
+                            AttributeKey.stringKey("db2.tablespace"), tsName,
+                            AttributeKey.stringKey("db2.tablespace.state"), "used"
                         );
-                        used.record(rs.getLong("USED_BYTES"), attrs);
-                        free.record(rs.getLong("FREE_BYTES"), attrs);
-                        total.record(rs.getLong("TOTAL_BYTES"), attrs);
+                        Attributes freeAttrs = Attributes.of(
+                            AttributeKey.stringKey("db.system.name"), "db2",
+                            AttributeKey.stringKey("db.namespace"), dbName,
+                            AttributeKey.stringKey("db2.tablespace"), tsName,
+                            AttributeKey.stringKey("db2.tablespace.state"), "free"
+                        );
+                        Attributes capacityAttrs = Attributes.of(
+                            AttributeKey.stringKey("db.system.name"), "db2",
+                            AttributeKey.stringKey("db.namespace"), dbName,
+                            AttributeKey.stringKey("db2.tablespace"), tsName,
+                            AttributeKey.stringKey("db2.tablespace.state"), "capacity"
+                        );
+                        size.record(rs.getLong("USED_BYTES"), usedAttrs);
+                        size.record(rs.getLong("FREE_BYTES"), freeAttrs);
+                        size.record(rs.getLong("TOTAL_BYTES"), capacityAttrs);
                     }
                 }
             } catch (Exception e) {
                 log.error("Failed to query MON_GET_TABLESPACE: {}", e.getMessage());
             }
-        }, used, free, total);
+        }, size);
     }
 }

@@ -37,16 +37,12 @@ public class BufferpoolQuery {
     public void register(Meter meter) {
         ObservableDoubleMeasurement hitRatio = meter.gaugeBuilder("db2.buffer_pool.hit_ratio")
             .setDescription("Buffer pool hit ratio percentage").setUnit("%").buildObserver();
-        ObservableLongMeasurement dataReads = meter.gaugeBuilder("db2.buffer_pool.data_reads")
-            .ofLongs().setDescription("Buffer pool data logical reads").setUnit("{reads}").buildObserver();
-        ObservableLongMeasurement indexReads = meter.gaugeBuilder("db2.buffer_pool.index_reads")
-            .ofLongs().setDescription("Buffer pool index logical reads").setUnit("{reads}").buildObserver();
-        ObservableLongMeasurement dataPhysReads = meter.gaugeBuilder("db2.buffer_pool.data_physical_reads")
-            .ofLongs().setDescription("Buffer pool data physical reads").setUnit("{reads}").buildObserver();
-        ObservableLongMeasurement indexPhysReads = meter.gaugeBuilder("db2.buffer_pool.index_physical_reads")
-            .ofLongs().setDescription("Buffer pool index physical reads").setUnit("{reads}").buildObserver();
+        ObservableLongMeasurement reads = meter.gaugeBuilder("db2.buffer_pool.reads")
+            .ofLongs().setDescription("Buffer pool logical reads").setUnit("{reads}").buildObserver();
+        ObservableLongMeasurement physicalReads = meter.gaugeBuilder("db2.buffer_pool.physical_reads")
+            .ofLongs().setDescription("Buffer pool physical reads").setUnit("{reads}").buildObserver();
 
-        // single DB round-trip for all five buffer pool gauges
+        // single DB round-trip; db2.read_type=data|index differentiates logical and physical read dimensions
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();
@@ -54,21 +50,33 @@ public class BufferpoolQuery {
                      ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         String bpName = rs.getString("BP_NAME").trim();
-                        Attributes attrs = Attributes.of(
+                        Attributes baseAttrs = Attributes.of(
                             AttributeKey.stringKey("db.system.name"), "db2",
                             AttributeKey.stringKey("db.namespace"), dbName,
                             AttributeKey.stringKey("db2.buffer_pool"), bpName
                         );
-                        hitRatio.record(rs.getDouble("HIT_RATIO"), attrs);
-                        dataReads.record(rs.getLong("POOL_DATA_L_READS"), attrs);
-                        indexReads.record(rs.getLong("POOL_INDEX_L_READS"), attrs);
-                        dataPhysReads.record(rs.getLong("POOL_DATA_P_READS"), attrs);
-                        indexPhysReads.record(rs.getLong("POOL_INDEX_P_READS"), attrs);
+                        Attributes dataAttrs = Attributes.of(
+                            AttributeKey.stringKey("db.system.name"), "db2",
+                            AttributeKey.stringKey("db.namespace"), dbName,
+                            AttributeKey.stringKey("db2.buffer_pool"), bpName,
+                            AttributeKey.stringKey("db2.read_type"), "data"
+                        );
+                        Attributes indexAttrs = Attributes.of(
+                            AttributeKey.stringKey("db.system.name"), "db2",
+                            AttributeKey.stringKey("db.namespace"), dbName,
+                            AttributeKey.stringKey("db2.buffer_pool"), bpName,
+                            AttributeKey.stringKey("db2.read_type"), "index"
+                        );
+                        hitRatio.record(rs.getDouble("HIT_RATIO"), baseAttrs);
+                        reads.record(rs.getLong("POOL_DATA_L_READS"), dataAttrs);
+                        reads.record(rs.getLong("POOL_INDEX_L_READS"), indexAttrs);
+                        physicalReads.record(rs.getLong("POOL_DATA_P_READS"), dataAttrs);
+                        physicalReads.record(rs.getLong("POOL_INDEX_P_READS"), indexAttrs);
                     }
                 }
             } catch (Exception e) {
                 log.error("Failed to query MON_GET_BUFFERPOOL: {}", e.getMessage());
             }
-        }, hitRatio, dataReads, indexReads, dataPhysReads, indexPhysReads);
+        }, hitRatio, reads, physicalReads);
     }
 }

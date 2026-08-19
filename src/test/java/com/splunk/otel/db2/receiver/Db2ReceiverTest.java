@@ -84,13 +84,9 @@ class Db2ReceiverTest {
                 "db2.lock.wait.time",
                 "db2.lock.timeouts",
                 "db2.buffer_pool.hit_ratio",
-                "db2.buffer_pool.data_reads",
-                "db2.buffer_pool.index_reads",
-                "db2.buffer_pool.data_physical_reads",
-                "db2.buffer_pool.index_physical_reads",
-                "db2.tablespace.used",
-                "db2.tablespace.free",
-                "db2.tablespace.total"
+                "db2.buffer_pool.reads",
+                "db2.buffer_pool.physical_reads",
+                "db2.tablespace.size"
             );
         });
     }
@@ -126,13 +122,9 @@ class Db2ReceiverTest {
             "db2.lock.wait.time",
             "db2.lock.timeouts",
             "db2.buffer_pool.hit_ratio",
-            "db2.buffer_pool.data_reads",
-            "db2.buffer_pool.index_reads",
-            "db2.buffer_pool.data_physical_reads",
-            "db2.buffer_pool.index_physical_reads",
-            "db2.tablespace.used",
-            "db2.tablespace.free",
-            "db2.tablespace.total"
+            "db2.buffer_pool.reads",
+            "db2.buffer_pool.physical_reads",
+            "db2.tablespace.size"
         );
         assertThat(metricNames).allSatisfy(name ->
             assertThat(name).startsWith("db2.")
