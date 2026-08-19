@@ -1,6 +1,7 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.data.MetricData;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
@@ -84,6 +85,7 @@ class Db2ReceiverTest {
                 "db2.lock_timeout",
                 "db2.buffer_pool.hit_ratio",
                 "db2.buffer_pool.data_reads",
+                "db2.buffer_pool.index_reads",
                 "db2.tablespace.used",
                 "db2.tablespace.free"
             );
@@ -107,7 +109,7 @@ class Db2ReceiverTest {
 
             assertThat(connections.getLongGaugeData().getPoints()).isNotEmpty();
             connections.getLongGaugeData().getPoints().forEach(point ->
-                assertThat(point.getAttributes().asMap().toString()).contains("TESTDB")
+                assertThat(point.getAttributes().get(AttributeKey.stringKey("db.namespace"))).isEqualTo("TESTDB")
             );
         });
     }
@@ -122,6 +124,7 @@ class Db2ReceiverTest {
             "db2.lock_timeout",
             "db2.buffer_pool.hit_ratio",
             "db2.buffer_pool.data_reads",
+            "db2.buffer_pool.index_reads",
             "db2.tablespace.used",
             "db2.tablespace.free"
         );

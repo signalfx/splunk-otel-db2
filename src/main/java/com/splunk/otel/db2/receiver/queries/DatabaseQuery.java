@@ -30,8 +30,8 @@ public class DatabaseQuery {
 
     public void register(Meter meter) {
         Attributes attrs = Attributes.of(
-            AttributeKey.stringKey("db.system"), "db2",
-            AttributeKey.stringKey("db.name"), dbName
+            AttributeKey.stringKey("db.system.name"), "db2",
+            AttributeKey.stringKey("db.namespace"), dbName
         );
 
         ObservableLongMeasurement connections = meter.gaugeBuilder("db2.user.connection.count")

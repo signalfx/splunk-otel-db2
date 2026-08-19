@@ -51,9 +51,9 @@ public class Db2Pipeline {
 
     private Resource buildResource(Db2Config config) {
         return Resource.create(Attributes.of(
-            AttributeKey.stringKey("service.name"), "splunk-otel-db2",
-            AttributeKey.stringKey("db.system"),    "db2",
-            AttributeKey.stringKey("db.name"),      config.getReceivers().getDb2().getDatabase()
+            AttributeKey.stringKey("service.name"),   "splunk-otel-db2",
+            AttributeKey.stringKey("db.system.name"), "db2",
+            AttributeKey.stringKey("db.namespace"),   config.getReceivers().getDb2().getDatabase()
         ));
     }
 

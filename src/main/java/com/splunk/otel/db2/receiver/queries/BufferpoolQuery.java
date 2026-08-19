@@ -39,8 +39,10 @@ public class BufferpoolQuery {
             .setDescription("Buffer pool hit ratio percentage").setUnit("%").buildObserver();
         ObservableLongMeasurement dataReads = meter.gaugeBuilder("db2.buffer_pool.data_reads")
             .ofLongs().setDescription("Buffer pool data logical reads").setUnit("{reads}").buildObserver();
+        ObservableLongMeasurement indexReads = meter.gaugeBuilder("db2.buffer_pool.index_reads")
+            .ofLongs().setDescription("Buffer pool index logical reads").setUnit("{reads}").buildObserver();
 
-        // single DB round-trip for both buffer pool gauges
+        // single DB round-trip for all three buffer pool gauges
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();
@@ -49,17 +51,18 @@ public class BufferpoolQuery {
                     while (rs.next()) {
                         String bpName = rs.getString("BP_NAME").trim();
                         Attributes attrs = Attributes.of(
-                            AttributeKey.stringKey("db.system"), "db2",
-                            AttributeKey.stringKey("db.name"), dbName,
+                            AttributeKey.stringKey("db.system.name"), "db2",
+                            AttributeKey.stringKey("db.namespace"), dbName,
                             AttributeKey.stringKey("db2.buffer_pool"), bpName
                         );
                         hitRatio.record(rs.getDouble("HIT_RATIO"), attrs);
                         dataReads.record(rs.getLong("POOL_DATA_L_READS"), attrs);
+                        indexReads.record(rs.getLong("POOL_INDEX_L_READS"), attrs);
                     }
                 }
             } catch (Exception e) {
                 log.error("Failed to query MON_GET_BUFFERPOOL: {}", e.getMessage());
             }
-        }, hitRatio, dataReads);
+        }, hitRatio, dataReads, indexReads);
     }
 }
