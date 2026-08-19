@@ -40,11 +40,11 @@ public class DatabaseQuery {
             .ofLongs().setDescription("Number of active connections to the database").setUnit("{connections}").buildObserver();
         ObservableLongMeasurement deadlocks = meter.gaugeBuilder("db2.deadlocks")
             .ofLongs().setDescription("Total deadlocks detected").setUnit("{deadlocks}").buildObserver();
-        ObservableLongMeasurement lockWaits = meter.gaugeBuilder("db2.lock.wait.count")
+        ObservableLongMeasurement lockWaits = meter.gaugeBuilder("db2.lock.waits")
             .ofLongs().setDescription("Total lock waits").setUnit("{waits}").buildObserver();
-        ObservableDoubleMeasurement lockWaitTime = meter.gaugeBuilder("db2.lock.wait_time.total")
+        ObservableDoubleMeasurement lockWaitTime = meter.gaugeBuilder("db2.lock.wait.time")
             .setDescription("Total time spent waiting for locks").setUnit("s").buildObserver();
-        ObservableLongMeasurement lockTimeouts = meter.gaugeBuilder("db2.lock_timeout")
+        ObservableLongMeasurement lockTimeouts = meter.gaugeBuilder("db2.lock.timeouts")
             .ofLongs().setDescription("Total lock timeouts").setUnit("{timeouts}").buildObserver();
 
         // single DB round-trip for all five gauges

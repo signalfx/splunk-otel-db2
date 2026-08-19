@@ -80,14 +80,17 @@ class Db2ReceiverTest {
             assertThat(names).contains(
                 "db2.user.connection.count",
                 "db2.deadlocks",
-                "db2.lock.wait.count",
-                "db2.lock.wait_time.total",
-                "db2.lock_timeout",
+                "db2.lock.waits",
+                "db2.lock.wait.time",
+                "db2.lock.timeouts",
                 "db2.buffer_pool.hit_ratio",
                 "db2.buffer_pool.data_reads",
                 "db2.buffer_pool.index_reads",
+                "db2.buffer_pool.data_physical_reads",
+                "db2.buffer_pool.index_physical_reads",
                 "db2.tablespace.used",
-                "db2.tablespace.free"
+                "db2.tablespace.free",
+                "db2.tablespace.total"
             );
         });
     }
@@ -119,14 +122,17 @@ class Db2ReceiverTest {
         Set<String> metricNames = Set.of(
             "db2.user.connection.count",
             "db2.deadlocks",
-            "db2.lock.wait.count",
-            "db2.lock.wait_time.total",
-            "db2.lock_timeout",
+            "db2.lock.waits",
+            "db2.lock.wait.time",
+            "db2.lock.timeouts",
             "db2.buffer_pool.hit_ratio",
             "db2.buffer_pool.data_reads",
             "db2.buffer_pool.index_reads",
+            "db2.buffer_pool.data_physical_reads",
+            "db2.buffer_pool.index_physical_reads",
             "db2.tablespace.used",
-            "db2.tablespace.free"
+            "db2.tablespace.free",
+            "db2.tablespace.total"
         );
         assertThat(metricNames).allSatisfy(name ->
             assertThat(name).startsWith("db2.")

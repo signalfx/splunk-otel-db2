@@ -34,8 +34,10 @@ public class TablespaceQuery {
             .ofLongs().setDescription("Tablespace used bytes").setUnit("By").buildObserver();
         ObservableLongMeasurement free = meter.gaugeBuilder("db2.tablespace.free")
             .ofLongs().setDescription("Tablespace free bytes").setUnit("By").buildObserver();
+        ObservableLongMeasurement total = meter.gaugeBuilder("db2.tablespace.total")
+            .ofLongs().setDescription("Tablespace total bytes").setUnit("By").buildObserver();
 
-        // single DB round-trip for both tablespace gauges
+        // single DB round-trip for all three tablespace gauges
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();
@@ -50,11 +52,12 @@ public class TablespaceQuery {
                         );
                         used.record(rs.getLong("USED_BYTES"), attrs);
                         free.record(rs.getLong("FREE_BYTES"), attrs);
+                        total.record(rs.getLong("TOTAL_BYTES"), attrs);
                     }
                 }
             } catch (Exception e) {
                 log.error("Failed to query MON_GET_TABLESPACE: {}", e.getMessage());
             }
-        }, used, free);
+        }, used, free, total);
     }
 }

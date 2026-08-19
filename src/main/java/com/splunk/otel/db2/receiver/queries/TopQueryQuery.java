@@ -14,12 +14,12 @@ import java.util.function.Supplier;
 public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
 
-    // STMT_EXEC_TIME: execution only (ms), excludes compile cost — better ranking than TOTAL_ACT_TIME
+    // STMT_EXEC_TIME: execution only (µs), excludes compile cost — better ranking than TOTAL_ACT_TIME
     // 30-minute recency filter avoids surfacing stale all-time aggregates
     private static final String SQL_TEMPLATE =
         "SELECT STMT_TEXT, " +
         "NUM_EXECUTIONS, " +
-        "STMT_EXEC_TIME / 1000.0 AS TOTAL_ELAPSED_SEC, " +
+        "STMT_EXEC_TIME / 1000000.0 AS TOTAL_ELAPSED_SEC, " +
         "TOTAL_CPU_TIME, " +
         "ROWS_READ " +
         "FROM TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, -2)) AS T " +

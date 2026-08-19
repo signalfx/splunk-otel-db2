@@ -41,8 +41,12 @@ public class BufferpoolQuery {
             .ofLongs().setDescription("Buffer pool data logical reads").setUnit("{reads}").buildObserver();
         ObservableLongMeasurement indexReads = meter.gaugeBuilder("db2.buffer_pool.index_reads")
             .ofLongs().setDescription("Buffer pool index logical reads").setUnit("{reads}").buildObserver();
+        ObservableLongMeasurement dataPhysReads = meter.gaugeBuilder("db2.buffer_pool.data_physical_reads")
+            .ofLongs().setDescription("Buffer pool data physical reads").setUnit("{reads}").buildObserver();
+        ObservableLongMeasurement indexPhysReads = meter.gaugeBuilder("db2.buffer_pool.index_physical_reads")
+            .ofLongs().setDescription("Buffer pool index physical reads").setUnit("{reads}").buildObserver();
 
-        // single DB round-trip for all three buffer pool gauges
+        // single DB round-trip for all five buffer pool gauges
         meter.batchCallback(() -> {
             try {
                 Connection conn = connSupplier.get();
@@ -58,11 +62,13 @@ public class BufferpoolQuery {
                         hitRatio.record(rs.getDouble("HIT_RATIO"), attrs);
                         dataReads.record(rs.getLong("POOL_DATA_L_READS"), attrs);
                         indexReads.record(rs.getLong("POOL_INDEX_L_READS"), attrs);
+                        dataPhysReads.record(rs.getLong("POOL_DATA_P_READS"), attrs);
+                        indexPhysReads.record(rs.getLong("POOL_INDEX_P_READS"), attrs);
                     }
                 }
             } catch (Exception e) {
                 log.error("Failed to query MON_GET_BUFFERPOOL: {}", e.getMessage());
             }
-        }, hitRatio, dataReads, indexReads);
+        }, hitRatio, dataReads, indexReads, dataPhysReads, indexPhysReads);
     }
 }
