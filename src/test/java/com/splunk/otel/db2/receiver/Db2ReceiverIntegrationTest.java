@@ -50,6 +50,7 @@ class Db2ReceiverIntegrationTest {
         config.setPassword(db2.getPassword());
         config.setDatabase(db2.getDatabaseName().toUpperCase());
         config.setCollectionInterval("2s");
+        config.getTls().setInsecure(true); // Testcontainers DB2 runs plain TCP, no TLS
         return config;
     }
 

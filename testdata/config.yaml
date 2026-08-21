@@ -12,7 +12,7 @@ receivers:
     top_query_interval: "60s"
     use_snapshot_monitor: false
     tls:
-      insecure: true
+      insecure: false  # set to true if your DB2 instance does not have TLS configured
 
 exporters:
   otlp:
