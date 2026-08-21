@@ -77,25 +77,21 @@ public class BufferpoolQuery {
                     int    member = rs.getInt("MEMBER");
 
                     Attributes dataAttrs = Attributes.builder()
-                        .put("db.namespace",   dbName)
                         .put("db2.member",     member)
                         .put("db2.bufferpool", bpName)
                         .put("db2.read_type",  "data")
                         .build();
                     Attributes indexAttrs = Attributes.builder()
-                        .put("db.namespace",   dbName)
                         .put("db2.member",     member)
                         .put("db2.bufferpool", bpName)
                         .put("db2.read_type",  "index")
                         .build();
                     Attributes xdaAttrs = Attributes.builder()
-                        .put("db.namespace",   dbName)
                         .put("db2.member",     member)
                         .put("db2.bufferpool", bpName)
                         .put("db2.read_type",  "xda")
                         .build();
                     Attributes bpAttrs = Attributes.builder()
-                        .put("db.namespace",   dbName)
                         .put("db2.member",     member)
                         .put("db2.bufferpool", bpName)
                         .build();

@@ -62,18 +62,8 @@ public class Db2Receiver {
         new BufferpoolQuery(connSupplier, config.getDatabase(), meter);
         new TablespaceQuery(connSupplier, config.getDatabase(), meter);
 
-        if (otelLogger != null) {
-            TopQueryQuery    topQuery    = new TopQueryQuery(connSupplier, config.getDatabase(), otelLogger, config.getTopQueryCount());
-            QuerySampleQuery querySample = new QuerySampleQuery(connSupplier, config.getDatabase(), otelLogger, config.getMaxQuerySampleCount(), config.isUseSnapshotMonitor());
-
-            scheduler = Executors.newScheduledThreadPool(2, r -> {
-                Thread t = new Thread(r, "db2-log-collector");
-                t.setDaemon(true);
-                return t;
-            });
-            scheduler.scheduleAtFixedRate(topQuery::collect,    0, config.getTopQueryIntervalDuration().getSeconds(),    TimeUnit.SECONDS);
-            scheduler.scheduleAtFixedRate(querySample::collect, 0, config.getQuerySampleIntervalDuration().getSeconds(), TimeUnit.SECONDS);
-        }
+        // Log pipeline (TopQueryQuery / QuerySampleQuery) is deferred until those queries
+        // are implemented. Scheduler and OtlpGrpcLogRecordExporter are not started here.
 
         log.info("DB2 receiver started");
     }

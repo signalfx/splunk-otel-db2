@@ -30,6 +30,10 @@ public class Db2Connection {
     }
 
     private void connect() throws SQLException {
+        if (connection != null) {
+            try { connection.close(); } catch (SQLException ignored) {}
+            connection = null;
+        }
         String url = String.format("jdbc:db2://%s:%d/%s",
             config.getHost(), config.getPort(), config.getDatabase());
         log.info("Connecting to DB2 at {} (tls.insecure={})", url, config.getTls().isInsecure());

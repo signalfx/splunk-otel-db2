@@ -53,7 +53,8 @@ public class DatabaseQuery {
             .setUnit("{connection}")
             .buildObserver();
 
-        maxConnections = meter.upDownCounterBuilder("db2.connection.max")
+        maxConnections = meter.gaugeBuilder("db2.connection.max")
+            .ofLongs()
             .setDescription("Highest number of simultaneous connections to the database since it was activated.")
             .setUnit("{connection}")
             .buildObserver();
@@ -113,8 +114,7 @@ public class DatabaseQuery {
                  ResultSet rs = st.executeQuery(SQL)) {
                 while (rs.next()) {
                     Attributes attrs = Attributes.builder()
-                        .put("db.namespace", dbName)
-                        .put("db2.member",   rs.getInt("MEMBER"))
+                        .put("db2.member", rs.getInt("MEMBER"))
                         .build();
                     currentConnections.record(rs.getLong("APPLS_CUR_CONS"),  attrs);
                     activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);

@@ -57,7 +57,6 @@ public class TablespaceQuery {
                     long freePages  = rs.getLong("TBSP_FREE_PAGES");
 
                     Attributes base = Attributes.builder()
-                        .put("db.namespace",         dbName)
                         .put("db2.member",           member)
                         .put("db2.tablespace",       tbspName)
                         .put("db2.tablespace.type",  tbspType)

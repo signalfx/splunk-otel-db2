@@ -83,7 +83,7 @@ public class Db2ReceiverConfig {
     }
 
     public static class TlsConfig {
-        private boolean insecure = true;
+        private boolean insecure = false;
         public boolean isInsecure() { return insecure; }
         public void setInsecure(boolean insecure) { this.insecure = insecure; }
     }

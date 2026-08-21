@@ -44,21 +44,21 @@ public class Db2Config {
                 Map<String, Object> db2 = (Map<String, Object>) receivers.get("db2");
                 if (db2 != null) {
                     Db2ReceiverConfig rc = cfg.getReceivers().getDb2();
-                    if (db2.get("hostname") != null) rc.setHostname((String) db2.get("hostname"));
-                    if (db2.get("hostport") != null) rc.setHostport((Integer) db2.get("hostport"));
-                    if (db2.get("username") != null) rc.setUsername((String) db2.get("username"));
-                    if (db2.get("password") != null) rc.setPassword((String) db2.get("password"));
-                    if (db2.get("database") != null) rc.setDatabase((String) db2.get("database"));
-                    if (db2.get("collection_interval") != null) rc.setCollectionInterval((String) db2.get("collection_interval"));
-                    if (db2.get("top_query_count") != null) rc.setTopQueryCount((Integer) db2.get("top_query_count"));
-                    if (db2.get("max_query_sample_count") != null) rc.setMaxQuerySampleCount((Integer) db2.get("max_query_sample_count"));
-                    if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval((String) db2.get("query_sample_interval"));
-                    if (db2.get("top_query_interval") != null) rc.setTopQueryInterval((String) db2.get("top_query_interval"));
-                    if (db2.get("use_snapshot_monitor") != null) rc.setUseSnapshotMonitor((Boolean) db2.get("use_snapshot_monitor"));
+                    if (db2.get("hostname") != null) rc.setHostname(asString(db2, "hostname"));
+                    if (db2.get("hostport") != null) rc.setHostport(asInt(db2, "hostport"));
+                    if (db2.get("username") != null) rc.setUsername(asString(db2, "username"));
+                    if (db2.get("password") != null) rc.setPassword(asString(db2, "password"));
+                    if (db2.get("database") != null) rc.setDatabase(asString(db2, "database"));
+                    if (db2.get("collection_interval") != null) rc.setCollectionInterval(asString(db2, "collection_interval"));
+                    if (db2.get("top_query_count") != null) rc.setTopQueryCount(asInt(db2, "top_query_count"));
+                    if (db2.get("max_query_sample_count") != null) rc.setMaxQuerySampleCount(asInt(db2, "max_query_sample_count"));
+                    if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
+                    if (db2.get("top_query_interval") != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
+                    if (db2.get("use_snapshot_monitor") != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
                     if (db2.get("tls") != null) {
                         Map<String, Object> tls = (Map<String, Object>) db2.get("tls");
                         if (tls.get("insecure") != null) {
-                            rc.getTls().setInsecure((Boolean) tls.get("insecure"));
+                            rc.getTls().setInsecure(asBool(tls, "insecure"));
                         }
                     }
                 }
@@ -68,13 +68,40 @@ public class Db2Config {
             if (exporters != null) {
                 Map<String, Object> otlp = (Map<String, Object>) exporters.get("otlp");
                 if (otlp != null && otlp.get("endpoint") != null) {
-                    cfg.getExporters().getOtlp().setEndpoint((String) otlp.get("endpoint"));
+                    cfg.getExporters().getOtlp().setEndpoint(asString(otlp, "endpoint"));
                 }
             }
 
             validate(cfg);
             return cfg;
         }
+    }
+
+    private static String asString(Map<String, Object> map, String key) {
+        Object v = map.get(key);
+        if (v instanceof String) return (String) v;
+        throw new IllegalStateException("Config field '" + key + "' must be a string, got: " + v.getClass().getSimpleName() + " (" + v + ")");
+    }
+
+    private static int asInt(Map<String, Object> map, String key) {
+        Object v = map.get(key);
+        if (v instanceof Integer) return (Integer) v;
+        if (v instanceof String) {
+            try { return Integer.parseInt((String) v); }
+            catch (NumberFormatException e) { /* fall through */ }
+        }
+        throw new IllegalStateException("Config field '" + key + "' must be an integer, got: " + v.getClass().getSimpleName() + " (" + v + ")");
+    }
+
+    private static boolean asBool(Map<String, Object> map, String key) {
+        Object v = map.get(key);
+        if (v instanceof Boolean) return (Boolean) v;
+        if (v instanceof String) {
+            String s = ((String) v).trim().toLowerCase();
+            if (s.equals("true")) return true;
+            if (s.equals("false")) return false;
+        }
+        throw new IllegalStateException("Config field '" + key + "' must be a boolean (true/false), got: " + v.getClass().getSimpleName() + " (" + v + ")");
     }
 
     private static void validate(Db2Config cfg) {

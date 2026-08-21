@@ -14,6 +14,14 @@ resource_attributes:
     description: The database management system. Always ibm.db2 for this receiver.
     type: string
     enabled: true
+  server.address:
+    description: The hostname of the DB2 server.
+    type: string
+    enabled: true
+  server.port:
+    description: The port of the DB2 server.
+    type: int
+    enabled: true
 
 attributes:
   db.namespace:
@@ -45,7 +53,7 @@ attributes:
 
 metrics:
   db2.buffer_pool.logical_reads:
-    attributes: [db.namespace, db2.bufferpool, db2.member, db2.read_type]
+    attributes: [db2.bufferpool, db2.member, db2.read_type]
     description: Number of logical read requests for pages in the buffer pool.
     enabled: true
     stability: development
@@ -56,7 +64,7 @@ metrics:
     unit: "{read}"
 
   db2.buffer_pool.physical_reads:
-    attributes: [db.namespace, db2.bufferpool, db2.member, db2.read_type]
+    attributes: [db2.bufferpool, db2.member, db2.read_type]
     description: Number of physical read requests for pages from disk into the buffer pool.
     enabled: true
     stability: development
@@ -67,7 +75,7 @@ metrics:
     unit: "{read}"
 
   db2.buffer_pool.read_time:
-    attributes: [db.namespace, db2.bufferpool, db2.member]
+    attributes: [db2.bufferpool, db2.member]
     description: Total elapsed time in milliseconds spent reading from disk into the buffer pool.
     enabled: true
     stability: development
@@ -78,7 +86,7 @@ metrics:
     unit: "ms"
 
   db2.buffer_pool.write_time:
-    attributes: [db.namespace, db2.bufferpool, db2.member]
+    attributes: [db2.bufferpool, db2.member]
     description: Total elapsed time in milliseconds spent writing from the buffer pool to disk.
     enabled: true
     stability: development
@@ -89,7 +97,7 @@ metrics:
     unit: "ms"
 
   db2.buffer_pool.writes:
-    attributes: [db.namespace, db2.bufferpool, db2.member]
+    attributes: [db2.bufferpool, db2.member]
     description: Number of times buffer pool pages were written to disk (data + index + XDA).
     enabled: true
     stability: development
@@ -100,7 +108,7 @@ metrics:
     unit: "{write}"
 
   db2.connection.active:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Number of connections currently executing in the database engine.
     enabled: true
     stability: development
@@ -111,7 +119,7 @@ metrics:
     unit: "{connection}"
 
   db2.connection.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Number of current connections to the database.
     enabled: true
     stability: development
@@ -122,18 +130,16 @@ metrics:
     unit: "{connection}"
 
   db2.connection.max:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Highest number of simultaneous connections since the database was activated.
     enabled: true
     stability: development
-    sum:
-      aggregation_temporality: cumulative
-      monotonic: false
+    gauge:
       value_type: int
     unit: "{connection}"
 
   db2.deadlock.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Total number of deadlocks that have occurred.
     enabled: true
     stability: development
@@ -144,7 +150,7 @@ metrics:
     unit: "{deadlock}"
 
   db2.lock.escalation.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Number of times a lock was escalated from row to table level.
     enabled: true
     stability: development
@@ -155,7 +161,7 @@ metrics:
     unit: "{escalation}"
 
   db2.lock.space_used:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Total amount of lock list memory in use, in bytes.
     enabled: true
     stability: development
@@ -166,7 +172,7 @@ metrics:
     unit: "By"
 
   db2.lock.timeout.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Number of times a request to lock an object timed out.
     enabled: true
     stability: development
@@ -177,7 +183,7 @@ metrics:
     unit: "{timeout}"
 
   db2.lock.wait.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Total number of times an application waited for a lock.
     enabled: true
     stability: development
@@ -188,7 +194,7 @@ metrics:
     unit: "{wait}"
 
   db2.lock.wait_time:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Total elapsed time in milliseconds spent waiting for locks.
     enabled: true
     stability: development
@@ -199,7 +205,7 @@ metrics:
     unit: "ms"
 
   db2.sort.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Total number of sorts that have been executed.
     enabled: true
     stability: development
@@ -210,7 +216,7 @@ metrics:
     unit: "{sort}"
 
   db2.sort.overflow.count:
-    attributes: [db.namespace, db2.member]
+    attributes: [db2.member]
     description: Total number of sorts that ran out of sort heap and required disk space.
     enabled: true
     stability: development
@@ -221,7 +227,7 @@ metrics:
     unit: "{sort}"
 
   db2.tablespace.size:
-    attributes: [db.namespace, db2.member, db2.tablespace, db2.tablespace.state, db2.tablespace.type, db2.tablespace.usage]
+    attributes: [db2.member, db2.tablespace, db2.tablespace.state, db2.tablespace.type, db2.tablespace.usage]
     description: Size of the tablespace in bytes, broken down by usage.
     enabled: true
     stability: development
