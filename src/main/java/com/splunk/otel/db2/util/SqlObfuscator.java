@@ -5,16 +5,19 @@ package com.splunk.otel.db2.util;
  * emitted as telemetry without leaking PII or sensitive data.
  *
  * Handled:
- *   single-quoted strings  'O''Brien'  →  ?
- *   double-quoted strings  "value"     →  ?   (Db2 non-identifier use)
- *   numeric literals       42, 3.14    →  ?
- *   hex literals           X'deadbeef' →  ?
- *   line comments          -- …        →  stripped
- *   block comments         /* … * /    →  stripped
+ *   single-quoted strings  'O''Brien'    →  ?
+ *   numeric literals       42, 3.14,
+ *                          1.5E10, 2E-3  →  ?
+ *   hex literals           X'deadbeef'   →  ?
+ *   line comments          -- …          →  stripped (replaced with space)
+ *   block comments         /* … * /      →  stripped, including nested (replaced with space)
  *
- * Identifiers in double-quotes that appear in object-name position are also
- * replaced with ?, which is safe — the sanitized SQL is for display/grouping,
- * not re-execution.
+ * Preserved (not replaced):
+ *   double-quoted identifiers  "MyTable"  — Db2 LUW uses double quotes for
+ *   delimited identifiers, not string literals; replacing them would collapse
+ *   queries against different objects into the same fingerprint.
+ *
+ * The sanitized SQL is intended for display and grouping, not re-execution.
  */
 public final class SqlObfuscator {
 
@@ -32,7 +35,7 @@ public final class SqlObfuscator {
         while (i < len) {
             char c = sql.charAt(i);
 
-            // Line comment: -- ... newline
+            // Line comment: -- ... newline (newline is preserved and acts as whitespace)
             if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
                 i += 2;
                 while (i < len && sql.charAt(i) != '\n') {
@@ -41,13 +44,25 @@ public final class SqlObfuscator {
                 continue;
             }
 
-            // Block comment: /* ... */
+            // Block comment: /* ... */ with nesting support
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
                 i += 2;
-                while (i + 1 < len && !(sql.charAt(i) == '*' && sql.charAt(i + 1) == '/')) {
-                    i++;
+                int depth = 1;
+                while (i + 1 < len && depth > 0) {
+                    if (sql.charAt(i) == '/' && sql.charAt(i + 1) == '*') {
+                        depth++;
+                        i += 2;
+                    } else if (sql.charAt(i) == '*' && sql.charAt(i + 1) == '/') {
+                        depth--;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
                 }
-                i += 2; // consume */
+                if (depth > 0) {
+                    i = len; // unterminated — consume to end
+                }
+                out.append(' ');
                 continue;
             }
 
@@ -57,7 +72,7 @@ public final class SqlObfuscator {
                 while (i < len && sql.charAt(i) != '\'') {
                     i++;
                 }
-                i++; // consume closing '
+                if (i < len) i++; // consume closing '
                 out.append('?');
                 continue;
             }
@@ -79,24 +94,56 @@ public final class SqlObfuscator {
                 continue;
             }
 
-            // Double-quoted string/identifier
+            // Double-quoted delimited identifier — preserve as-is (Db2 LUW semantics)
             if (c == '"') {
+                out.append(c);
                 i++;
-                while (i < len && sql.charAt(i) != '"') {
+                while (i < len) {
+                    char q = sql.charAt(i);
+                    out.append(q);
                     i++;
+                    if (q == '"') {
+                        // handle "" escape inside identifier
+                        if (i < len && sql.charAt(i) == '"') {
+                            out.append('"');
+                            i++;
+                        } else {
+                            break; // closing quote
+                        }
+                    }
                 }
-                i++; // consume closing "
-                out.append('?');
                 continue;
             }
 
-            // Numeric literal (integer or decimal, not inside an identifier)
-            if (Character.isDigit(c) && (i == 0 || !Character.isLetterOrDigit(sql.charAt(i - 1)))) {
-                while (i < len && (Character.isDigit(sql.charAt(i)) || sql.charAt(i) == '.')) {
-                    i++;
+            // Numeric literal — only when preceded by a non-identifier character
+            // Identifier characters in Db2: letters, digits, underscore, $, #, @
+            if (Character.isDigit(c)) {
+                char prev = (i == 0) ? ' ' : sql.charAt(i - 1);
+                boolean insideIdentifier = Character.isLetterOrDigit(prev)
+                        || prev == '_' || prev == '$' || prev == '#' || prev == '@';
+                if (!insideIdentifier) {
+                    // consume mantissa: digits and at most one dot
+                    while (i < len && (Character.isDigit(sql.charAt(i)) || sql.charAt(i) == '.')) {
+                        i++;
+                    }
+                    // consume optional exponent: [eE][+-]?[0-9]+
+                    if (i < len && (sql.charAt(i) == 'e' || sql.charAt(i) == 'E')) {
+                        int saved = i;
+                        i++;
+                        if (i < len && (sql.charAt(i) == '+' || sql.charAt(i) == '-')) {
+                            i++;
+                        }
+                        if (i < len && Character.isDigit(sql.charAt(i))) {
+                            while (i < len && Character.isDigit(sql.charAt(i))) {
+                                i++;
+                            }
+                        } else {
+                            i = saved; // not a valid exponent — backtrack
+                        }
+                    }
+                    out.append('?');
+                    continue;
                 }
-                out.append('?');
-                continue;
             }
 
             out.append(c);
