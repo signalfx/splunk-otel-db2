@@ -35,12 +35,13 @@ public final class SqlObfuscator {
         while (i < len) {
             char c = sql.charAt(i);
 
-            // Line comment: -- ... newline (newline is preserved and acts as whitespace)
+            // Line comment: -- ... newline
             if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
                 i += 2;
                 while (i < len && sql.charAt(i) != '\n') {
                     i++;
                 }
+                out.append(' ');
                 continue;
             }
 

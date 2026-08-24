@@ -118,7 +118,14 @@ class SqlObfuscatorTest {
     @Test
     void lineComment() {
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T -- filter\nWHERE NAME = 'Bob'"))
-            .isEqualTo("SELECT * FROM T \nWHERE NAME = ?");  // trailing space before -- preserved; newline acts as separator
+            .isEqualTo("SELECT * FROM T  \nWHERE NAME = ?");
+    }
+
+    @Test
+    void lineCommentAdjacentTokensGetSpace() {
+        // col--comment\nFROM must not become colFROM
+        assertThat(SqlObfuscator.obfuscate("SELECT col--comment\nFROM T"))
+            .isEqualTo("SELECT col \nFROM T");
     }
 
     @Test
