@@ -20,7 +20,7 @@ repositories {
     mavenCentral()
 }
 
-def otelVersion = '1.38.0'
+def otelVersion = '1.62.0'
 
 dependencies {
     // OTel SDK
