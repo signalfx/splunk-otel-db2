@@ -123,16 +123,7 @@ public final class SqlObfuscator {
             int bodyStart = prefixedLiteralBodyStart(sql, i, len);
             if (bodyStart >= 0) {
                 i = bodyStart;
-                while (i < len) {
-                    if (sql.charAt(i) == '\'' && i + 1 < len && sql.charAt(i + 1) == '\'') {
-                        i += 2;
-                    } else if (sql.charAt(i) == '\'') {
-                        i++;
-                        break;
-                    } else {
-                        i++;
-                    }
-                }
+                i = consumeQuotedStringBody(sql, i, len);
                 out.append('?');
                 continue;
             }
@@ -140,16 +131,7 @@ public final class SqlObfuscator {
             // Single-quoted string with '' escape: 'O''Brien'
             if (c == '\'') {
                 i++;
-                while (i < len) {
-                    if (sql.charAt(i) == '\'' && i + 1 < len && sql.charAt(i + 1) == '\'') {
-                        i += 2;
-                    } else if (sql.charAt(i) == '\'') {
-                        i++;
-                        break;
-                    } else {
-                        i++;
-                    }
-                }
+                i = consumeQuotedStringBody(sql, i, len);
                 out.append('?');
                 continue;
             }
@@ -198,8 +180,12 @@ public final class SqlObfuscator {
                             break;
                         }
                     }
-                    // optional exponent: [eE] (format*)? [+-]? (format*)? [0-9]+
-                    // All three segments are format-char-aware so 1E\u200B123 → single ?
+                    // optional exponent: (format*)? [eE] (format*)? [+-]? (format*)? [0-9]+
+                    // Skip format chars before e/E too so 1\u200BE123 → single ?
+                    int ePos = nextNonFormat(sql, i, len);
+                    if (ePos < len && (sql.charAt(ePos) == 'e' || sql.charAt(ePos) == 'E')) {
+                        i = ePos; // advance past any format chars before e/E
+                    }
                     if (i < len && (sql.charAt(i) == 'e' || sql.charAt(i) == 'E')) {
                         int saved = i;
                         i++; // consume e/E
@@ -252,6 +238,31 @@ public final class SqlObfuscator {
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Consumes a single-quoted string body starting at {@code i} (after the opening quote).
+     * Handles {@code ''} escape sequences with format-char transparency: the two apostrophes
+     * in an escape may be separated by format characters.
+     * Returns the index of the first character after the closing quote.
+     */
+    private static int consumeQuotedStringBody(String sql, int i, int len) {
+        while (i < len) {
+            char ch = sql.charAt(i);
+            if (ch == '\'') {
+                // Check if the next non-format char is also ' (escaped quote)
+                int nxt = nextNonFormat(sql, i + 1, len);
+                if (nxt < len && sql.charAt(nxt) == '\'') {
+                    i = nxt + 1; // skip both quotes (and any format chars between them)
+                } else {
+                    i++; // closing quote
+                    break;
+                }
+            } else {
+                i++;
+            }
+        }
+        return i;
+    }
 
     /** Returns the index of the next non-format character at or after {@code i}. */
     private static int nextNonFormat(String sql, int i, int len) {

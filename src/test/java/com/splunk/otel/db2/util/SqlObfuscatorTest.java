@@ -283,6 +283,13 @@ class SqlObfuscatorTest {
     }
 
     @Test
+    void formatCharBetweenMantissaAndExponentE() {
+        // 1\u200BE123 — format char before E; must produce single ? not ?E123
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1\u200BE123"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
     void formatCharBetweenExponentEAndDigits() {
         // 1E\u200B123 — format char after E; must produce single ? not ?E123
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1E\u200B123"))
@@ -294,6 +301,20 @@ class SqlObfuscatorTest {
         // 1E1\u200B23 — format char in exponent digit run; must produce single ?
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1E1\u200B23"))
             .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void formatCharBetweenEscapedQuotePair() {
+        // 'O'\u200B'Brien' — format char between the two apostrophes of '' escape; must be single ?
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = 'O'\u200B'Brien'"))
+            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+    }
+
+    @Test
+    void formatCharBetweenEscapedQuotePairInPrefixedLiteral() {
+        // N'O'\u200B'Brien' — same as above but inside a prefixed literal
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = N'O'\u200B'Brien'"))
+            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
     }
 
     @Test
