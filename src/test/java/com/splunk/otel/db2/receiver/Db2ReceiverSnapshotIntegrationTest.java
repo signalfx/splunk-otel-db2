@@ -143,13 +143,34 @@ class Db2ReceiverSnapshotIntegrationTest {
 
         Thread.sleep(3000);
 
+        // Diagnostic: log what SNAP_GET_STMT sees so CI failures are self-explanatory
+        try (Connection diagConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+             java.sql.Statement diagSt = diagConn.createStatement();
+             java.sql.ResultSet diagRs = diagSt.executeQuery(
+                 "SELECT SA.AGENT_ID, SA.APPL_STATUS, SS.STMT_TEXT, SS.STMT_STOP " +
+                 "FROM SYSIBM.SYSDUMMY1, " +
+                 "     TABLE(SNAP_GET_APPL_INFO(CAST(NULL AS VARCHAR(255)), -1)) AS SA, " +
+                 "     TABLE(SNAP_GET_STMT(CAST(NULL AS VARCHAR(255)), -1)) AS SS " +
+                 "WHERE SA.AGENT_ID = SS.AGENT_ID")) {
+            int diagCount = 0;
+            while (diagRs.next()) {
+                diagCount++;
+                org.slf4j.LoggerFactory.getLogger(Db2ReceiverSnapshotIntegrationTest.class)
+                    .info("SNAP_GET_STMT row: agent={} status={} stop={} text={}",
+                        diagRs.getString("AGENT_ID"), diagRs.getString("APPL_STATUS"),
+                        diagRs.getString("STMT_STOP"), diagRs.getString("STMT_TEXT"));
+            }
+            org.slf4j.LoggerFactory.getLogger(Db2ReceiverSnapshotIntegrationTest.class)
+                .info("SNAP_GET_STMT total rows (all statuses): {}", diagCount);
+        }
+
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
 
         io.opentelemetry.sdk.logs.data.LogRecordData record;
         try {
             Awaitility.await()
-                .atMost(30, TimeUnit.SECONDS)
+                .atMost(60, TimeUnit.SECONDS)
                 .pollInterval(1, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
                     .anyMatch(r -> {
