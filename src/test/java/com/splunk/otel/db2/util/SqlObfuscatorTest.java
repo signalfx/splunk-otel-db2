@@ -242,7 +242,7 @@ class SqlObfuscatorTest {
     // --- Fail-closed safety net ---
 
     @Test
-    void failClosedFiredOnResidualDigitRun() {
+    void obfuscationFailedConstantHasExpectedValue() {
         // OBFUSCATION_FAILED is the sentinel returned when containsResidualLiteral
         // detects a 4+ digit standalone run that survived the main pass.
         // The main pass always handles ' and digit literals correctly from valid SQL,
@@ -388,7 +388,7 @@ class SqlObfuscatorTest {
             if (!SqlObfuscator.OBFUSCATION_FAILED.equals(result)) {
                 assertThat(result)
                     .as("digit-run leaked in: %s → %s", sql, result)
-                    .doesNotMatch(".*(?<![A-Za-z0-9_$#@])\\d{4,}(?![A-Za-z0-9_$#@]).*");
+                    .doesNotMatch(".*(?<![\\p{L}\\p{N}_$#@])\\d{4,}(?![\\p{L}\\p{N}_$#@]).*");
             }
         }
     }
