@@ -210,6 +210,8 @@ public final class SqlObfuscator {
                             break; // closing quote
                         }
                     }
+                    // identifier body intentionally not appended — blanked to prevent
+                    // false positives from identifiers like "2024" or "it's"
                 }
                 stripped.append('I'); // close-quote placeholder
             } else {
