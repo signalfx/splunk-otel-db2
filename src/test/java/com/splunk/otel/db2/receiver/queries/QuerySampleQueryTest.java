@@ -61,7 +61,7 @@ class QuerySampleQueryTest {
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow("SELECT * FROM T WHERE ID = 42", "EXECUTING",
+        stubRow("SELECT * FROM T WHERE ID = 42", "EXECUTING SELECT",
                 "2024-01-01-12.00.00.000000", 5L,
                 "db2inst1", "client-host", "12345", 0L, 100L);
 
@@ -79,7 +79,7 @@ class QuerySampleQueryTest {
             .isEqualTo("db.server.query_sample");
         assertThat(attrs.get(AttributeKey.stringKey("db.system.name"))).isEqualTo("ibm.db2");
         assertThat(attrs.get(AttributeKey.stringKey("db.namespace"))).isEqualTo("TESTDB");
-        assertThat(attrs.get(AttributeKey.stringKey("db2.activity_state"))).isEqualTo("EXECUTING");
+        assertThat(attrs.get(AttributeKey.stringKey("db2.activity_state"))).isEqualTo("EXECUTING SELECT");
         assertThat(attrs.get(AttributeKey.stringKey("db2.query_start")))
             .isEqualTo("2024-01-01-12.00.00.000000");
         assertThat(attrs.get(AttributeKey.doubleKey("db2.session.duration"))).isEqualTo(5.0);
@@ -93,7 +93,7 @@ class QuerySampleQueryTest {
     @Test
     void snapshotPathNoCpuAttribute() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC",
+        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC SELECT",
                 "2024-01-01-12.00.00.000000", 2L,
                 "db2inst1", "host1", "99", 0L, -1L); // -1 sentinel from SNAP path
 

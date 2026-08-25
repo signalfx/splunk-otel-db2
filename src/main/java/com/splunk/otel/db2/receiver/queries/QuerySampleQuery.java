@@ -33,7 +33,7 @@ import java.util.function.Supplier;
  *   db.namespace          = database name
  *   db.query.text         = obfuscated SQL statement
  *   db2.application_handle= application handle / agent ID
- *   db2.activity_state    = activity state (EXECUTING, LOCKWAIT, …)
+ *   db2.activity_state    = "ACTIVITY_STATE ACTIVITY_TYPE" e.g. "EXECUTING SELECT", "LOCKWAIT DML"
  *   db2.query_start       = statement start timestamp
  *   db2.session.duration  = wall-clock elapsed seconds (double)
  *   db2.member            = Db2 member number (default path only)
@@ -53,7 +53,7 @@ public class QuerySampleQuery {
     private static final String SQL_MON_CURRENT =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
-        "       S.ACTIVITY_STATE, " +
+        "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
         "       S.LOCAL_START_TIME, " +
         "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - S.LOCAL_START_TIME)) AS WALL_ELAPSED_SEC, " +
         "       C.CLIENT_USERID, " +
