@@ -5,7 +5,6 @@ import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
 import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
 import com.splunk.otel.db2.receiver.queries.TablespaceQuery;
-import com.splunk.otel.db2.receiver.queries.TopQueryQuery;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
 import org.slf4j.LoggerFactory;
@@ -62,8 +61,32 @@ public class Db2Receiver {
         new BufferpoolQuery(connSupplier, config.getDatabase(), meter);
         new TablespaceQuery(connSupplier, config.getDatabase(), meter);
 
-        // Log pipeline (TopQueryQuery / QuerySampleQuery) is deferred until those queries
-        // are implemented. Scheduler and OtlpGrpcLogRecordExporter are not started here.
+        if (otelLogger != null) {
+            QuerySampleQuery querySampleQuery = new QuerySampleQuery(
+                connSupplier,
+                config.getDatabase(),
+                otelLogger,
+                config.getMaxQuerySampleCount(),
+                config.isUseSnapshotMonitor()
+            );
+
+            scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "db2-query-sampler");
+                t.setDaemon(true);
+                return t;
+            });
+            long intervalSeconds = config.getQuerySampleIntervalDuration().getSeconds();
+            scheduler.scheduleAtFixedRate(
+                () -> {
+                    try {
+                        querySampleQuery.collect();
+                    } catch (Exception e) {
+                        log.warn("Query sample collection error: {}", e.getMessage());
+                    }
+                },
+                0, intervalSeconds, TimeUnit.SECONDS
+            );
+        }
 
         log.info("DB2 receiver started");
     }

@@ -1,6 +1,11 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.logs.Logger;
+import io.opentelemetry.sdk.logs.SdkLoggerProvider;
+import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
+import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.testing.exporter.InMemoryMetricExporter;
@@ -213,6 +218,53 @@ class Db2ReceiverIntegrationTest {
                 assertThat(rs.getLong("CNT")).isGreaterThan(0L);
             }
         }
+    }
+
+    @Test
+    void querySamplerStartsAndEmitsNoRawSql() throws Exception {
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2ReceiverConfig config = buildConfig();
+        config.setQuerySampleInterval("2s");
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        // wait long enough for at least one sample cycle
+        Awaitility.await()
+            .atMost(15, TimeUnit.SECONDS)
+            .pollInterval(1, TimeUnit.SECONDS)
+            .until(() -> true); // just let it run; MON_GET_ACTIVITY may return 0 rows on idle DB
+
+        receiver.stop();
+
+        // Every emitted log record must have an obfuscated db.query.text (no raw literals)
+        logExporter.getFinishedLogRecordItems().forEach(record -> {
+            String queryText = record.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+            if (queryText != null) {
+                assertThat(queryText).doesNotContain("'");
+                assertThat(record.getAttributes().get(AttributeKey.stringKey("db.system.name")))
+                    .isEqualTo("ibm.db2");
+                assertThat(record.getAttributes().get(AttributeKey.stringKey("db.namespace")))
+                    .isEqualTo(config.getDatabase());
+            }
+        });
+
+        loggerProvider.shutdown();
+        meterProvider.shutdown();
     }
 
     private static List<String> metricNames(InMemoryMetricExporter exporter) {

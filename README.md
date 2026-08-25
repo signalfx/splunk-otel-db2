@@ -1,6 +1,6 @@
 # splunk-otel-db2
 
-A standalone OpenTelemetry receiver for IBM Db2. Collects metrics from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud. Query log collection (top queries, active sessions) is planned for a future release.
+A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and active query samples from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud.
 
 ## Requirements
 
@@ -34,10 +34,10 @@ receivers:
     database: "SAMPLE"          # database name (uppercase)
     collection_interval: "30s"  # metrics collection interval
     top_query_count: 250        # top N queries by exec time (future PR)
-    max_query_sample_count: 1000
-    query_sample_interval: "10s"
-    top_query_interval: "60s"
-    use_snapshot_monitor: false
+    max_query_sample_count: 1000  # max active statements sampled per cycle
+    query_sample_interval: "10s"  # how often to sample active queries
+    top_query_interval: "60s"     # top-query collection interval (future PR)
+    use_snapshot_monitor: false   # set true for Db2 9.7–10.1 (uses SYSIBMADM.SNAPSTMT)
     tls:
       insecure: true            # set false to enable TLS
 
@@ -87,6 +87,22 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 | Metric | Type | Unit | Description |
 |---|---|---|---|
 | `db2.tablespace.size` | UpDownCounter | `By` | Tablespace size broken down by usage |
+
+## Query samples (log records)
+
+Active statements are sampled at `query_sample_interval` and emitted as OTel log records (severity INFO). SQL text is obfuscated before emission — literal values are replaced with `?`.
+
+| Attribute | Description |
+|---|---|
+| `db.system.name` | Always `ibm.db2` |
+| `db.namespace` | Database name |
+| `db.query.text` | Obfuscated SQL statement |
+| `db2.member` | Db2 member number |
+| `db2.application.id` | Application identifier |
+| `db2.elapsed_time_ms` | Elapsed time in milliseconds |
+| `db2.cpu_time_ms` | CPU time in milliseconds (omitted when `use_snapshot_monitor: true`) |
+
+**Source table**: `MON_GET_ACTIVITY(NULL, -2)` (Db2 10.5+) or `SYSIBMADM.SNAPSTMT` (Db2 9.7+, set `use_snapshot_monitor: true`).
 
 ## Development
 
