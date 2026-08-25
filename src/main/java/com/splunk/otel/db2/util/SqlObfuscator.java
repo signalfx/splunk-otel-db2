@@ -8,9 +8,9 @@ import java.util.regex.Pattern;
  *
  * Handled:
  *   single-quoted strings  'O''Brien'          →  ?
- *   prefixed string literals
+ *   prefixed string literals ('' escape supported in all)
  *     X/x'...' (hex)       X'deadbeef'         →  ?
- *     G/g'...' (graphic)   G'hello'            →  ?
+ *     G/g'...' (graphic)   G'O''Brien'         →  ?
  *     N/n'...' (national)  N'Alice'            →  ?
  *     UX/ux'...' (Unicode hex)  UX'0041'       →  ?
  *     U&/u&'...' (Unicode escape)  U&'\0041'   →  ?
@@ -21,8 +21,8 @@ import java.util.regex.Pattern;
  *   Unicode format chars   U+200B, U+00AD …    →  stripped before processing
  *
  * Preserved:
- *   double-quoted identifiers  "MyTable"  — Db2 LUW uses " for delimited
- *   identifiers, not string literals; replacing them collapses different objects.
+ *   double-quoted identifiers  "MyTable", "Order  History"  — Db2 LUW uses "
+ *   for delimited identifiers; significant internal whitespace is preserved.
  *
  * Fail-closed: if any literal remnant survives obfuscation (unmatched {@code '}
  * outside a delimited identifier, or standalone digit-run ≥ 4 outside an
@@ -34,13 +34,12 @@ public final class SqlObfuscator {
 
     public static final String OBFUSCATION_FAILED = "<obfuscation-failed>";
 
-    // Matches residual literal fragments that should have been replaced.
-    // Applied to a version of the result with all "..." identifiers blanked out,
-    // so identifiers like "it's" or "2024" do not trigger false positives.
+    // Matches residual literal fragments. Uses Unicode letter/number categories
+    // (\p{L}\p{N}) to match the same identifier boundary as Character.isLetterOrDigit,
+    // so Unicode identifiers like Δ2024 are not falsely flagged.
+    // Applied after "..." identifier bodies are blanked, so "it's" / "2024" are safe.
     private static final Pattern RESIDUAL_LITERAL = Pattern.compile(
-        "'|(?<![A-Za-z0-9_$#@])\\d{4,}(?![A-Za-z0-9_$#@])");
-
-    private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
+        "'|(?<![\\p{L}\\p{N}_$#@])\\d{4,}(?![\\p{L}\\p{N}_$#@])");
 
     private SqlObfuscator() {}
 
@@ -94,13 +93,20 @@ public final class SqlObfuscator {
             }
 
             // Prefixed string literals: X'...' G'...' N'...' UX'...' U&'...'
+            // Uses the same '' escape-aware scanner as plain single-quoted strings.
             int prefixSkip = prefixedLiteralSkip(input, i, len);
             if (prefixSkip > 0) {
-                i += prefixSkip;
-                while (i < len && input.charAt(i) != '\'') {
-                    i++;
+                i += prefixSkip; // skip prefix chars + opening '
+                while (i < len) {
+                    if (input.charAt(i) == '\'' && i + 1 < len && input.charAt(i + 1) == '\'') {
+                        i += 2; // '' escape — skip both
+                    } else if (input.charAt(i) == '\'') {
+                        i++; // closing '
+                        break;
+                    } else {
+                        i++;
+                    }
                 }
-                if (i < len) i++; // consume closing '
                 out.append('?');
                 continue;
             }
@@ -122,7 +128,8 @@ public final class SqlObfuscator {
                 continue;
             }
 
-            // Double-quoted delimited identifier — preserve as-is (Db2 LUW semantics)
+            // Double-quoted delimited identifier — preserve as-is, including internal
+            // whitespace ("Order  History" names a different object than "Order History").
             if (c == '"') {
                 out.append(c);
                 i++;
@@ -135,7 +142,7 @@ public final class SqlObfuscator {
                             out.append('"');
                             i++;
                         } else {
-                            break;
+                            break; // closing quote
                         }
                     }
                 }
@@ -143,7 +150,7 @@ public final class SqlObfuscator {
             }
 
             // Numeric literal — only when preceded by a non-identifier character.
-            // Db2 identifier chars: letters, digits, _, $, #, @
+            // Db2 identifier chars: Unicode letters/digits, _, $, #, @
             if (Character.isDigit(c)) {
                 char prev = (i == 0) ? ' ' : input.charAt(i - 1);
                 boolean insideIdentifier = Character.isLetterOrDigit(prev)
@@ -176,7 +183,9 @@ public final class SqlObfuscator {
             i++;
         }
 
-        String result = WHITESPACE_RUN.matcher(out.toString()).replaceAll(" ").trim();
+        // Normalise whitespace runs to a single space, but preserve internal
+        // whitespace inside double-quoted delimited identifiers.
+        String result = normalizeWhitespace(out.toString());
 
         // Fail-closed: if any literal remnant survived, redact entirely.
         if (containsResidualLiteral(result)) {
@@ -184,6 +193,53 @@ public final class SqlObfuscator {
         }
 
         return result;
+    }
+
+    /**
+     * Collapses runs of whitespace to a single space, preserving whitespace
+     * inside double-quoted delimited identifiers unchanged.
+     */
+    private static String normalizeWhitespace(String s) {
+        StringBuilder sb = new StringBuilder(s.length());
+        boolean inIdentifier = false;
+        boolean prevWasSpace = false;
+        int i = 0;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (!inIdentifier && c == '"') {
+                inIdentifier = true;
+                prevWasSpace = false;
+                sb.append(c);
+                i++;
+            } else if (inIdentifier) {
+                sb.append(c);
+                i++;
+                if (c == '"') {
+                    if (i < s.length() && s.charAt(i) == '"') {
+                        sb.append('"');
+                        i++; // "" escape — stay inside identifier
+                    } else {
+                        inIdentifier = false; // closing quote
+                    }
+                }
+            } else if (Character.isWhitespace(c)) {
+                if (!prevWasSpace) {
+                    sb.append(' ');
+                    prevWasSpace = true;
+                }
+                i++;
+            } else {
+                sb.append(c);
+                prevWasSpace = false;
+                i++;
+            }
+        }
+        // trim leading/trailing spaces
+        int start = 0;
+        int end = sb.length();
+        while (start < end && sb.charAt(start) == ' ') start++;
+        while (end > start && sb.charAt(end - 1) == ' ') end--;
+        return sb.substring(start, end);
     }
 
     /**

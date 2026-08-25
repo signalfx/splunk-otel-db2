@@ -45,6 +45,13 @@ class SqlObfuscatorTest {
     }
 
     @Test
+    void nationalStringLiteralWithEscapedQuote() {
+        // N'O''Brien' contains a '' escape — must produce exactly one ?
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = N'O''Brien'"))
+            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+    }
+
+    @Test
     void nationalStringLiteral() {
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = N'Alice'"))
             .isEqualTo("SELECT * FROM T WHERE NAME = ?");
@@ -146,6 +153,13 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT \"O\"\"Brien\" FROM T");
     }
 
+    @Test
+    void doubleQuotedIdentifierInternalWhitespacePreserved() {
+        // "Order  History" (two spaces) is a different object from "Order History" (one space)
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM \"Order  History\""))
+            .isEqualTo("SELECT * FROM \"Order  History\"");
+    }
+
     // --- Comments ---
 
     @Test
@@ -196,6 +210,17 @@ class SqlObfuscatorTest {
     void tabsAndNewlinesCollapsed() {
         assertThat(SqlObfuscator.obfuscate("SELECT\t*\nFROM\tT"))
             .isEqualTo("SELECT * FROM T");
+    }
+
+    // --- Unicode identifier boundary in residual check ---
+
+    @Test
+    void unicodeIdentifierWithDigitsSuffixNotFlaggedByResidualCheck() {
+        // Δ2024 is a Unicode identifier — the residual check must use \p{L}/\p{N}
+        // boundaries (matching Character.isLetterOrDigit) so it does not false-positive
+        // and return OBFUSCATION_FAILED for this query.
+        assertThat(SqlObfuscator.obfuscate("SELECT Δ2024 FROM T WHERE ID = 1"))
+            .isEqualTo("SELECT Δ2024 FROM T WHERE ID = ?");
     }
 
     // --- Unicode format character stripping ---
