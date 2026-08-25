@@ -298,6 +298,14 @@ public final class SqlObfuscator {
                 || c == 'B' || c == 'b';
         if (!couldBePrefix) return -1;
 
+        // Identifier boundary check: if the prefix letter is part of an identifier
+        // (e.g. MAX'...', colN'...') do not treat it as a literal prefix.
+        // Uses prevNonFormat to skip any format chars before the current position.
+        char prev = prevNonFormat(sql, i - 1);
+        if (Character.isLetterOrDigit(prev) || prev == '_' || prev == '$' || prev == '#' || prev == '@') {
+            return -1;
+        }
+
         int nxt1 = nextNonFormat(sql, i + 1, len);
         if (nxt1 >= len) return -1;
         char second = sql.charAt(nxt1);

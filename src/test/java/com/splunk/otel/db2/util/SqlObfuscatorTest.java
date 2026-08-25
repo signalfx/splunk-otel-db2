@@ -318,6 +318,22 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT * FROM T WHERE C = ?");
     }
 
+    // --- Prefixed literal identifier boundary ---
+
+    @Test
+    void prefixLetterAtEndOfIdentifierNotTreatedAsLiteralPrefix() {
+        // MAX'abc' — X is part of MAX, not a hex prefix; identifier must be preserved
+        assertThat(SqlObfuscator.obfuscate("SELECT MAX'abc' FROM T"))
+            .isEqualTo("SELECT MAX? FROM T");
+    }
+
+    @Test
+    void prefixLetterMidIdentifierNotTreatedAsPrefix() {
+        // colN'secret' — N is part of colN, not a national string prefix
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE colN'secret'"))
+            .isEqualTo("SELECT * FROM T WHERE colN?");
+    }
+
     // --- Fail-closed safety net ---
 
     @Test
@@ -340,17 +356,11 @@ class SqlObfuscatorTest {
     }
 
     @Test
-    void obfuscationFailedConstantHasExpectedValue() {
-        // OBFUSCATION_FAILED is the sentinel returned when containsResidualLiteral
-        // detects a 4+ digit standalone run that survived the main pass.
-        // The main pass always handles ' and digit literals correctly from valid SQL,
-        // so this fires only if a future bug introduces a regression in the main pass.
-        // We verify the path works by calling containsResidualLiteral indirectly:
-        // a year-like token embedded in a column alias (not an identifier) leaks a
-        // 4-digit run — simulated here with a raw numeric outside any literal context
-        // that the state machine should have replaced.
-        // Since the state machine is correct, we instead verify the constant and its
-        // usage in getFinishedMetricItems output via the fuzz test below.
+    void obfuscationFailedIsRegressionBackstop() {
+        // OBFUSCATION_FAILED is unreachable in practice — the main pass masks every
+        // reachable literal, so this path exists only as a regression backstop for future
+        // bugs. Direct coverage is in containsResidualLiteral* tests above.
+        // This test locks in the sentinel value so a rename or typo is caught.
         assertThat(SqlObfuscator.OBFUSCATION_FAILED).isEqualTo("<obfuscation-failed>");
     }
 
