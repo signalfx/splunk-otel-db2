@@ -75,14 +75,19 @@ class Db2ReceiverSnapshotIntegrationTest {
 
     @Test
     void snapshotPathEmitsObfuscatedRecordForActiveQuery() throws Exception {
-        // Enable statement monitoring required by the snapshot path.
-        // DFT_MON_STMT must be ON for SNAP_GET_STMT to return statement text.
-        // UPDATE DBM CFG is a DB2 admin command — not valid as plain SQL.
-        // SYSPROC.ADMIN_CMD wraps it as a callable stored procedure over JDBC.
-        try (Connection admin = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
-             java.sql.CallableStatement cs = admin.prepareCall(
-                 "CALL SYSPROC.ADMIN_CMD('UPDATE DBM CFG USING DFT_MON_STMT ON')")) {
-            cs.execute();
+        // Enable statement monitoring via the container's Db2 CLP.
+        // ADMIN_CMD over JDBC cannot attach to the instance, so DFT_MON_STMT stays
+        // inactive until a restart.  execInContainer runs db2 CLP commands directly
+        // as db2inst1 with a proper instance attachment, making the switch effective
+        // immediately without a restart.
+        org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
+            "su", "-", "db2inst1", "-c",
+            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && db2 UPDATE MONITOR SWITCHES USING STATEMENT ON"
+        );
+        if (result.getExitCode() != 0) {
+            throw new IllegalStateException(
+                "Failed to enable DFT_MON_STMT: exit=" + result.getExitCode() +
+                " stderr=" + result.getStderr());
         }
 
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();

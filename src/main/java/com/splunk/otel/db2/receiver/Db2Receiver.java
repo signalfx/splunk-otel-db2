@@ -98,7 +98,8 @@ public class Db2Receiver {
             java.sql.DatabaseMetaData meta = connSupplier.get().getMetaData();
             int major = meta.getDatabaseMajorVersion();
             int minor = meta.getDatabaseMinorVersion();
-            return major * 100 + minor;
+            // Encode as major * 100 + minor * 10 so 10.5 → 1050, 9.7 → 970, matching DB2_VERSION_10_5
+            return major * 100 + minor * 10;
         } catch (Exception e) {
             log.warn("Could not detect Db2 version, defaulting to base SQL path: {}", e.getMessage());
             return 0;

@@ -106,7 +106,7 @@ class Db2ConfigTest {
     }
 
     @Test
-    void querySampleEnabledFalseIsParsed() throws Exception {
+    void querySampleEnabledTrueIsParsed() throws Exception {
         Path f = writeConfig(tmp,
             "receivers:\n" +
             "  db2:\n" +
@@ -114,13 +114,13 @@ class Db2ConfigTest {
             "    username: db2inst1\n" +
             "    password: secret\n" +
             "    database: SAMPLE\n" +
-            "    query_sample_enabled: false\n" +
+            "    query_sample_enabled: true\n" +
             "exporters:\n" +
             "  otlp:\n" +
             "    endpoint: http://collector:4317\n"
         );
         Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers().getDb2().isQuerySampleEnabled()).isFalse();
+        assertThat(cfg.getReceivers().getDb2().isQuerySampleEnabled()).isTrue();
     }
 
     @Test
