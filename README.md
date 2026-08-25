@@ -5,7 +5,7 @@ A standalone OpenTelemetry receiver for IBM Db2. Collects metrics from a Db2 dat
 ## Requirements
 
 - Java 11+
-- IBM Db2 11.5+
+- IBM Db2 9.7+ (current metric scrapers require 10.5+; 9.7–10.1 support planned via snapshot monitor fallback; integration-tested against 11.5)
 - Docker (for integration tests)
 
 ## Quick start
