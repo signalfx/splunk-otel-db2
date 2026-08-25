@@ -23,6 +23,9 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -221,7 +224,7 @@ class Db2ReceiverIntegrationTest {
     }
 
     @Test
-    void querySamplerStartsAndEmitsNoRawSql() throws Exception {
+    void querySamplerEmitsObfuscatedRecordForActiveQuery() throws Exception {
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
         SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
             .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
@@ -238,33 +241,70 @@ class Db2ReceiverIntegrationTest {
             .build();
 
         Db2ReceiverConfig config = buildConfig();
-        config.setQuerySampleInterval("2s");
+        config.setQuerySampleInterval("1s");
+
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        // Run a long-lived cross-join on catalog tables in a background thread so it stays
+        // visible in MON_GET_ACTIVITY long enough for the sampler to catch it.
+        // No literals in this query so the obfuscated form is identical to the input.
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Connection bgConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        Statement bgStmt = bgConn.createStatement();
+        Future<?> bgQuery = exec.submit(() -> {
+            try {
+                bgStmt.executeQuery(
+                    "SELECT A.COLNAME FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B, SYSCAT.COLUMNS C");
+            } catch (Exception ignored) {
+                // cancelled when we close bgStmt below — expected
+            }
+        });
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
 
-        // wait long enough for at least one sample cycle
-        Awaitility.await()
-            .atMost(15, TimeUnit.SECONDS)
-            .pollInterval(1, TimeUnit.SECONDS)
-            .until(() -> true); // just let it run; MON_GET_ACTIVITY may return 0 rows on idle DB
+        try {
+            // Wait until the sampler emits at least one record whose query text
+            // contains the sentinel table name from our background query.
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(1, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> {
+                        String text = r.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+                        return text != null && text.toUpperCase().contains("SYSCAT.COLUMNS");
+                    }));
+        } finally {
+            bgStmt.cancel();
+            bgConn.close();
+            bgQuery.cancel(true);
+            exec.shutdownNow();
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
 
-        receiver.stop();
+        // Find the matching record and assert all attributes
+        io.opentelemetry.sdk.logs.data.LogRecordData record = logExporter.getFinishedLogRecordItems()
+            .stream()
+            .filter(r -> {
+                String text = r.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+                return text != null && text.toUpperCase().contains("SYSCAT.COLUMNS");
+            })
+            .findFirst()
+            .orElseThrow();
 
-        // Every emitted log record must have an obfuscated db.query.text (no raw literals)
-        logExporter.getFinishedLogRecordItems().forEach(record -> {
-            String queryText = record.getAttributes().get(AttributeKey.stringKey("db.query.text"));
-            if (queryText != null) {
-                assertThat(queryText).doesNotContain("'");
-                assertThat(record.getAttributes().get(AttributeKey.stringKey("db.system.name")))
-                    .isEqualTo("ibm.db2");
-                assertThat(record.getAttributes().get(AttributeKey.stringKey("db.namespace")))
-                    .isEqualTo(config.getDatabase());
-            }
-        });
+        String queryText = record.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+        assertThat(queryText).doesNotContain("'");
+        assertThat(queryText).doesNotMatch(".*(?<![\\p{L}\\p{N}_$#@])\\d{4,}(?![\\p{L}\\p{N}_$#@]).*");
 
-        loggerProvider.shutdown();
-        meterProvider.shutdown();
+        assertThat(record.getAttributes().get(AttributeKey.stringKey("db.system.name"))).isEqualTo("ibm.db2");
+        assertThat(record.getAttributes().get(AttributeKey.stringKey("db.namespace"))).isEqualTo(config.getDatabase());
+        assertThat(record.getAttributes().get(AttributeKey.longKey("db2.elapsed_time_ms"))).isNotNull();
+        assertThat(record.getAttributes().get(AttributeKey.longKey("db2.member"))).isNotNull();
+        assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
     }
 
     private static List<String> metricNames(InMemoryMetricExporter exporter) {
