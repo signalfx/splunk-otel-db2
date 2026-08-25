@@ -81,20 +81,23 @@ class Db2ReceiverSnapshotIntegrationTest {
         // share the same session: UPDATE DBM CFG persists the switch for new
         // connections, CONNECT TO opens a DB session, UPDATE MONITOR SWITCHES
         // activates statement capture for currently connected applications.
+        // Enable statement monitoring. DFT_MON_STMT ON (DBM CFG) sets the default
+        // for future connections. MON_ACT_METRICS BASE (DB CFG) is online-configurable
+        // and activates activity metric collection including statement text capture
+        // for all new connections without requiring an instance restart.
+        // UPDATE MONITOR SWITCHES activates statement capture on the current CLP session.
         String dbName = db2.getDatabaseName().toUpperCase();
-        // su - sources db2inst1's .bash_profile which sets up the db2 environment.
-        // CONNECT RESET is omitted: it exits non-zero if called after MONITOR SWITCHES
-        // closes the CLP session, which would falsely fail the &&-chained script.
         String script =
             "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
             "db2 CONNECT TO " + dbName + " && " +
+            "db2 UPDATE DB CFG USING MON_ACT_METRICS BASE && " +
             "db2 UPDATE MONITOR SWITCHES USING STATEMENT ON";
         org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
             "su", "-", "db2inst1", "-c", script
         );
         if (result.getExitCode() != 0) {
             throw new IllegalStateException(
-                "Failed to enable DFT_MON_STMT: exit=" + result.getExitCode() +
+                "Failed to enable statement monitoring: exit=" + result.getExitCode() +
                 " stdout=" + result.getStdout() +
                 " stderr=" + result.getStderr());
         }
