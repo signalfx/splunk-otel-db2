@@ -34,10 +34,11 @@ receivers:
     database: "SAMPLE"          # database name (uppercase)
     collection_interval: "30s"  # metrics collection interval
     top_query_count: 250        # top N queries by exec time (future PR)
-    max_query_sample_count: 1000  # max active statements sampled per cycle
-    query_sample_interval: "10s"  # how often to sample active queries
-    top_query_interval: "60s"     # top-query collection interval (future PR)
-    use_snapshot_monitor: false   # set true for Db2 9.7–10.1 (uses SYSIBMADM.SNAPSTMT)
+    query_sample_enabled: true       # set false to disable query sampling entirely
+    max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
+    query_sample_interval: "10s"     # how often to sample active queries
+    top_query_interval: "60s"        # top-query collection interval (future PR)
+    use_snapshot_monitor: false      # set true to use SNAP_GET_STMT fallback path
     tls:
       insecure: true            # set false to enable TLS
 
@@ -107,9 +108,36 @@ Active statements are sampled at `query_sample_interval` and emitted as OTel log
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
-**Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `MON_CURRENT_SQL` + `MON_GET_CONNECTION` JOIN. No `DFT_MON_STMT` requirement. Filters out IDLE sessions and the receiver's own queries.
+**Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `SYSIBMADM.MON_CURRENT_SQL` view + `MON_GET_CONNECTION` TVF JOIN. No `DFT_MON_STMT` requirement. Filters out IDLE sessions and the receiver's own queries.
 
-**Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.1+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
+**Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
+
+## Required permissions
+
+Create a dedicated monitoring user and grant the minimum required authorities:
+
+```sql
+-- Create monitoring user (run as SYSADM or DBADM)
+CREATE USER db2mon IDENTIFIED BY '<password>';
+
+-- Authority to connect and execute monitoring functions
+GRANT CONNECT ON DATABASE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;   -- 10.5+ only, for db2.wait_time
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
+
+-- Read access to administrative views (for query sampling and metrics)
+GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;    -- snapshot path only
+
+-- For snapshot monitor path (use_snapshot_monitor: true):
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
+-- Also requires: UPDATE DBM CFG USING DFT_MON_STMT ON
+```
+
+> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or individual `SELECT` on the view. On some Db2 configurations granting `SELECT ON SYSIBMADM.MON_CURRENT_SQL` may require `SYSADM` to execute — check with your DBA if queries fail with `SQLCODE=-551`.
 
 ## Development
 

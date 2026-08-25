@@ -201,14 +201,30 @@ class QuerySampleQueryTest {
     }
 
     @Test
+    void configRejectsZeroSampleCount() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            () -> cfg.setMaxQuerySampleCount(0));
+    }
+
+    @Test
+    void configRejectsNegativeSampleCount() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            () -> cfg.setMaxQuerySampleCount(-1));
+    }
+
+    @Test
     void defaultPathSqlContainsMON_CURRENT_SQL() throws Exception {
         when(rs.next()).thenReturn(false);
         query(false).collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
-        assertThat(sqlCap.getValue()).containsIgnoringCase("MON_CURRENT_SQL");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.MON_CURRENT_SQL");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_GET_CONNECTION");
+        // must NOT be wrapped in TABLE() — it is a view, not a table function
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("TABLE(MON_CURRENT_SQL");
     }
 
     @Test
@@ -242,7 +258,7 @@ class QuerySampleQueryTest {
         String sql = sqlCap.getValue();
         assertThat(sql).contains("splunk-otel-db2");
         assertThat(sql).containsIgnoringCase("IDLE");
-        assertThat(sql).containsIgnoringCase("MON_CURRENT_SQL");
+        assertThat(sql).containsIgnoringCase("SYSIBMADM.MON_CURRENT_SQL");
     }
 
     @Test

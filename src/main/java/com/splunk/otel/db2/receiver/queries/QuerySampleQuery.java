@@ -33,21 +33,22 @@ import java.util.function.Supplier;
 public class QuerySampleQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(QuerySampleQuery.class);
 
-    // Default path: MON_CURRENT_SQL + MON_GET_CONNECTION (Db2 9.7+).
-    // No DFT_MON_STMT requirement. Filters out IDLE sessions, the receiver's own
-    // connection, and the sampler's own query text.
+    // Default path: SYSIBMADM.MON_CURRENT_SQL (administrative view, Db2 9.7+) +
+    // MON_GET_CONNECTION JOIN. MON_CURRENT_SQL is a VIEW, not a table function —
+    // do not wrap in TABLE(). Uses ELAPSED_TIME_SEC (seconds) and COORD_MEMBER.
+    // No DFT_MON_STMT requirement. Filters IDLE sessions and the receiver itself.
     private static final String SQL_MON_CURRENT =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
         "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
-        "       S.LOCAL_START_TIME, " +
-        "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - S.LOCAL_START_TIME)) AS WALL_ELAPSED_SEC, " +
+        "       CAST(NULL AS VARCHAR(26)) AS LOCAL_START_TIME, " +
+        "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
         "       C.CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
-        "       C.MEMBER, " +
+        "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
         "       CAST(-1 AS BIGINT) AS LOCK_WAIT_TIME_MS " +
-        "FROM TABLE(MON_CURRENT_SQL(CAST(NULL AS VARCHAR(255)), -2)) AS S " +
+        "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
@@ -55,23 +56,23 @@ public class QuerySampleQuery {
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
-        "ORDER BY S.LOCAL_START_TIME ASC " +
+        "ORDER BY S.ELAPSED_TIME_SEC DESC " +
         "FETCH FIRST %d ROWS ONLY";
 
-    // Db2 10.5+ variant: adds LEFT JOIN to MON_GET_ACTIVITY to expose LOCK_WAIT_TIME.
+    // Db2 10.5+ variant: LEFT JOIN to MON_GET_ACTIVITY exposes LOCK_WAIT_TIME.
     // LOCK_WAIT_TIME is in milliseconds; QuerySampleEvent.waitTimeMillis converts to seconds.
     private static final String SQL_MON_CURRENT_105 =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
         "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
-        "       S.LOCAL_START_TIME, " +
-        "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - S.LOCAL_START_TIME)) AS WALL_ELAPSED_SEC, " +
+        "       CAST(NULL AS VARCHAR(26)) AS LOCAL_START_TIME, " +
+        "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
         "       C.CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
-        "       C.MEMBER, " +
+        "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
         "       COALESCE(A.LOCK_WAIT_TIME, -1) AS LOCK_WAIT_TIME_MS " +
-        "FROM TABLE(MON_CURRENT_SQL(CAST(NULL AS VARCHAR(255)), -2)) AS S " +
+        "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         "LEFT JOIN TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A " +
@@ -83,24 +84,25 @@ public class QuerySampleQuery {
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
-        "ORDER BY S.LOCAL_START_TIME ASC " +
+        "ORDER BY S.ELAPSED_TIME_SEC DESC " +
         "FETCH FIRST %d ROWS ONLY";
 
-    // Snapshot monitor fallback (Db2 9.1+). Requires DFT_MON_STMT ON.
+    // Snapshot monitor fallback (Db2 9.7+). Requires DFT_MON_STMT ON.
     // Richer states (LOCKWAIT, UOWWAIT, etc.). Falls back to SYSCAT.STATEMENTS
     // for static (package) SQL when STMT_TEXT is null on the snapshot row.
+    // DBPARTITIONNUM is the portable partition/member column in SNAP_GET_APPL_INFO.
     private static final String SQL_SNAP =
         "SELECT COALESCE(SS.STMT_TEXT, S.TEXT) AS STMT_TEXT, " +
         "       ( CASE WHEN SA.APPL_STATUS = 'UOWEXEC' " +
         "              THEN CAST(SS.STMT_OPERATION AS VARCHAR(22)) " +
         "              ELSE CAST(SA.APPL_STATUS AS VARCHAR(22)) " +
         "         END ) AS ACTIVITY_STATE, " +
-        "       SS.STMT_START AS LOCAL_START_TIME, " +
+        "       CHAR(SS.STMT_START) AS LOCAL_START_TIME, " +
         "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) AS WALL_ELAPSED_SEC, " +
         "       SA.EXECUTION_ID AS CLIENT_USERID, " +
         "       SA.CLIENT_NNAME AS CLIENT_WRKSTNNAME, " +
         "       SA.AGENT_ID AS APPLICATION_HANDLE, " +
-        "       SA.NODE_NUMBER AS MEMBER, " +
+        "       SA.DBPARTITIONNUM AS MEMBER, " +
         "       CAST(-1 AS BIGINT) AS CPU_US " +
         "FROM SYSIBM.SYSDUMMY1, " +
         "     TABLE(SNAP_GET_APPL_INFO(CAST(NULL AS VARCHAR(255)), -1)) AS SA, " +

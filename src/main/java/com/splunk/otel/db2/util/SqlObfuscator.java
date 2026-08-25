@@ -52,21 +52,22 @@ public final class SqlObfuscator {
             return sql;
         }
 
+        // Pre-strip ALL Unicode format (Cf) codepoints before lexical analysis.
+        // Character.getType(char) misses supplementary-plane FORMAT codepoints such as
+        // U+E0020 (TAG SPACE) which are encoded as surrogate pairs in Java Strings —
+        // iterating chars would see two non-FORMAT chars and leave the codepoint intact,
+        // potentially bypassing delimiter detection. Iterating by codepoint is exact.
+        // Double-quoted identifier bodies are not yet parsed here; format chars inside
+        // them are re-introduced by the main loop via the raw sql reference — they are
+        // preserved by design (a "A\u200BB" identifier is distinct from "AB").
+        sql = stripFormatCodepoints(sql);
+
         StringBuilder out = new StringBuilder(sql.length());
         int i = 0;
         int len = sql.length();
 
         while (i < len) {
             char c = sql.charAt(i);
-
-            // Skip Unicode format chars (Cf) outside all other lexical contexts.
-            // All delimiter and boundary checks below are independently format-char-aware
-            // via nextNonFormat / prevNonFormat, so skipping here does not mis-classify
-            // adjacent tokens.
-            if (Character.getType(c) == Character.FORMAT) {
-                i++;
-                continue;
-            }
 
             // Line comment: -- ... \n or \r  (format-char-aware dash pair)
             if (c == '-') {
@@ -395,6 +396,57 @@ public final class SqlObfuscator {
         while (start < end && sb.charAt(start) == ' ') start++;
         while (end > start && sb.charAt(end - 1) == ' ') end--;
         return sb.substring(start, end);
+    }
+
+    /**
+     * Strips Unicode FORMAT (Cf) codepoints from SQL outside double-quoted identifiers,
+     * iterating by codepoint to handle supplementary-plane FORMAT chars (e.g. U+E0020
+     * TAG SPACE) that {@code Character.getType(char)} misses (it sees surrogate chars, not
+     * the actual codepoint). FORMAT chars inside {@code "..."} identifiers are preserved
+     * unchanged — a {@code "A\u200BB"} identifier is lexically distinct from {@code "AB"}.
+     */
+    static String stripFormatCodepoints(String s) {
+        // Fast path: most SQL contains no FORMAT codepoints at all.
+        boolean hasFormat = false;
+        for (int i = 0, len = s.length(); i < len; ) {
+            int cp = s.codePointAt(i);
+            if (Character.getType(cp) == Character.FORMAT) {
+                hasFormat = true;
+                break;
+            }
+            i += Character.charCount(cp);
+        }
+        if (!hasFormat) return s;
+
+        StringBuilder sb = new StringBuilder(s.length());
+        boolean inIdentifier = false;
+        for (int i = 0, len = s.length(); i < len; ) {
+            int cp = s.codePointAt(i);
+            int charCount = Character.charCount(cp);
+
+            if (inIdentifier) {
+                // Inside "..." — preserve everything verbatim
+                sb.appendCodePoint(cp);
+                if (cp == '"') {
+                    // Check for "" escape: peek at next codepoint
+                    int next = i + charCount;
+                    if (next < len && s.codePointAt(next) == '"') {
+                        sb.appendCodePoint('"');
+                        i = next + 1; // skip both
+                        continue;
+                    }
+                    inIdentifier = false; // closing quote
+                }
+            } else if (cp == '"') {
+                inIdentifier = true;
+                sb.appendCodePoint(cp);
+            } else if (Character.getType(cp) != Character.FORMAT) {
+                sb.appendCodePoint(cp);
+                // else: strip FORMAT codepoint outside identifier
+            }
+            i += charCount;
+        }
+        return sb.toString();
     }
 
     /**

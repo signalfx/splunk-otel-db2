@@ -61,7 +61,7 @@ public class Db2Receiver {
         new BufferpoolQuery(connSupplier, config.getDatabase(), meter);
         new TablespaceQuery(connSupplier, config.getDatabase(), meter);
 
-        if (otelLogger != null) {
+        if (otelLogger != null && config.isQuerySampleEnabled()) {
             QuerySampleQuery querySampleQuery = new QuerySampleQuery(
                 connSupplier,
                 config.getDatabase(),

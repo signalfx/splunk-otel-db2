@@ -339,6 +339,26 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT * FROM T WHERE C = ?");
     }
 
+    @Test
+    void supplementaryPlaneFormatCharStripped() {
+        // U+E0020 TAG SPACE (supplementary-plane Cf) is encoded as a surrogate pair in Java.
+        // Character.getType(char) on either surrogate returns SURROGATE, not FORMAT — only
+        // codepoint-aware iteration detects it. Verify it is stripped so 1<U+E0020>E123
+        // is not left as ?E123 (which would re-trigger residual-literal detection as a
+        // standalone digit-run).
+        String tagSpace = new String(Character.toChars(0xE0020));
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1" + tagSpace + "E123"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void supplementaryPlaneFormatCharBetweenQuoteAndLiteral() {
+        // U+E0020 between opening quote and content must not prevent obfuscation
+        String tagSpace = new String(Character.toChars(0xE0020));
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE K = '" + tagSpace + "secret'"))
+            .isEqualTo("SELECT * FROM T WHERE K = ?");
+    }
+
     // --- Prefixed literal identifier boundary ---
 
     @Test
