@@ -60,7 +60,7 @@ All metrics carry `db.namespace` (database name) and `db2.member` (member number
 | `db2.connection.active` | UpDownCounter | `{connection}` | Connections executing in the engine |
 | `db2.connection.max` | UpDownCounter | `{connection}` | Peak simultaneous connections |
 | `db2.lock.wait.count` | Counter | `{wait}` | Total lock waits |
-| `db2.lock.wait_time` | Counter | `ms` | Total time spent waiting for locks |
+| `db2.lock.wait_time` | Counter | `s` | Total time spent waiting for locks |
 | `db2.lock.timeout.count` | Counter | `{timeout}` | Lock timeouts |
 | `db2.lock.escalation.count` | Counter | `{escalation}` | Lock escalations (row → table) |
 | `db2.lock.space_used` | UpDownCounter | `By` | Lock list memory in use |
@@ -77,8 +77,8 @@ Additional attributes: `db2.bufferpool` (pool name), `db2.read_type` (`data`, `i
 | `db2.buffer_pool.logical_reads` | Counter | `{read}` | Logical page reads |
 | `db2.buffer_pool.physical_reads` | Counter | `{read}` | Physical page reads from disk |
 | `db2.buffer_pool.writes` | Counter | `{write}` | Pages written to disk (data + index + XDA) |
-| `db2.buffer_pool.read_time` | Counter | `ms` | Time spent reading from disk |
-| `db2.buffer_pool.write_time` | Counter | `ms` | Time spent writing to disk |
+| `db2.buffer_pool.read_time` | Counter | `s` | Time spent reading from disk |
+| `db2.buffer_pool.write_time` | Counter | `s` | Time spent writing to disk |
 
 ### Tablespace (`MON_GET_TABLESPACE`)
 
@@ -103,7 +103,7 @@ Active statements are sampled at `query_sample_interval` and emitted as OTel log
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |
-| `db2.cpu_time_ms` | CPU time ms (default path only) |
+| `db2.cpu_time` | CPU time in seconds (default path only) |
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 

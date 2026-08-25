@@ -37,7 +37,7 @@ import java.util.function.Supplier;
  *   db2.query_start       = statement start timestamp
  *   db2.session.duration  = wall-clock elapsed seconds (double)
  *   db2.member            = Db2 member number (default path only)
- *   db2.cpu_time_ms       = CPU time ms (default path only, from MON_GET_CONNECTION)
+ *   db2.cpu_time          = CPU time in seconds (default path only, from MON_GET_CONNECTION)
  *   user.name             = authenticated user ID
  *   client.address        = client workstation name
  *
@@ -59,7 +59,7 @@ public class QuerySampleQuery {
         "       C.CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
         "       C.MEMBER, " +
-        "       C.TOTAL_CPU_TIME / 1000 AS CPU_MS " +
+        "       C.TOTAL_CPU_TIME AS CPU_US " +
         "FROM TABLE(MON_CURRENT_SQL(CAST(NULL AS VARCHAR(255)), -2)) AS S " +
         "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
@@ -86,7 +86,7 @@ public class QuerySampleQuery {
         "       SA.CLIENT_NNAME AS CLIENT_WRKSTNNAME, " +
         "       SA.AGENT_ID AS APPLICATION_HANDLE, " +
         "       SA.NODE_NUMBER AS MEMBER, " +
-        "       CAST(-1 AS BIGINT) AS CPU_MS " +
+        "       CAST(-1 AS BIGINT) AS CPU_US " +
         "FROM SYSIBM.SYSDUMMY1, " +
         "     TABLE(SNAP_GET_APPL_INFO(CAST(NULL AS VARCHAR(255)), -1)) AS SA, " +
         "     TABLE(SNAP_GET_STMT(CAST(NULL AS VARCHAR(255)), -1)) AS SS " +
@@ -108,7 +108,7 @@ public class QuerySampleQuery {
     private static final AttributeKey<String> DB2_QUERY_START = AttributeKey.stringKey("db2.query_start");
     private static final AttributeKey<Double> DB2_DURATION    = AttributeKey.doubleKey("db2.session.duration");
     private static final AttributeKey<Long>   DB2_MEMBER      = AttributeKey.longKey("db2.member");
-    private static final AttributeKey<Long>   DB2_CPU_MS      = AttributeKey.longKey("db2.cpu_time_ms");
+    private static final AttributeKey<Double> DB2_CPU_TIME    = AttributeKey.doubleKey("db2.cpu_time");
     private static final AttributeKey<String> USER_NAME       = AttributeKey.stringKey("user.name");
     private static final AttributeKey<String> CLIENT_ADDRESS  = AttributeKey.stringKey("client.address");
 
@@ -159,7 +159,7 @@ public class QuerySampleQuery {
                     String authId     = rs.getString("CLIENT_USERID");
                     String clientHost = rs.getString("CLIENT_WRKSTNNAME");
                     long member       = rs.getLong("MEMBER");
-                    long cpuMs        = rs.getLong("CPU_MS");
+                    long cpuUs        = rs.getLong("CPU_US");
 
                     AttributesBuilder attrs = Attributes.builder()
                         .put(EVENT_NAME,     "db.server.query_sample")
@@ -174,7 +174,7 @@ public class QuerySampleQuery {
                     if (startTime  != null) attrs.put(DB2_QUERY_START, startTime);
                     if (authId     != null) attrs.put(USER_NAME,       authId);
                     if (clientHost != null) attrs.put(CLIENT_ADDRESS,  clientHost);
-                    if (cpuMs >= 0)         attrs.put(DB2_CPU_MS,      cpuMs);
+                    if (cpuUs >= 0)         attrs.put(DB2_CPU_TIME,    cpuUs / 1_000_000.0);
 
                     otelLogger.logRecordBuilder()
                         .setSeverity(Severity.INFO)

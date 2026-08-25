@@ -55,7 +55,7 @@ class QuerySampleQueryTest {
         when(rs.getString("CLIENT_WRKSTNNAME")).thenReturn(clientHost);
         when(rs.getString("APPLICATION_HANDLE")).thenReturn(appHandle);
         when(rs.getLong("MEMBER")).thenReturn(member);
-        when(rs.getLong("CPU_MS")).thenReturn(cpuMs);
+        when(rs.getLong("CPU_US")).thenReturn(cpuMs);
     }
 
     @Test
@@ -87,7 +87,7 @@ class QuerySampleQueryTest {
         assertThat(attrs.get(AttributeKey.stringKey("client.address"))).isEqualTo("client-host");
         assertThat(attrs.get(AttributeKey.stringKey("db2.application_handle"))).isEqualTo("12345");
         assertThat(attrs.get(AttributeKey.longKey("db2.member"))).isEqualTo(0L);
-        assertThat(attrs.get(AttributeKey.longKey("db2.cpu_time_ms"))).isEqualTo(100L);
+        assertThat(attrs.get(AttributeKey.doubleKey("db2.cpu_time"))).isEqualTo(100L / 1_000_000.0);
     }
 
     @Test
@@ -103,7 +103,7 @@ class QuerySampleQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
 
-        assertThat(cap.getValue().get(AttributeKey.longKey("db2.cpu_time_ms"))).isNull();
+        assertThat(cap.getValue().get(AttributeKey.doubleKey("db2.cpu_time"))).isNull();
     }
 
     @Test
