@@ -143,7 +143,8 @@ class Db2ReceiverSnapshotIntegrationTest {
 
         Thread.sleep(3000);
 
-        // Diagnostic: log what SNAP_GET_STMT sees so CI failures are self-explanatory
+        // Diagnostic: capture what SNAP_GET_STMT sees; include in assertion failure message
+        StringBuilder snapDiag = new StringBuilder();
         try (Connection diagConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
              java.sql.Statement diagSt = diagConn.createStatement();
              java.sql.ResultSet diagRs = diagSt.executeQuery(
@@ -155,11 +156,13 @@ class Db2ReceiverSnapshotIntegrationTest {
             int diagCount = 0;
             while (diagRs.next()) {
                 diagCount++;
-                System.out.printf("[DIAG] SNAP row agent=%s status=%s stop=%s text=%s%n",
+                snapDiag.append(String.format("  agent=%s status=%s stop=%s text=%s\n",
                     diagRs.getString("AGENT_ID"), diagRs.getString("APPL_STATUS"),
-                    diagRs.getString("STMT_STOP"), diagRs.getString("STMT_TEXT"));
+                    diagRs.getString("STMT_STOP"), diagRs.getString("STMT_TEXT")));
             }
-            System.out.printf("[DIAG] SNAP_GET_STMT total rows: %d%n", diagCount);
+            snapDiag.insert(0, "SNAP_GET_STMT rows=" + diagCount + "\n");
+        } catch (Exception diagEx) {
+            snapDiag.append("SNAP_GET_STMT query failed: ").append(diagEx.getMessage());
         }
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
@@ -170,6 +173,7 @@ class Db2ReceiverSnapshotIntegrationTest {
             Awaitility.await()
                 .atMost(60, TimeUnit.SECONDS)
                 .pollInterval(1, TimeUnit.SECONDS)
+                .failWith(snapDiag::toString)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
                     .anyMatch(r -> {
                         String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
