@@ -247,20 +247,26 @@ class Db2ReceiverIntegrationTest {
         props.setProperty("user",     db2.getUsername());
         props.setProperty("password", db2.getPassword());
 
-        // Run a long-lived cross-join on catalog tables in a background thread so it stays
-        // visible in MON_GET_ACTIVITY long enough for the sampler to catch it.
-        // No literals in this query so the obfuscated form is identical to the input.
+        // Run a 4-way cross-join that produces billions of rows — guaranteed to stay active
+        // for well over 30 seconds on any container size. No literals, so the obfuscated
+        // form is identical to the input.
+        // Start the background query BEFORE the sampler so it is already executing when
+        // the first MON_CURRENT_SQL poll fires.
         ExecutorService exec = Executors.newSingleThreadExecutor();
         Connection bgConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
         Statement bgStmt = bgConn.createStatement();
         Future<?> bgQuery = exec.submit(() -> {
             try {
                 bgStmt.executeQuery(
-                    "SELECT A.COLNAME FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B, SYSCAT.COLUMNS C");
+                    "SELECT A.COLNAME FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B, " +
+                    "SYSCAT.COLUMNS C, SYSCAT.COLUMNS D");
             } catch (Exception ignored) {
-                // cancelled when we close bgStmt below — expected
+                // cancelled when bgStmt.cancel() is called below — expected
             }
         });
+
+        // Give the background query a moment to reach the engine before the first poll
+        Thread.sleep(2000);
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
@@ -269,7 +275,7 @@ class Db2ReceiverIntegrationTest {
             // Wait until the sampler emits at least one record whose query text
             // contains the sentinel table name from our background query.
             Awaitility.await()
-                .atMost(30, TimeUnit.SECONDS)
+                .atMost(60, TimeUnit.SECONDS)
                 .pollInterval(1, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
                     .anyMatch(r -> {
