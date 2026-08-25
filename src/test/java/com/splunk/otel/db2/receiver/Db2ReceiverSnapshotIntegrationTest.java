@@ -76,15 +76,18 @@ class Db2ReceiverSnapshotIntegrationTest {
     @Test
     void snapshotPathEmitsObfuscatedRecordForActiveQuery() throws Exception {
         // Enable statement monitoring via the container's Db2 CLP.
-        // Each `db2 <cmd>` invocation is a separate CLP session — CONNECT TO in one
-        // call does not carry over to the next. Use `db2 -t` with semicolon-delimited
-        // commands so all three run inside a single session: UPDATE DBM CFG persists
-        // the setting for new connections, CONNECT TO opens a session, and UPDATE
-        // MONITOR SWITCHES activates statement capture for all current connections.
+        // Run a bash script as db2inst1 so the db2 profile is sourced and all
+        // commands execute in one shell session. UPDATE MONITOR SWITCHES requires
+        // an active database connection; the CONNECT TO provides it.
         String dbName = db2.getDatabaseName().toUpperCase();
+        String script =
+            "source ~db2inst1/sqllib/db2profile\n" +
+            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON\n" +
+            "db2 CONNECT TO " + dbName + "\n" +
+            "db2 UPDATE MONITOR SWITCHES USING STATEMENT ON\n" +
+            "db2 CONNECT RESET\n";
         org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
-            "su", "-", "db2inst1", "-c",
-            "db2 -t \"UPDATE DBM CFG USING DFT_MON_STMT ON; CONNECT TO " + dbName + "; UPDATE MONITOR SWITCHES USING STATEMENT ON; CONNECT RESET;\""
+            "bash", "-c", script
         );
         if (result.getExitCode() != 0) {
             throw new IllegalStateException(
