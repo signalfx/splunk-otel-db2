@@ -249,16 +249,37 @@ class SqlObfuscatorTest {
 
     @Test
     void formatCharInsideBlockCommentConsumedWithComment() {
-        // Format char inside a comment is consumed with the comment — must not leak
         assertThat(SqlObfuscator.obfuscate("SELECT ID /* \u200B */ FROM T"))
             .isEqualTo("SELECT ID FROM T");
     }
 
     @Test
     void formatCharInsideSingleQuotedStringConsumedWithLiteral() {
-        // Format char inside a string literal is consumed with the literal — must not leak
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = 'Ali\u200Bce'"))
             .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+    }
+
+    @Test
+    void formatCharBetweenDashesDoesNotBreakLineComment() {
+        // -\u200B- must still be recognised as -- line comment, not two minus signs
+        assertThat(SqlObfuscator.obfuscate("SELECT ID -\u200B- API_KEY=secret\nFROM T"))
+            .isEqualTo("SELECT ID FROM T");
+    }
+
+    @Test
+    void formatCharInsideIdentifierWithDigitNotObfuscated() {
+        // COL\u200B2024 — format char between identifier and digit; digit is part of
+        // the identifier, so 2024 must NOT be treated as a standalone numeric literal
+        assertThat(SqlObfuscator.obfuscate("SELECT COL\u200B2024 FROM T"))
+            .isEqualTo("SELECT COL2024 FROM T");
+    }
+
+    @Test
+    void formatCharBetweenNumericTokensMergesIntoOneLiteral() {
+        // 12\u200B34 — format char in the middle of a numeric literal; the whole token
+        // must produce a single ? not two
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 12\u200B34"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
     }
 
     // --- Fail-closed safety net ---

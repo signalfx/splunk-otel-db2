@@ -20,7 +20,8 @@ import java.util.regex.Pattern;
  *                          1.5E10, 2.0E-3      →  ?
  *   line comments          -- …                →  stripped → space  (\n or \r)
  *   block comments         /* … * /            →  stripped → space (nested supported)
- *   Unicode format chars   U+200B, U+00AD …    →  stripped outside identifiers/strings/comments
+ *   Unicode format chars   U+200B, U+00AD …    →  stripped; delimiter and boundary
+ *                          checks are format-char-aware so tokens are not mis-split
  *
  * Preserved:
  *   double-quoted identifiers  "MyTable", "Order  History"  — Db2 LUW uses "
@@ -57,42 +58,54 @@ public final class SqlObfuscator {
         while (i < len) {
             char c = sql.charAt(i);
 
-            // Line comment: -- ... \n or \r
-            // Format chars inside comments are consumed along with the comment body.
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
-                i += 2;
-                while (i < len && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
-                    i++;
-                }
-                out.append(' ');
+            // Skip Unicode format chars (Cf). Checks below are format-char-aware so
+            // skipping here does not mis-split tokens (see nextNonFormat / prevNonFormat).
+            if (Character.getType(c) == Character.FORMAT) {
+                i++;
                 continue;
+            }
+
+            // Line comment: -- ... \n or \r
+            // Look past any format chars between the two dashes.
+            if (c == '-') {
+                int next = nextNonFormat(sql, i + 1, len);
+                if (next < len && sql.charAt(next) == '-') {
+                    i = next + 1;
+                    while (i < len && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
+                        i++;
+                    }
+                    out.append(' ');
+                    continue;
+                }
             }
 
             // Block comment: /* ... */ with nesting support
-            // Format chars inside comments are consumed along with the comment body.
-            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                i += 2;
-                int depth = 1;
-                while (i + 1 < len && depth > 0) {
-                    if (sql.charAt(i) == '/' && sql.charAt(i + 1) == '*') {
-                        depth++;
-                        i += 2;
-                    } else if (sql.charAt(i) == '*' && sql.charAt(i + 1) == '/') {
-                        depth--;
-                        i += 2;
-                    } else {
-                        i++;
+            // Look past any format chars between / and *.
+            if (c == '/') {
+                int next = nextNonFormat(sql, i + 1, len);
+                if (next < len && sql.charAt(next) == '*') {
+                    i = next + 1;
+                    int depth = 1;
+                    while (i + 1 < len && depth > 0) {
+                        if (sql.charAt(i) == '/' && sql.charAt(i + 1) == '*') {
+                            depth++;
+                            i += 2;
+                        } else if (sql.charAt(i) == '*' && sql.charAt(i + 1) == '/') {
+                            depth--;
+                            i += 2;
+                        } else {
+                            i++;
+                        }
                     }
+                    if (depth > 0) {
+                        i = len; // unterminated — consume to end
+                    }
+                    out.append(' ');
+                    continue;
                 }
-                if (depth > 0) {
-                    i = len; // unterminated — consume to end
-                }
-                out.append(' ');
-                continue;
             }
 
             // Prefixed string literals: X'...' G'...' N'...' GX'...' BX'...' UX'...' U&'...'
-            // Format chars inside the literal body are consumed and replaced by ?.
             int prefixSkip = prefixedLiteralSkip(sql, i, len);
             if (prefixSkip > 0) {
                 i += prefixSkip; // skip prefix chars + opening '
@@ -111,7 +124,6 @@ public final class SqlObfuscator {
             }
 
             // Single-quoted string with '' escape: 'O''Brien'
-            // Format chars inside the literal body are consumed and replaced by ?.
             if (c == '\'') {
                 i++;
                 while (i < len) {
@@ -151,13 +163,28 @@ public final class SqlObfuscator {
 
             // Numeric literal — only when preceded by a non-identifier character.
             // Db2 identifier chars: Unicode letters/digits, _, $, #, @
+            // Look back past format chars to find the true preceding context character.
             if (Character.isDigit(c)) {
-                char prev = (i == 0) ? ' ' : sql.charAt(i - 1);
+                char prev = prevNonFormat(sql, i - 1);
                 boolean insideIdentifier = Character.isLetterOrDigit(prev)
                         || prev == '_' || prev == '$' || prev == '#' || prev == '@';
                 if (!insideIdentifier) {
-                    while (i < len && (Character.isDigit(sql.charAt(i)) || sql.charAt(i) == '.')) {
-                        i++;
+                    // Consume mantissa, skipping format chars between digit groups.
+                    while (i < len) {
+                        char ch = sql.charAt(i);
+                        if (Character.isDigit(ch) || ch == '.') {
+                            i++;
+                        } else if (Character.getType(ch) == Character.FORMAT) {
+                            // Skip format chars only if the next real char is a digit or dot
+                            int nxt = nextNonFormat(sql, i, len);
+                            if (nxt < len && (Character.isDigit(sql.charAt(nxt)) || sql.charAt(nxt) == '.')) {
+                                i = nxt;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                     // optional exponent: [eE][+-]?[0-9]+
                     if (i < len && (sql.charAt(i) == 'e' || sql.charAt(i) == 'E')) {
@@ -179,14 +206,6 @@ public final class SqlObfuscator {
                 }
             }
 
-            // Strip Unicode format chars (Cf category) outside all lexical contexts.
-            // Inside strings/comments they are already consumed; inside "..." identifiers
-            // they are preserved by the branch above. Only plain SQL structure reaches here.
-            if (Character.getType(c) == Character.FORMAT) {
-                i++;
-                continue;
-            }
-
             out.append(c);
             i++;
         }
@@ -201,6 +220,25 @@ public final class SqlObfuscator {
         }
 
         return result;
+    }
+
+    /** Returns the index of the next non-format character at or after {@code i}. */
+    private static int nextNonFormat(String sql, int i, int len) {
+        while (i < len && Character.getType(sql.charAt(i)) == Character.FORMAT) {
+            i++;
+        }
+        return i;
+    }
+
+    /**
+     * Returns the first non-format character found scanning backward from {@code i}.
+     * Returns a space if no such character exists (safe "not an identifier char" sentinel).
+     */
+    private static char prevNonFormat(String sql, int i) {
+        while (i >= 0 && Character.getType(sql.charAt(i)) == Character.FORMAT) {
+            i--;
+        }
+        return (i >= 0) ? sql.charAt(i) : ' ';
     }
 
     /**
@@ -307,13 +345,10 @@ public final class SqlObfuscator {
         if (i + 2 < len && sql.charAt(i + 2) == '\'') {
             char next = sql.charAt(i + 1);
             if (c == 'U' || c == 'u') {
-                // UX/ux (Unicode hex) or U&/u& (Unicode escape)
                 if (next == 'X' || next == 'x' || next == '&') return 3;
             } else if (c == 'G' || c == 'g') {
-                // GX/gx (hexadecimal-graphic)
                 if (next == 'X' || next == 'x') return 3;
             } else if (c == 'B' || c == 'b') {
-                // BX/bx (binary hex)
                 if (next == 'X' || next == 'x') return 3;
             }
         }
