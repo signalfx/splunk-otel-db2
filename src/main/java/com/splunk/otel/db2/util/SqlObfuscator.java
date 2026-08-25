@@ -247,7 +247,7 @@ public final class SqlObfuscator {
      * Scans past double-quoted identifiers (which legitimately may contain
      * single quotes or digit-sequences) to avoid false positives.
      */
-    private static boolean containsResidualLiteral(String result) {
+    static boolean containsResidualLiteral(String result) {
         // Build a version with "..." identifier bodies blanked to avoid false positives
         // from identifiers like "it's" (contains ') or "2024" (contains digit-run).
         StringBuilder stripped = new StringBuilder(result.length());
@@ -280,29 +280,68 @@ public final class SqlObfuscator {
 
     /**
      * Strips Unicode format characters (category Cf — zero-width spaces, soft
-     * hyphens, etc.) that can produce different fingerprints for identical queries.
+     * hyphens, etc.) outside double-quoted identifiers. Format chars inside
+     * "..." are preserved: "A\u200BB" and "AB" can name different Db2 objects.
      * Only allocates a new string when format chars are actually present.
      */
     private static String stripFormatChars(String sql) {
+        // First pass: check if any stripping is needed at all
+        boolean needsStrip = false;
+        boolean inIdentifier = false;
         for (int i = 0; i < sql.length(); i++) {
-            if (Character.getType(sql.charAt(i)) == Character.FORMAT) {
-                StringBuilder sb = new StringBuilder(sql.length());
-                sb.append(sql, 0, i);
-                for (int j = i + 1; j < sql.length(); j++) {
-                    char c = sql.charAt(j);
-                    if (Character.getType(c) != Character.FORMAT) {
-                        sb.append(c);
+            char c = sql.charAt(i);
+            if (inIdentifier) {
+                if (c == '"') {
+                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
+                        i++; // "" escape — stay in identifier
+                    } else {
+                        inIdentifier = false;
                     }
                 }
-                return sb.toString();
+            } else if (c == '"') {
+                inIdentifier = true;
+            } else if (Character.getType(c) == Character.FORMAT) {
+                needsStrip = true;
+                break;
             }
         }
-        return sql;
+        if (!needsStrip) {
+            return sql;
+        }
+
+        // Second pass: copy, skipping format chars outside identifiers
+        StringBuilder sb = new StringBuilder(sql.length());
+        inIdentifier = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (inIdentifier) {
+                sb.append(c);
+                if (c == '"') {
+                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
+                        sb.append('"');
+                        i++; // "" escape — append both, stay in identifier
+                    } else {
+                        inIdentifier = false;
+                    }
+                }
+            } else if (c == '"') {
+                inIdentifier = true;
+                sb.append(c);
+            } else if (Character.getType(c) != Character.FORMAT) {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     /**
      * Returns the number of characters to skip past the prefix + opening quote
      * for Db2 prefixed string literals. Returns 0 if not a prefixed literal.
+     *
+     * Supported forms:
+     *   Single-char:  X/x (hex), G/g (graphic), N/n (national)
+     *   Two-char:     GX/gx (hex-graphic), BX/bx (binary), UX/ux (Unicode hex),
+     *                 U&/u& (Unicode escape)
      */
     private static int prefixedLiteralSkip(String sql, int i, int len) {
         char c = sql.charAt(i);
@@ -312,11 +351,18 @@ public final class SqlObfuscator {
                 return 2;
             }
         }
-        // Two-char prefixes: UX/ux or U&/u& followed immediately by '
-        if ((c == 'U' || c == 'u') && i + 2 < len && sql.charAt(i + 2) == '\'') {
+        // Two-char prefixes followed immediately by '
+        if (i + 2 < len && sql.charAt(i + 2) == '\'') {
             char next = sql.charAt(i + 1);
-            if (next == 'X' || next == 'x' || next == '&') {
-                return 3;
+            if (c == 'U' || c == 'u') {
+                // UX/ux (Unicode hex) or U&/u& (Unicode escape)
+                if (next == 'X' || next == 'x' || next == '&') return 3;
+            } else if (c == 'G' || c == 'g') {
+                // GX/gx (hexadecimal-graphic)
+                if (next == 'X' || next == 'x') return 3;
+            } else if (c == 'B' || c == 'b') {
+                // BX/bx (binary hex)
+                if (next == 'X' || next == 'x') return 3;
             }
         }
         return 0;

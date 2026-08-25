@@ -239,7 +239,34 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT * FROM T WHERE NAME = ?");
     }
 
+    @Test
+    void formatCharInsideIdentifierPreserved() {
+        // "A\u200BB" and "AB" can name different Db2 objects — format chars inside
+        // "..." identifiers must not be stripped
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM \"A\u200BB\""))
+            .isEqualTo("SELECT * FROM \"A\u200BB\"");
+    }
+
     // --- Fail-closed safety net ---
+
+    @Test
+    void containsResidualLiteralDetectsUnmatchedQuote() {
+        // Direct test of the safety-net helper — residual ' triggers true
+        assertThat(SqlObfuscator.containsResidualLiteral("SELECT * FROM T WHERE X = bad'input"))
+            .isTrue();
+    }
+
+    @Test
+    void containsResidualLiteralDetectsDigitRun() {
+        assertThat(SqlObfuscator.containsResidualLiteral("SELECT * FROM T WHERE X = 12345"))
+            .isTrue();
+    }
+
+    @Test
+    void containsResidualLiteralCleanOutputReturnsFalse() {
+        assertThat(SqlObfuscator.containsResidualLiteral("SELECT * FROM T WHERE X = ?"))
+            .isFalse();
+    }
 
     @Test
     void obfuscationFailedConstantHasExpectedValue() {
@@ -396,8 +423,15 @@ class SqlObfuscatorTest {
     // --- Parameterised: all Db2 prefixed literal variants ---
 
     @ParameterizedTest
-    @ValueSource(strings = {"X'FF'", "x'FF'", "G'hello'", "g'hello'", "N'Alice'", "n'Alice'",
-                            "UX'0041'", "ux'0041'", "U&'\\0041'", "u&'\\0041'"})
+    @ValueSource(strings = {
+        "X'FF'", "x'FF'",
+        "G'hello'", "g'hello'",
+        "N'Alice'", "n'Alice'",
+        "UX'0041'", "ux'0041'",
+        "U&'\\0041'", "u&'\\0041'",
+        "GX'FF01'", "gx'FF01'",
+        "BX'10110101'", "bx'10110101'"
+    })
     void allPrefixedLiteralVariantsObfuscated(String literal) {
         String sql = "SELECT * FROM T WHERE C = " + literal;
         assertThat(SqlObfuscator.obfuscate(sql))
