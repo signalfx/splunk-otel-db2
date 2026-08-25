@@ -82,8 +82,8 @@ class Db2ReceiverSnapshotIntegrationTest {
         // connections, CONNECT TO opens a DB session, UPDATE MONITOR SWITCHES
         // activates statement capture for currently connected applications.
         String dbName = db2.getDatabaseName().toUpperCase();
+        // su - sources db2inst1's .bash_profile which sets up the db2 environment
         String script =
-            ". /home/db2inst1/sqllib/db2profile && " +
             "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
             "db2 CONNECT TO " + dbName + " && " +
             "db2 UPDATE MONITOR SWITCHES USING STATEMENT ON && " +
