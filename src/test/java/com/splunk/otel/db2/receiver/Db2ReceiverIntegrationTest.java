@@ -291,6 +291,8 @@ class Db2ReceiverIntegrationTest {
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
 
+        // Capture record BEFORE shutdown — loggerProvider.shutdown() clears the exporter.
+        io.opentelemetry.sdk.logs.data.LogRecordData record;
         try {
             Awaitility.await()
                 .atMost(30, TimeUnit.SECONDS)
@@ -300,6 +302,14 @@ class Db2ReceiverIntegrationTest {
                         String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
                         return text != null && text.toUpperCase().contains("SPLUNK_OTEL_LOCK_TEST");
                     }));
+
+            record = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> {
+                    String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                    return text != null && text.toUpperCase().contains("SPLUNK_OTEL_LOCK_TEST");
+                })
+                .findFirst()
+                .orElseThrow();
         } finally {
             ownerConn.rollback();  // releases the X-lock, unblocks bgConn; table still exists
             ownerConn.close();
@@ -319,16 +329,6 @@ class Db2ReceiverIntegrationTest {
             loggerProvider.shutdown();
             meterProvider.shutdown();
         }
-
-        // Find the matching record and assert all attributes
-        io.opentelemetry.sdk.logs.data.LogRecordData record = logExporter.getFinishedLogRecordItems()
-            .stream()
-            .filter(r -> {
-                String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
-                return text != null && text.toUpperCase().contains("SPLUNK_OTEL_LOCK_TEST");
-            })
-            .findFirst()
-            .orElseThrow();
 
         String queryText = record.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
         assertThat(queryText).doesNotContain("'");
