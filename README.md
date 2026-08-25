@@ -34,7 +34,7 @@ receivers:
     database: "SAMPLE"          # database name (uppercase)
     collection_interval: "30s"  # metrics collection interval
     top_query_count: 250        # top N queries by exec time (future PR)
-    query_sample_enabled: true       # set false to disable query sampling entirely
+    query_sample_enabled: false      # set true to enable query sampling (opt-in)
     max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"     # how often to sample active queries
     top_query_interval: "60s"        # top-query collection interval (future PR)
@@ -91,11 +91,12 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 
 ## Query samples (log records)
 
-Active statements are sampled at `query_sample_interval` and emitted as OTel log records (severity INFO). SQL text is obfuscated before emission — literal values are replaced with `?`.
+Active statements are sampled at `query_sample_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `query_sample_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+
+The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
 
 | Attribute | Description |
 |---|---|
-| `event.name` | Always `db.server.query_sample` |
 | `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
@@ -114,30 +115,43 @@ Active statements are sampled at `query_sample_interval` and emitted as OTel log
 
 ## Required permissions
 
-Create a dedicated monitoring user and grant the minimum required authorities:
+Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
+
+```bash
+# Create the OS user on the Db2 server (Linux example)
+useradd -m db2mon
+echo 'db2mon:<password>' | chpasswd
+```
 
 ```sql
--- Create monitoring user (run as SYSADM or DBADM)
-CREATE USER db2mon IDENTIFIED BY '<password>';
+-- Connect to the database as SYSADM or DBADM, then grant:
 
--- Authority to connect and execute monitoring functions
+-- Basic connect
 GRANT CONNECT ON DATABASE TO USER db2mon;
+
+-- Stored procedure called unconditionally on every connection
+GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
+
+-- Core metrics scrapers
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;   -- 10.5+ only, for db2.wait_time
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
 
--- Read access to administrative views (for query sampling and metrics)
+-- Query sampling (query_sample_enabled: true, default path)
 GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
-GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;    -- snapshot path only
 
--- For snapshot monitor path (use_snapshot_monitor: true):
+-- Db2 10.5+ wait time attribute (db2.wait_time)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
+
+-- Snapshot monitor path (use_snapshot_monitor: true)
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
--- Also requires: UPDATE DBM CFG USING DFT_MON_STMT ON
+-- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
+-- Also requires (run as SYSADM): CALL SYSPROC.ADMIN_CMD('UPDATE DBM CFG USING DFT_MON_STMT ON')
 ```
 
-> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or individual `SELECT` on the view. On some Db2 configurations granting `SELECT ON SYSIBMADM.MON_CURRENT_SQL` may require `SYSADM` to execute — check with your DBA if queries fail with `SQLCODE=-551`.
+> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
 
 ## Development
 

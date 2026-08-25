@@ -18,7 +18,6 @@ import java.util.concurrent.TimeUnit;
  */
 public final class QuerySampleEvent {
 
-    public static final AttributeKey<String> EVENT_NAME      = AttributeKey.stringKey("event.name");
     public static final AttributeKey<String> DB_SYSTEM       = AttributeKey.stringKey("db.system.name");
     public static final AttributeKey<String> DB_NAMESPACE    = AttributeKey.stringKey("db.namespace");
     public static final AttributeKey<String> DB_QUERY_TEXT   = AttributeKey.stringKey("db.query.text");
@@ -79,7 +78,6 @@ public final class QuerySampleEvent {
 
     public void emit(Logger logger, Instant timestamp) {
         AttributesBuilder b = Attributes.builder()
-            .put(EVENT_NAME,   "db.server.query_sample")
             .put(DB_SYSTEM,    "ibm.db2")
             .put(DB_NAMESPACE, dbNamespace)
             .put(DB_QUERY_TEXT, queryText)
@@ -95,6 +93,7 @@ public final class QuerySampleEvent {
         if (waitTimeSec   != null) b.put(DB2_WAIT_TIME,   waitTimeSec);
 
         logger.logRecordBuilder()
+            .setEventName("db.server.query_sample")
             .setSeverity(Severity.INFO)
             .setSeverityText("INFO")
             .setTimestamp(timestamp.toEpochMilli(), TimeUnit.MILLISECONDS)

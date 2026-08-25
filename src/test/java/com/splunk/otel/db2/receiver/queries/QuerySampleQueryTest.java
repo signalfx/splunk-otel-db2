@@ -86,8 +86,7 @@ class QuerySampleQueryTest {
         io.opentelemetry.api.common.Attributes attrs = cap.getValue();
         assertThat(attrs.get(QuerySampleEvent.DB_QUERY_TEXT))
             .isEqualTo("SELECT * FROM T WHERE ID = ?");
-        assertThat(attrs.get(QuerySampleEvent.EVENT_NAME))
-            .isEqualTo("db.server.query_sample");
+        verify(logBuilder).setEventName("db.server.query_sample");
         assertThat(attrs.get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(attrs.get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo("TESTDB");
         assertThat(attrs.get(QuerySampleEvent.DB2_ACTIVITY)).isEqualTo("EXECUTING SELECT");

@@ -54,6 +54,7 @@ public class Db2Config {
                     if (db2.get("max_query_sample_count") != null) rc.setMaxQuerySampleCount(asInt(db2, "max_query_sample_count"));
                     if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
                     if (db2.get("top_query_interval") != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
+                    if (db2.get("query_sample_enabled") != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
                     if (db2.get("use_snapshot_monitor") != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
                     if (db2.get("tls") != null) {
                         Map<String, Object> tls = (Map<String, Object>) db2.get("tls");

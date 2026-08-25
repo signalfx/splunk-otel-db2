@@ -65,9 +65,6 @@ attributes:
     enum: [capacity, used, free]
 
   # --- query sample event attributes ---
-  event.name:
-    description: OTel event name. Always db.server.query_sample.
-    type: string
   db.query.text:
     description: Obfuscated SQL statement text. Literal values replaced with ?.
     type: string
@@ -292,14 +289,13 @@ metrics:
 
 events:
   db.server.query_sample:
-    enabled: true
+    enabled: false
     description: >
       An active SQL statement sampled from MON_CURRENT_SQL (default path, Db2 9.7+)
       or SNAP_GET_STMT (snapshot monitor path). SQL text is obfuscated before emission —
       literal values are replaced with ?. Emitted at query_sample_interval as OTel log
       records with severity INFO.
     attributes:
-      - event.name
       - db.system.name
       - db.namespace
       - db.query.text

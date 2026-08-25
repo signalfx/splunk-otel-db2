@@ -241,6 +241,7 @@ class Db2ReceiverIntegrationTest {
             .build();
 
         Db2ReceiverConfig config = buildConfig();
+        config.setQuerySampleEnabled(true);
         config.setQuerySampleInterval("1s");
 
         Properties props = new Properties();

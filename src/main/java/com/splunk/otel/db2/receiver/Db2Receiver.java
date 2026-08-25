@@ -62,12 +62,14 @@ public class Db2Receiver {
         new TablespaceQuery(connSupplier, config.getDatabase(), meter);
 
         if (otelLogger != null && config.isQuerySampleEnabled()) {
+            int db2Version = detectDb2Version(connSupplier);
             QuerySampleQuery querySampleQuery = new QuerySampleQuery(
                 connSupplier,
                 config.getDatabase(),
                 otelLogger,
                 config.getMaxQuerySampleCount(),
-                config.isUseSnapshotMonitor()
+                config.isUseSnapshotMonitor(),
+                db2Version
             );
 
             scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -89,6 +91,18 @@ public class Db2Receiver {
         }
 
         log.info("DB2 receiver started");
+    }
+
+    private static int detectDb2Version(Supplier<Connection> connSupplier) {
+        try {
+            java.sql.DatabaseMetaData meta = connSupplier.get().getMetaData();
+            int major = meta.getDatabaseMajorVersion();
+            int minor = meta.getDatabaseMinorVersion();
+            return major * 100 + minor;
+        } catch (Exception e) {
+            log.warn("Could not detect Db2 version, defaulting to base SQL path: {}", e.getMessage());
+            return 0;
+        }
     }
 
     public void stop() {

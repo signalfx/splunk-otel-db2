@@ -11,7 +11,7 @@ public class Db2ReceiverConfig {
     private String collectionInterval = "30s";
     private int topQueryCount = 250;
     private int maxQuerySampleCount = 1000;
-    private boolean querySampleEnabled = true;
+    private boolean querySampleEnabled = false;
     private boolean useSnapshotMonitor = false;
     private String querySampleInterval = "10s";
     private String topQueryInterval = "60s";

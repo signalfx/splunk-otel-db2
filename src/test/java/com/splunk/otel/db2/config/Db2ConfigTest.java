@@ -2,6 +2,7 @@ package com.splunk.otel.db2.config;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import com.splunk.otel.db2.config.Db2ReceiverConfig;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -102,6 +103,29 @@ class Db2ConfigTest {
         assertThatThrownBy(() -> Db2Config.load(f.toString()))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("DB2_USER_NONEXISTENT_12345");
+    }
+
+    @Test
+    void querySampleEnabledFalseIsParsed() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    query_sample_enabled: false\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers().getDb2().isQuerySampleEnabled()).isFalse();
+    }
+
+    @Test
+    void querySampleEnabledDefaultIsFalse() {
+        assertThat(new Db2ReceiverConfig().isQuerySampleEnabled()).isFalse();
     }
 
     private static Path writeConfig(Path dir, String content) throws IOException {
