@@ -1,18 +1,13 @@
 package com.splunk.otel.db2.receiver.queries;
 
 import com.splunk.otel.db2.util.SqlObfuscator;
-import io.opentelemetry.api.common.AttributeKey;
-import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.logs.Logger;
-import io.opentelemetry.api.logs.Severity;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Instant;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -23,23 +18,14 @@ import java.util.function.Supplier;
  *   or waiting activity. No DFT_MON_STMT requirement. Self-exclusion and IDLE filtering
  *   applied in SQL. Rows ordered by elapsed time descending, limited to maxQuerySampleCount.
  *
- * Snapshot monitor fallback (useSnapshotMonitor=true, Db2 9.1+):
+ *   On Db2 10.5+, additionally joins MON_GET_ACTIVITY to expose LOCK_WAIT_TIME as
+ *   db2.wait_time (seconds). On earlier versions the attribute is omitted.
+ *
+ * Snapshot monitor fallback (useSnapshotMonitor=true, Db2 9.7+):
  *   SNAP_GET_APPL_INFO + SNAP_GET_STMT + SYSCAT.STATEMENTS (static SQL fallback) —
  *   richer activity states (LOCKWAIT, UOWWAIT, etc.); requires DFT_MON_STMT ON.
  *
- * Emitted log record attributes:
- *   event.name            = "db.server.query_sample"
- *   db.system.name        = "ibm.db2"
- *   db.namespace          = database name
- *   db.query.text         = obfuscated SQL statement
- *   db2.application_handle= application handle / agent ID
- *   db2.activity_state    = "ACTIVITY_STATE ACTIVITY_TYPE" e.g. "EXECUTING SELECT", "LOCKWAIT DML"
- *   db2.query_start       = statement start timestamp
- *   db2.session.duration  = wall-clock elapsed seconds (double)
- *   db2.member            = Db2 member number (default path only)
- *   db2.cpu_time          = CPU time in seconds (default path only, from MON_GET_CONNECTION)
- *   user.name             = authenticated user ID
- *   client.address        = client workstation name
+ * Emitted log record attributes — see {@link QuerySampleEvent} for the full key list.
  *
  * SQL text is always passed through {@link SqlObfuscator} before emission.
  * If obfuscation fails the record is dropped with a WARN log — never emitted raw.
@@ -59,10 +45,39 @@ public class QuerySampleQuery {
         "       C.CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
         "       C.MEMBER, " +
-        "       C.TOTAL_CPU_TIME AS CPU_US " +
+        "       C.TOTAL_CPU_TIME AS CPU_US, " +
+        "       CAST(-1 AS BIGINT) AS LOCK_WAIT_TIME_MS " +
         "FROM TABLE(MON_CURRENT_SQL(CAST(NULL AS VARCHAR(255)), -2)) AS S " +
         "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        "WHERE S.STMT_TEXT IS NOT NULL " +
+        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
+        "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
+        "ORDER BY S.LOCAL_START_TIME ASC " +
+        "FETCH FIRST %d ROWS ONLY";
+
+    // Db2 10.5+ variant: adds LEFT JOIN to MON_GET_ACTIVITY to expose LOCK_WAIT_TIME.
+    // LOCK_WAIT_TIME is in milliseconds; QuerySampleEvent.waitTimeMillis converts to seconds.
+    private static final String SQL_MON_CURRENT_105 =
+        "SELECT S.APPLICATION_HANDLE, " +
+        "       S.STMT_TEXT, " +
+        "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
+        "       S.LOCAL_START_TIME, " +
+        "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - S.LOCAL_START_TIME)) AS WALL_ELAPSED_SEC, " +
+        "       C.CLIENT_USERID, " +
+        "       C.CLIENT_WRKSTNNAME, " +
+        "       C.MEMBER, " +
+        "       C.TOTAL_CPU_TIME AS CPU_US, " +
+        "       COALESCE(A.LOCK_WAIT_TIME, -1) AS LOCK_WAIT_TIME_MS " +
+        "FROM TABLE(MON_CURRENT_SQL(CAST(NULL AS VARCHAR(255)), -2)) AS S " +
+        "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
+        "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        "LEFT JOIN TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A " +
+        "  ON A.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        " AND A.UOW_ID = S.UOW_ID " +
+        " AND A.ACTIVITY_ID = S.ACTIVITY_ID " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
         "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
@@ -99,41 +114,46 @@ public class QuerySampleQuery {
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%SNAP_GET_STMT%%' " +
         "FETCH FIRST %d ROWS ONLY";
 
-    private static final AttributeKey<String> EVENT_NAME      = AttributeKey.stringKey("event.name");
-    private static final AttributeKey<String> DB_SYSTEM       = AttributeKey.stringKey("db.system.name");
-    private static final AttributeKey<String> DB_NAMESPACE    = AttributeKey.stringKey("db.namespace");
-    private static final AttributeKey<String> DB_QUERY_TEXT   = AttributeKey.stringKey("db.query.text");
-    private static final AttributeKey<String> DB2_APP_HANDLE  = AttributeKey.stringKey("db2.application_handle");
-    private static final AttributeKey<String> DB2_ACTIVITY    = AttributeKey.stringKey("db2.activity_state");
-    private static final AttributeKey<String> DB2_QUERY_START = AttributeKey.stringKey("db2.query_start");
-    private static final AttributeKey<Double> DB2_DURATION    = AttributeKey.doubleKey("db2.session.duration");
-    private static final AttributeKey<Long>   DB2_MEMBER      = AttributeKey.longKey("db2.member");
-    private static final AttributeKey<Double> DB2_CPU_TIME    = AttributeKey.doubleKey("db2.cpu_time");
-    private static final AttributeKey<String> USER_NAME       = AttributeKey.stringKey("user.name");
-    private static final AttributeKey<String> CLIENT_ADDRESS  = AttributeKey.stringKey("client.address");
+    /** Encoded as {@code major * 100 + minor}, e.g. 1050 for 10.5, 970 for 9.7. */
+    static final int DB2_VERSION_10_5 = 1050;
 
     private final Supplier<Connection> connSupplier;
     private final String dbName;
     private final Logger otelLogger;
     private final int maxQuerySampleCount;
     private final boolean useSnapshotMonitor;
+    private final int db2Version;
 
     public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
                             Logger otelLogger, int maxQuerySampleCount,
                             boolean useSnapshotMonitor) {
+        this(connSupplier, dbName, otelLogger, maxQuerySampleCount, useSnapshotMonitor, 0);
+    }
+
+    public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
+                            Logger otelLogger, int maxQuerySampleCount,
+                            boolean useSnapshotMonitor, int db2Version) {
         this.connSupplier        = connSupplier;
         this.dbName              = dbName;
         this.otelLogger          = otelLogger;
         this.maxQuerySampleCount = maxQuerySampleCount;
         this.useSnapshotMonitor  = useSnapshotMonitor;
-        log.info("QuerySampleQuery: using {} path",
-            useSnapshotMonitor ? "SNAP_GET_*" : "MON_CURRENT_SQL");
+        this.db2Version          = db2Version;
+        log.info("QuerySampleQuery: using {} path{}",
+            useSnapshotMonitor ? "SNAP_GET_*" : "MON_CURRENT_SQL",
+            (!useSnapshotMonitor && db2Version >= DB2_VERSION_10_5) ? " with MON_GET_ACTIVITY (10.5+)" : "");
     }
 
     public void collect() {
-        String sql = String.format(
-            useSnapshotMonitor ? SQL_SNAP : SQL_MON_CURRENT,
-            maxQuerySampleCount);
+        String sqlTemplate;
+        if (useSnapshotMonitor) {
+            sqlTemplate = SQL_SNAP;
+        } else if (db2Version >= DB2_VERSION_10_5) {
+            sqlTemplate = SQL_MON_CURRENT_105;
+        } else {
+            sqlTemplate = SQL_MON_CURRENT;
+        }
+        String sql = String.format(sqlTemplate, maxQuerySampleCount);
 
         try {
             Connection conn = connSupplier.get();
@@ -160,28 +180,17 @@ public class QuerySampleQuery {
                     String clientHost = rs.getString("CLIENT_WRKSTNNAME");
                     long member       = rs.getLong("MEMBER");
                     long cpuUs        = rs.getLong("CPU_US");
+                    long waitMs       = useSnapshotMonitor ? -1L : rs.getLong("LOCK_WAIT_TIME_MS");
 
-                    AttributesBuilder attrs = Attributes.builder()
-                        .put(EVENT_NAME,     "db.server.query_sample")
-                        .put(DB_SYSTEM,      "ibm.db2")
-                        .put(DB_NAMESPACE,   dbName)
-                        .put(DB_QUERY_TEXT,  obfuscated)
-                        .put(DB2_DURATION,   elapsedSec)
-                        .put(DB2_MEMBER,     member);
-
-                    if (appHandle  != null) attrs.put(DB2_APP_HANDLE,  appHandle);
-                    if (state      != null) attrs.put(DB2_ACTIVITY,    state);
-                    if (startTime  != null) attrs.put(DB2_QUERY_START, startTime);
-                    if (authId     != null) attrs.put(USER_NAME,       authId);
-                    if (clientHost != null) attrs.put(CLIENT_ADDRESS,  clientHost);
-                    if (cpuUs >= 0)         attrs.put(DB2_CPU_TIME,    cpuUs / 1_000_000.0);
-
-                    otelLogger.logRecordBuilder()
-                        .setSeverity(Severity.INFO)
-                        .setSeverityText("INFO")
-                        .setTimestamp(now.toEpochMilli(), TimeUnit.MILLISECONDS)
-                        .setAllAttributes(attrs.build())
-                        .emit();
+                    QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
+                        .appHandle(appHandle)
+                        .activityState(state)
+                        .queryStart(startTime)
+                        .userName(authId)
+                        .clientAddress(clientHost)
+                        .cpuTimeMicros(cpuUs)
+                        .waitTimeMillis(waitMs)
+                        .emit(otelLogger, now);
                     count++;
                 }
                 log.debug("QuerySampleQuery: emitted {} samples", count);

@@ -1,7 +1,6 @@
 package com.splunk.otel.db2.receiver.queries;
 
 import com.splunk.otel.db2.util.SqlObfuscator;
-import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.LogRecordBuilder;
 import io.opentelemetry.api.logs.Severity;
@@ -44,9 +43,20 @@ class QuerySampleQueryTest {
         return new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, useSnapshot);
     }
 
+    private QuerySampleQuery query105() {
+        return new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, false,
+            QuerySampleQuery.DB2_VERSION_10_5);
+    }
+
     private void stubRow(String stmtText, String state, String startTime,
                          long elapsedSec, String authId, String clientHost,
-                         String appHandle, long member, long cpuMs) throws Exception {
+                         String appHandle, long member, long cpuUs) throws Exception {
+        stubRow(stmtText, state, startTime, elapsedSec, authId, clientHost, appHandle, member, cpuUs, -1L);
+    }
+
+    private void stubRow(String stmtText, String state, String startTime,
+                         long elapsedSec, String authId, String clientHost,
+                         String appHandle, long member, long cpuUs, long lockWaitMs) throws Exception {
         when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
         when(rs.getString("ACTIVITY_STATE")).thenReturn(state);
         when(rs.getString("LOCAL_START_TIME")).thenReturn(startTime);
@@ -55,7 +65,8 @@ class QuerySampleQueryTest {
         when(rs.getString("CLIENT_WRKSTNNAME")).thenReturn(clientHost);
         when(rs.getString("APPLICATION_HANDLE")).thenReturn(appHandle);
         when(rs.getLong("MEMBER")).thenReturn(member);
-        when(rs.getLong("CPU_US")).thenReturn(cpuMs);
+        when(rs.getLong("CPU_US")).thenReturn(cpuUs);
+        when(rs.getLong("LOCK_WAIT_TIME_MS")).thenReturn(lockWaitMs);
     }
 
     @Test
@@ -73,21 +84,21 @@ class QuerySampleQueryTest {
         verify(logBuilder).emit();
 
         io.opentelemetry.api.common.Attributes attrs = cap.getValue();
-        assertThat(attrs.get(AttributeKey.stringKey("db.query.text")))
+        assertThat(attrs.get(QuerySampleEvent.DB_QUERY_TEXT))
             .isEqualTo("SELECT * FROM T WHERE ID = ?");
-        assertThat(attrs.get(AttributeKey.stringKey("event.name")))
+        assertThat(attrs.get(QuerySampleEvent.EVENT_NAME))
             .isEqualTo("db.server.query_sample");
-        assertThat(attrs.get(AttributeKey.stringKey("db.system.name"))).isEqualTo("ibm.db2");
-        assertThat(attrs.get(AttributeKey.stringKey("db.namespace"))).isEqualTo("TESTDB");
-        assertThat(attrs.get(AttributeKey.stringKey("db2.activity_state"))).isEqualTo("EXECUTING SELECT");
-        assertThat(attrs.get(AttributeKey.stringKey("db2.query_start")))
+        assertThat(attrs.get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
+        assertThat(attrs.get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo("TESTDB");
+        assertThat(attrs.get(QuerySampleEvent.DB2_ACTIVITY)).isEqualTo("EXECUTING SELECT");
+        assertThat(attrs.get(QuerySampleEvent.DB2_QUERY_START))
             .isEqualTo("2024-01-01-12.00.00.000000");
-        assertThat(attrs.get(AttributeKey.doubleKey("db2.session.duration"))).isEqualTo(5.0);
-        assertThat(attrs.get(AttributeKey.stringKey("user.name"))).isEqualTo("db2inst1");
-        assertThat(attrs.get(AttributeKey.stringKey("client.address"))).isEqualTo("client-host");
-        assertThat(attrs.get(AttributeKey.stringKey("db2.application_handle"))).isEqualTo("12345");
-        assertThat(attrs.get(AttributeKey.longKey("db2.member"))).isEqualTo(0L);
-        assertThat(attrs.get(AttributeKey.doubleKey("db2.cpu_time"))).isEqualTo(100L / 1_000_000.0);
+        assertThat(attrs.get(QuerySampleEvent.DB2_DURATION)).isEqualTo(5.0);
+        assertThat(attrs.get(QuerySampleEvent.USER_NAME)).isEqualTo("db2inst1");
+        assertThat(attrs.get(QuerySampleEvent.CLIENT_ADDRESS)).isEqualTo("client-host");
+        assertThat(attrs.get(QuerySampleEvent.DB2_APP_HANDLE)).isEqualTo("12345");
+        assertThat(attrs.get(QuerySampleEvent.DB2_MEMBER)).isEqualTo(0L);
+        assertThat(attrs.get(QuerySampleEvent.DB2_CPU_TIME)).isEqualTo(100L / 1_000_000.0);
     }
 
     @Test
@@ -103,7 +114,46 @@ class QuerySampleQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
 
-        assertThat(cap.getValue().get(AttributeKey.doubleKey("db2.cpu_time"))).isNull();
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_CPU_TIME)).isNull();
+    }
+
+    @Test
+    void db2Version105EmitsWaitTime() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", null, 3L,
+                null, null, null, 0L, 0L, 5000L); // 5000 ms lock wait
+
+        query105().collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_TIME)).isEqualTo(5.0);
+    }
+
+    @Test
+    void db2Version105SqlContainsMON_GET_ACTIVITY() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("MON_GET_ACTIVITY");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_TIME");
+    }
+
+    @Test
+    void defaultPathNoWaitTimeAttribute() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING", null, 1L, null, null, null, 0L, 0L, -1L);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_TIME)).isNull();
     }
 
     @Test

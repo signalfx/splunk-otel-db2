@@ -1,7 +1,7 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
-import io.opentelemetry.api.common.AttributeKey;
+import com.splunk.otel.db2.receiver.queries.QuerySampleEvent;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
@@ -279,7 +279,7 @@ class Db2ReceiverIntegrationTest {
                 .pollInterval(1, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
                     .anyMatch(r -> {
-                        String text = r.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+                        String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
                         return text != null && text.toUpperCase().contains("SYSCAT.COLUMNS");
                     }));
         } finally {
@@ -296,20 +296,20 @@ class Db2ReceiverIntegrationTest {
         io.opentelemetry.sdk.logs.data.LogRecordData record = logExporter.getFinishedLogRecordItems()
             .stream()
             .filter(r -> {
-                String text = r.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+                String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
                 return text != null && text.toUpperCase().contains("SYSCAT.COLUMNS");
             })
             .findFirst()
             .orElseThrow();
 
-        String queryText = record.getAttributes().get(AttributeKey.stringKey("db.query.text"));
+        String queryText = record.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
         assertThat(queryText).doesNotContain("'");
         assertThat(queryText).doesNotMatch(".*(?<![\\p{L}\\p{N}_$#@])\\d{4,}(?![\\p{L}\\p{N}_$#@]).*");
 
-        assertThat(record.getAttributes().get(AttributeKey.stringKey("db.system.name"))).isEqualTo("ibm.db2");
-        assertThat(record.getAttributes().get(AttributeKey.stringKey("db.namespace"))).isEqualTo(config.getDatabase());
-        assertThat(record.getAttributes().get(AttributeKey.longKey("db2.elapsed_time_ms"))).isNotNull();
-        assertThat(record.getAttributes().get(AttributeKey.longKey("db2.member"))).isNotNull();
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo(config.getDatabase());
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
         assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
     }
 
