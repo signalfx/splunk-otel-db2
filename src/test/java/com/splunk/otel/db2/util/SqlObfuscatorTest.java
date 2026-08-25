@@ -282,6 +282,42 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT * FROM T WHERE X = ?");
     }
 
+    @Test
+    void formatCharBetweenExponentEAndDigits() {
+        // 1E\u200B123 — format char after E; must produce single ? not ?E123
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1E\u200B123"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void formatCharBetweenExponentDigits() {
+        // 1E1\u200B23 — format char in exponent digit run; must produce single ?
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1E1\u200B23"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void formatCharInNestedBlockCommentDelimiter() {
+        // /<\u200B>* inside a comment body — format-aware scanner must recognise nested /*
+        // and consume the entire outer comment including API_KEY=secret
+        assertThat(SqlObfuscator.obfuscate("SELECT ID /* outer /\u200B* inner */ API_KEY=secret */ FROM T"))
+            .isEqualTo("SELECT ID FROM T");
+    }
+
+    @Test
+    void formatCharBetweenPrefixAndQuote() {
+        // N\u200B'Alice' — format char between prefix and opening quote; must be single ?
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = N\u200B'Alice'"))
+            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+    }
+
+    @Test
+    void formatCharBetweenTwoCharPrefixChars() {
+        // G\u200BX'FF01' — format char inside two-char prefix GX; must be single ?
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE C = G\u200BX'FF01'"))
+            .isEqualTo("SELECT * FROM T WHERE C = ?");
+    }
+
     // --- Fail-closed safety net ---
 
     @Test
