@@ -252,15 +252,24 @@ class Db2ReceiverIntegrationTest {
         // This is 100% deterministic — DB2 cannot optimise away a real row lock,
         // regardless of container speed or catalog size.
         //
-        // Sentinel query text contains "SPLUNK_OTEL_LOCK_TEST" so MON_CURRENT_SQL
-        // can be filtered on it. No literals, so obfuscated text == input text.
+        // DDL (CREATE/DROP TABLE) uses a separate autoCommit=true connection so that
+        // ownerConn.rollback() only releases the INSERT lock — not the table itself.
+        // Sentinel query text contains "SPLUNK_OTEL_LOCK_TEST" — no literals, so
+        // obfuscated text == input text.
+        Connection ddlConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (Statement st = ddlConn.createStatement()) {
+            // Guard against a leftover table from a previously aborted test run
+            try { st.execute("DROP TABLE SPLUNK_OTEL_LOCK_TEST"); } catch (Exception ignored) {}
+            st.execute("CREATE TABLE SPLUNK_OTEL_LOCK_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
+        }
+        ddlConn.close();
+
+        // ownerConn: INSERT and hold uncommitted — this is the X-lock holder
         Connection ownerConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
         ownerConn.setAutoCommit(false);
         try (Statement st = ownerConn.createStatement()) {
-            st.execute("CREATE TABLE SPLUNK_OTEL_LOCK_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
             st.execute("INSERT INTO SPLUNK_OTEL_LOCK_TEST VALUES (1, 42)");
         }
-        // ownerConn holds an uncommitted X-lock on the row
 
         ExecutorService exec = Executors.newSingleThreadExecutor();
         Connection bgConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
@@ -268,7 +277,7 @@ class Db2ReceiverIntegrationTest {
         Statement bgStmt = bgConn.createStatement();
         Future<?> bgQuery = exec.submit(() -> {
             try {
-                // WITH RR requests a share lock — will wait until ownerConn commits/rolls back
+                // WITH RR requests a share lock — blocks until ownerConn commits/rolls back
                 bgStmt.executeQuery(
                     "SELECT ID FROM SPLUNK_OTEL_LOCK_TEST WITH RR");
             } catch (Exception ignored) {
@@ -292,17 +301,20 @@ class Db2ReceiverIntegrationTest {
                         return text != null && text.toUpperCase().contains("SPLUNK_OTEL_LOCK_TEST");
                     }));
         } finally {
-            ownerConn.rollback();  // releases the X-lock, unblocks bgConn
-            ownerConn.setAutoCommit(true);
-            try (Statement st = ownerConn.createStatement()) {
-                st.execute("DROP TABLE SPLUNK_OTEL_LOCK_TEST");
-            }
+            ownerConn.rollback();  // releases the X-lock, unblocks bgConn; table still exists
             ownerConn.close();
             bgStmt.cancel();
             bgConn.rollback();
             bgConn.close();
             bgQuery.cancel(true);
             exec.shutdownNow();
+            // Drop the table via a fresh autoCommit connection — DDL must not be inside a txn
+            Connection cleanupConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+            try (Statement st = cleanupConn.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_OTEL_LOCK_TEST");
+            } finally {
+                cleanupConn.close();
+            }
             receiver.stop();
             loggerProvider.shutdown();
             meterProvider.shutdown();
