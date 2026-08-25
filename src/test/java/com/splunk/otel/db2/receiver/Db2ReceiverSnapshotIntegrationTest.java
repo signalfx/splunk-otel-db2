@@ -76,9 +76,12 @@ class Db2ReceiverSnapshotIntegrationTest {
     void snapshotPathEmitsObfuscatedRecordForActiveQuery() throws Exception {
         // Enable statement monitoring required by the snapshot path.
         // DFT_MON_STMT must be ON for SNAP_GET_STMT to return statement text.
+        // UPDATE DBM CFG is a DB2 admin command — not valid as plain SQL.
+        // SYSPROC.ADMIN_CMD wraps it as a callable stored procedure over JDBC.
         try (Connection admin = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
-             Statement st = admin.createStatement()) {
-            st.execute("UPDATE DBM CFG USING DFT_MON_STMT ON");
+             java.sql.CallableStatement cs = admin.prepareCall(
+                 "CALL SYSPROC.ADMIN_CMD('UPDATE DBM CFG USING DFT_MON_STMT ON')")) {
+            cs.execute();
         }
 
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
