@@ -82,12 +82,13 @@ class Db2ReceiverSnapshotIntegrationTest {
         // connections, CONNECT TO opens a DB session, UPDATE MONITOR SWITCHES
         // activates statement capture for currently connected applications.
         String dbName = db2.getDatabaseName().toUpperCase();
-        // su - sources db2inst1's .bash_profile which sets up the db2 environment
+        // su - sources db2inst1's .bash_profile which sets up the db2 environment.
+        // CONNECT RESET is omitted: it exits non-zero if called after MONITOR SWITCHES
+        // closes the CLP session, which would falsely fail the &&-chained script.
         String script =
             "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
             "db2 CONNECT TO " + dbName + " && " +
-            "db2 UPDATE MONITOR SWITCHES USING STATEMENT ON && " +
-            "db2 CONNECT RESET";
+            "db2 UPDATE MONITOR SWITCHES USING STATEMENT ON";
         org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
             "su", "-", "db2inst1", "-c", script
         );
