@@ -170,15 +170,18 @@ class Db2ReceiverSnapshotIntegrationTest {
 
         io.opentelemetry.sdk.logs.data.LogRecordData record;
         try {
-            Awaitility.await()
-                .atMost(60, TimeUnit.SECONDS)
-                .pollInterval(1, TimeUnit.SECONDS)
-                .failWith(snapDiag::toString)
-                .until(() -> logExporter.getFinishedLogRecordItems().stream()
-                    .anyMatch(r -> {
-                        String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
-                        return text != null && text.toUpperCase().contains("SPLUNK_SNAP_LOCK_TEST");
-                    }));
+            try {
+                Awaitility.await()
+                    .atMost(60, TimeUnit.SECONDS)
+                    .pollInterval(1, TimeUnit.SECONDS)
+                    .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                        .anyMatch(r -> {
+                            String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                            return text != null && text.toUpperCase().contains("SPLUNK_SNAP_LOCK_TEST");
+                        }));
+            } catch (org.awaitility.core.ConditionTimeoutException cte) {
+                throw new AssertionError("No query sample found for SPLUNK_SNAP_LOCK_TEST after 60s. " + snapDiag, cte);
+            }
 
             record = logExporter.getFinishedLogRecordItems().stream()
                 .filter(r -> {
