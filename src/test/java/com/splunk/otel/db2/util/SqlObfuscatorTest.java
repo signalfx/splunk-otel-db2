@@ -247,6 +247,20 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT * FROM \"A\u200BB\"");
     }
 
+    @Test
+    void formatCharInsideBlockCommentConsumedWithComment() {
+        // Format char inside a comment is consumed with the comment — must not leak
+        assertThat(SqlObfuscator.obfuscate("SELECT ID /* \u200B */ FROM T"))
+            .isEqualTo("SELECT ID FROM T");
+    }
+
+    @Test
+    void formatCharInsideSingleQuotedStringConsumedWithLiteral() {
+        // Format char inside a string literal is consumed with the literal — must not leak
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = 'Ali\u200Bce'"))
+            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+    }
+
     // --- Fail-closed safety net ---
 
     @Test

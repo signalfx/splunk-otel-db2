@@ -12,17 +12,19 @@ import java.util.regex.Pattern;
  *     X/x'...' (hex)       X'deadbeef'         →  ?
  *     G/g'...' (graphic)   G'O''Brien'         →  ?
  *     N/n'...' (national)  N'Alice'            →  ?
+ *     GX/gx'...' (hex-graphic)                 →  ?
+ *     BX/bx'...' (binary)                      →  ?
  *     UX/ux'...' (Unicode hex)  UX'0041'       →  ?
  *     U&/u&'...' (Unicode escape)  U&'\0041'   →  ?
  *   numeric literals       42, 3.14,
  *                          1.5E10, 2.0E-3      →  ?
  *   line comments          -- …                →  stripped → space  (\n or \r)
  *   block comments         /* … * /            →  stripped → space (nested supported)
- *   Unicode format chars   U+200B, U+00AD …    →  stripped before processing
+ *   Unicode format chars   U+200B, U+00AD …    →  stripped outside identifiers/strings/comments
  *
  * Preserved:
  *   double-quoted identifiers  "MyTable", "Order  History"  — Db2 LUW uses "
- *   for delimited identifiers; significant internal whitespace is preserved.
+ *   for delimited identifiers; internal whitespace and format chars are preserved.
  *
  * Fail-closed: if any literal remnant survives obfuscation (unmatched {@code '}
  * outside a delimited identifier, or standalone digit-run ≥ 4 outside an
@@ -48,22 +50,18 @@ public final class SqlObfuscator {
             return sql;
         }
 
-        String input = stripFormatChars(sql);
-        if (input.isEmpty()) {
-            return input;
-        }
-
-        StringBuilder out = new StringBuilder(input.length());
+        StringBuilder out = new StringBuilder(sql.length());
         int i = 0;
-        int len = input.length();
+        int len = sql.length();
 
         while (i < len) {
-            char c = input.charAt(i);
+            char c = sql.charAt(i);
 
             // Line comment: -- ... \n or \r
-            if (c == '-' && i + 1 < len && input.charAt(i + 1) == '-') {
+            // Format chars inside comments are consumed along with the comment body.
+            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
                 i += 2;
-                while (i < len && input.charAt(i) != '\n' && input.charAt(i) != '\r') {
+                while (i < len && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
                     i++;
                 }
                 out.append(' ');
@@ -71,14 +69,15 @@ public final class SqlObfuscator {
             }
 
             // Block comment: /* ... */ with nesting support
-            if (c == '/' && i + 1 < len && input.charAt(i + 1) == '*') {
+            // Format chars inside comments are consumed along with the comment body.
+            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
                 i += 2;
                 int depth = 1;
                 while (i + 1 < len && depth > 0) {
-                    if (input.charAt(i) == '/' && input.charAt(i + 1) == '*') {
+                    if (sql.charAt(i) == '/' && sql.charAt(i + 1) == '*') {
                         depth++;
                         i += 2;
-                    } else if (input.charAt(i) == '*' && input.charAt(i + 1) == '/') {
+                    } else if (sql.charAt(i) == '*' && sql.charAt(i + 1) == '/') {
                         depth--;
                         i += 2;
                     } else {
@@ -92,15 +91,15 @@ public final class SqlObfuscator {
                 continue;
             }
 
-            // Prefixed string literals: X'...' G'...' N'...' UX'...' U&'...'
-            // Uses the same '' escape-aware scanner as plain single-quoted strings.
-            int prefixSkip = prefixedLiteralSkip(input, i, len);
+            // Prefixed string literals: X'...' G'...' N'...' GX'...' BX'...' UX'...' U&'...'
+            // Format chars inside the literal body are consumed and replaced by ?.
+            int prefixSkip = prefixedLiteralSkip(sql, i, len);
             if (prefixSkip > 0) {
                 i += prefixSkip; // skip prefix chars + opening '
                 while (i < len) {
-                    if (input.charAt(i) == '\'' && i + 1 < len && input.charAt(i + 1) == '\'') {
+                    if (sql.charAt(i) == '\'' && i + 1 < len && sql.charAt(i + 1) == '\'') {
                         i += 2; // '' escape — skip both
-                    } else if (input.charAt(i) == '\'') {
+                    } else if (sql.charAt(i) == '\'') {
                         i++; // closing '
                         break;
                     } else {
@@ -112,12 +111,13 @@ public final class SqlObfuscator {
             }
 
             // Single-quoted string with '' escape: 'O''Brien'
+            // Format chars inside the literal body are consumed and replaced by ?.
             if (c == '\'') {
                 i++;
                 while (i < len) {
-                    if (input.charAt(i) == '\'' && i + 1 < len && input.charAt(i + 1) == '\'') {
+                    if (sql.charAt(i) == '\'' && i + 1 < len && sql.charAt(i + 1) == '\'') {
                         i += 2;
-                    } else if (input.charAt(i) == '\'') {
+                    } else if (sql.charAt(i) == '\'') {
                         i++;
                         break;
                     } else {
@@ -129,16 +129,16 @@ public final class SqlObfuscator {
             }
 
             // Double-quoted delimited identifier — preserve as-is, including internal
-            // whitespace ("Order  History" names a different object than "Order History").
+            // whitespace and format chars ("A\u200BB" names a different object than "AB").
             if (c == '"') {
                 out.append(c);
                 i++;
                 while (i < len) {
-                    char q = input.charAt(i);
+                    char q = sql.charAt(i);
                     out.append(q);
                     i++;
                     if (q == '"') {
-                        if (i < len && input.charAt(i) == '"') {
+                        if (i < len && sql.charAt(i) == '"') {
                             out.append('"');
                             i++;
                         } else {
@@ -152,22 +152,22 @@ public final class SqlObfuscator {
             // Numeric literal — only when preceded by a non-identifier character.
             // Db2 identifier chars: Unicode letters/digits, _, $, #, @
             if (Character.isDigit(c)) {
-                char prev = (i == 0) ? ' ' : input.charAt(i - 1);
+                char prev = (i == 0) ? ' ' : sql.charAt(i - 1);
                 boolean insideIdentifier = Character.isLetterOrDigit(prev)
                         || prev == '_' || prev == '$' || prev == '#' || prev == '@';
                 if (!insideIdentifier) {
-                    while (i < len && (Character.isDigit(input.charAt(i)) || input.charAt(i) == '.')) {
+                    while (i < len && (Character.isDigit(sql.charAt(i)) || sql.charAt(i) == '.')) {
                         i++;
                     }
                     // optional exponent: [eE][+-]?[0-9]+
-                    if (i < len && (input.charAt(i) == 'e' || input.charAt(i) == 'E')) {
+                    if (i < len && (sql.charAt(i) == 'e' || sql.charAt(i) == 'E')) {
                         int saved = i;
                         i++;
-                        if (i < len && (input.charAt(i) == '+' || input.charAt(i) == '-')) {
+                        if (i < len && (sql.charAt(i) == '+' || sql.charAt(i) == '-')) {
                             i++;
                         }
-                        if (i < len && Character.isDigit(input.charAt(i))) {
-                            while (i < len && Character.isDigit(input.charAt(i))) {
+                        if (i < len && Character.isDigit(sql.charAt(i))) {
+                            while (i < len && Character.isDigit(sql.charAt(i))) {
                                 i++;
                             }
                         } else {
@@ -179,12 +179,20 @@ public final class SqlObfuscator {
                 }
             }
 
+            // Strip Unicode format chars (Cf category) outside all lexical contexts.
+            // Inside strings/comments they are already consumed; inside "..." identifiers
+            // they are preserved by the branch above. Only plain SQL structure reaches here.
+            if (Character.getType(c) == Character.FORMAT) {
+                i++;
+                continue;
+            }
+
             out.append(c);
             i++;
         }
 
-        // Normalise whitespace runs to a single space, but preserve internal
-        // whitespace inside double-quoted delimited identifiers.
+        // Normalise whitespace runs to a single space, preserving internal whitespace
+        // inside double-quoted identifiers. Must run before containsResidualLiteral.
         String result = normalizeWhitespace(out.toString());
 
         // Fail-closed: if any literal remnant survived, redact entirely.
@@ -276,62 +284,6 @@ public final class SqlObfuscator {
             }
         }
         return RESIDUAL_LITERAL.matcher(stripped.toString()).find();
-    }
-
-    /**
-     * Strips Unicode format characters (category Cf — zero-width spaces, soft
-     * hyphens, etc.) outside double-quoted identifiers. Format chars inside
-     * "..." are preserved: "A\u200BB" and "AB" can name different Db2 objects.
-     * Only allocates a new string when format chars are actually present.
-     */
-    private static String stripFormatChars(String sql) {
-        // First pass: check if any stripping is needed at all
-        boolean needsStrip = false;
-        boolean inIdentifier = false;
-        for (int i = 0; i < sql.length(); i++) {
-            char c = sql.charAt(i);
-            if (inIdentifier) {
-                if (c == '"') {
-                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
-                        i++; // "" escape — stay in identifier
-                    } else {
-                        inIdentifier = false;
-                    }
-                }
-            } else if (c == '"') {
-                inIdentifier = true;
-            } else if (Character.getType(c) == Character.FORMAT) {
-                needsStrip = true;
-                break;
-            }
-        }
-        if (!needsStrip) {
-            return sql;
-        }
-
-        // Second pass: copy, skipping format chars outside identifiers
-        StringBuilder sb = new StringBuilder(sql.length());
-        inIdentifier = false;
-        for (int i = 0; i < sql.length(); i++) {
-            char c = sql.charAt(i);
-            if (inIdentifier) {
-                sb.append(c);
-                if (c == '"') {
-                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
-                        sb.append('"');
-                        i++; // "" escape — append both, stay in identifier
-                    } else {
-                        inIdentifier = false;
-                    }
-                }
-            } else if (c == '"') {
-                inIdentifier = true;
-                sb.append(c);
-            } else if (Character.getType(c) != Character.FORMAT) {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
     }
 
     /**
