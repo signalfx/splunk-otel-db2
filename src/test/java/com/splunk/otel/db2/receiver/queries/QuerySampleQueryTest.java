@@ -2,18 +2,17 @@ package com.splunk.otel.db2.receiver.queries;
 
 import com.splunk.otel.db2.util.SqlObfuscator;
 import io.opentelemetry.api.common.AttributeKey;
-import org.mockito.MockedStatic;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.LogRecordBuilder;
 import io.opentelemetry.api.logs.Severity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,83 +41,91 @@ class QuerySampleQueryTest {
     }
 
     private QuerySampleQuery query(boolean useSnapshot) {
-        return new QuerySampleQuery(
-            () -> conn, "TESTDB", otelLogger, 100, useSnapshot
-        );
+        return new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, useSnapshot);
+    }
+
+    private void stubRow(String stmtText, String state, String startTime,
+                         long elapsedSec, String authId, String clientHost,
+                         String appHandle, long member, long cpuMs) throws Exception {
+        when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
+        when(rs.getString("ACTIVITY_STATE")).thenReturn(state);
+        when(rs.getString("LOCAL_START_TIME")).thenReturn(startTime);
+        when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(elapsedSec);
+        when(rs.getString("CLIENT_USERID")).thenReturn(authId);
+        when(rs.getString("CLIENT_WRKSTNNAME")).thenReturn(clientHost);
+        when(rs.getString("APPLICATION_HANDLE")).thenReturn(appHandle);
+        when(rs.getLong("MEMBER")).thenReturn(member);
+        when(rs.getLong("CPU_MS")).thenReturn(cpuMs);
     }
 
     @Test
-    void emitsObfuscatedLogRecord() throws Exception {
+    void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        when(rs.getString("STMT_TEXT")).thenReturn("SELECT * FROM T WHERE ID = 42");
-        when(rs.getLong("ELAPSED_MS")).thenReturn(150L);
-        when(rs.getLong("CPU_MS")).thenReturn(50L);
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("APPLICATION_ID")).thenReturn("*LOCAL.db2inst1.230101120000");
+        stubRow("SELECT * FROM T WHERE ID = 42", "EXECUTING",
+                "2024-01-01-12.00.00.000000", 5L,
+                "db2inst1", "client-host", "12345", 0L, 100L);
 
         query(false).collect();
 
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> attrsCaptor =
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
-        verify(logBuilder).setAllAttributes(attrsCaptor.capture());
+        verify(logBuilder).setAllAttributes(cap.capture());
         verify(logBuilder).emit();
 
-        io.opentelemetry.api.common.Attributes attrs = attrsCaptor.getValue();
+        io.opentelemetry.api.common.Attributes attrs = cap.getValue();
         assertThat(attrs.get(AttributeKey.stringKey("db.query.text")))
             .isEqualTo("SELECT * FROM T WHERE ID = ?");
-        assertThat(attrs.get(AttributeKey.stringKey("db.namespace"))).isEqualTo("TESTDB");
+        assertThat(attrs.get(AttributeKey.stringKey("event.name")))
+            .isEqualTo("db.server.query_sample");
         assertThat(attrs.get(AttributeKey.stringKey("db.system.name"))).isEqualTo("ibm.db2");
-        assertThat(attrs.get(AttributeKey.longKey("db2.elapsed_time_ms"))).isEqualTo(150L);
-        assertThat(attrs.get(AttributeKey.longKey("db2.cpu_time_ms"))).isEqualTo(50L);
-        assertThat(attrs.get(AttributeKey.stringKey("db2.application.id")))
-            .isEqualTo("*LOCAL.db2inst1.230101120000");
+        assertThat(attrs.get(AttributeKey.stringKey("db.namespace"))).isEqualTo("TESTDB");
+        assertThat(attrs.get(AttributeKey.stringKey("db2.activity_state"))).isEqualTo("EXECUTING");
+        assertThat(attrs.get(AttributeKey.stringKey("db2.query_start")))
+            .isEqualTo("2024-01-01-12.00.00.000000");
+        assertThat(attrs.get(AttributeKey.doubleKey("db2.session.duration"))).isEqualTo(5.0);
+        assertThat(attrs.get(AttributeKey.stringKey("user.name"))).isEqualTo("db2inst1");
+        assertThat(attrs.get(AttributeKey.stringKey("client.address"))).isEqualTo("client-host");
+        assertThat(attrs.get(AttributeKey.stringKey("db2.application_handle"))).isEqualTo("12345");
+        assertThat(attrs.get(AttributeKey.longKey("db2.member"))).isEqualTo(0L);
+        assertThat(attrs.get(AttributeKey.longKey("db2.cpu_time_ms"))).isEqualTo(100L);
     }
 
     @Test
     void snapshotPathNoCpuAttribute() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM SYSIBM.SYSDUMMY1");
-        when(rs.getLong("ELAPSED_MS")).thenReturn(10L);
-        when(rs.getLong("CPU_MS")).thenReturn(-1L); // sentinel from SNAPSTMT query
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("APPLICATION_ID")).thenReturn("APP1");
+        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC",
+                "2024-01-01-12.00.00.000000", 2L,
+                "db2inst1", "host1", "99", 0L, -1L); // -1 sentinel from SNAP path
 
         query(true).collect();
 
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> attrsCaptor =
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
-        verify(logBuilder).setAllAttributes(attrsCaptor.capture());
+        verify(logBuilder).setAllAttributes(cap.capture());
 
-        // cpu_time_ms must be absent when sentinel -1 is returned
-        assertThat(attrsCaptor.getValue().get(AttributeKey.longKey("db2.cpu_time_ms"))).isNull();
+        assertThat(cap.getValue().get(AttributeKey.longKey("db2.cpu_time_ms"))).isNull();
     }
 
     @Test
     void obfuscationFailedDropsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T");
-        when(rs.getLong("ELAPSED_MS")).thenReturn(5L);
-        when(rs.getLong("CPU_MS")).thenReturn(1L);
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("APPLICATION_ID")).thenReturn(null);
+        stubRow("SELECT 1 FROM T", "EXECUTING", null, 1L, null, null, null, 0L, 0L);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
             mocked.when(() -> SqlObfuscator.obfuscate(anyString()))
                 .thenReturn(SqlObfuscator.OBFUSCATION_FAILED);
-
             query(false).collect();
         }
 
-        // No log record should be emitted
         verify(otelLogger, never()).logRecordBuilder();
     }
 
     @Test
     void nullOrBlankStatementSkipped() throws Exception {
         when(rs.next()).thenReturn(true, true, false);
+        when(rs.getString(anyString())).thenReturn(null);
         when(rs.getString("STMT_TEXT")).thenReturn(null, "   ");
         when(rs.getLong(anyString())).thenReturn(0L);
-        when(rs.getString("APPLICATION_ID")).thenReturn(null);
 
         query(false).collect();
 
@@ -128,11 +135,7 @@ class QuerySampleQueryTest {
     @Test
     void severityIsInfo() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T");
-        when(rs.getLong("ELAPSED_MS")).thenReturn(1L);
-        when(rs.getLong("CPU_MS")).thenReturn(0L);
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("APPLICATION_ID")).thenReturn(null);
+        stubRow("SELECT 1 FROM T", "EXECUTING", null, 0L, null, null, null, 0L, 0L);
 
         query(false).collect();
 
@@ -141,55 +144,74 @@ class QuerySampleQueryTest {
     }
 
     @Test
-    void connectionExceptionIsHandledGracefully() {
-        Supplier<Connection> failingSupplier = () -> { throw new RuntimeException("connection refused"); };
-        QuerySampleQuery q = new QuerySampleQuery(failingSupplier, "TESTDB", otelLogger, 10, false);
-
-        // must not throw
-        q.collect();
+    void connectionExceptionHandledGracefully() {
+        Supplier<Connection> failing = () -> { throw new RuntimeException("refused"); };
+        new QuerySampleQuery(failing, "TESTDB", otelLogger, 10, false).collect();
         verify(otelLogger, never()).logRecordBuilder();
+    }
+
+    @Test
+    void defaultPathSqlContainsMON_CURRENT_SQL() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("MON_CURRENT_SQL");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("MON_GET_CONNECTION");
+    }
+
+    @Test
+    void snapshotPathSqlContainsSnapGetStmt() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(true).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SNAP_GET_STMT");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSCAT.STATEMENTS");
     }
 
     @Test
     void sqlContainsFetchFirstWithConfiguredLimit() throws Exception {
         when(rs.next()).thenReturn(false);
-        QuerySampleQuery q = new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 500, false);
-        q.collect();
+        new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 500, false).collect();
 
-        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeQuery(sqlCaptor.capture());
-        assertThat(sqlCaptor.getValue()).contains("FETCH FIRST 500 ROWS ONLY");
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).contains("FETCH FIRST 500 ROWS ONLY");
     }
 
     @Test
-    void snapshotPathUsesSnapstmtTable() throws Exception {
-        when(rs.next()).thenReturn(false);
-        query(true).collect();
-
-        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeQuery(sqlCaptor.capture());
-        assertThat(sqlCaptor.getValue()).containsIgnoringCase("SNAPSTMT");
-    }
-
-    @Test
-    void monGetActivityPathUsesMonGetActivity() throws Exception {
+    void defaultPathSqlExcludesSelfAndIdleAndQueryText() throws Exception {
         when(rs.next()).thenReturn(false);
         query(false).collect();
 
-        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeQuery(sqlCaptor.capture());
-        assertThat(sqlCaptor.getValue()).containsIgnoringCase("MON_GET_ACTIVITY");
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+        assertThat(sql).contains("splunk-otel-db2");
+        assertThat(sql).containsIgnoringCase("IDLE");
+        assertThat(sql).containsIgnoringCase("MON_CURRENT_SQL");
+    }
+
+    @Test
+    void snapshotPathSqlExcludesSelf() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(true).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).contains("splunk-otel-db2");
     }
 
     @Test
     void multipleRowsEmitMultipleRecords() throws Exception {
         when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString(anyString())).thenReturn(null);
         when(rs.getString("STMT_TEXT"))
             .thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
-        when(rs.getLong("ELAPSED_MS")).thenReturn(1L);
-        when(rs.getLong("CPU_MS")).thenReturn(0L);
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("APPLICATION_ID")).thenReturn(null);
+        when(rs.getLong(anyString())).thenReturn(0L);
 
         query(false).collect();
 

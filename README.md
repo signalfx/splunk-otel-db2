@@ -94,15 +94,22 @@ Active statements are sampled at `query_sample_interval` and emitted as OTel log
 
 | Attribute | Description |
 |---|---|
+| `event.name` | Always `db.server.query_sample` |
 | `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
+| `db2.application_handle` | Application handle / agent ID |
+| `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
+| `db2.query_start` | Statement start timestamp |
+| `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |
-| `db2.application.id` | Application identifier |
-| `db2.elapsed_time_ms` | Elapsed time in milliseconds |
-| `db2.cpu_time_ms` | CPU time in milliseconds (omitted when `use_snapshot_monitor: true`) |
+| `db2.cpu_time_ms` | CPU time ms (default path only) |
+| `user.name` | Authenticated user ID |
+| `client.address` | Client workstation name |
 
-**Source table**: `MON_GET_ACTIVITY(NULL, -2)` (Db2 10.5+) or `SYSIBMADM.SNAPSTMT` (Db2 9.7+, set `use_snapshot_monitor: true`).
+**Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `MON_CURRENT_SQL` + `MON_GET_CONNECTION` JOIN. No `DFT_MON_STMT` requirement. Filters out IDLE sessions and the receiver's own queries.
+
+**Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.1+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
 
 ## Development
 
