@@ -75,18 +75,25 @@ class Db2ReceiverSnapshotIntegrationTest {
 
     @Test
     void snapshotPathEmitsObfuscatedRecordForActiveQuery() throws Exception {
-        // Enable DFT_MON_STMT ON at instance level. Must run as db2inst1 (SYSADM).
+        // DFT_MON_STMT ON takes effect only at next database activation (IBM docs).
+        // db2stop force + db2start recycles the instance so the new default is
+        // active for every subsequent JDBC connection. Run as db2inst1 (SYSADM).
         String dbName = db2.getDatabaseName().toUpperCase();
-        String script = "db2 UPDATE DBM CFG USING DFT_MON_STMT ON";
+        String script =
+            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
+            "db2stop force && " +
+            "db2start";
         org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
             "su", "-", "db2inst1", "-c", script
         );
         if (result.getExitCode() != 0) {
             throw new IllegalStateException(
-                "Failed to enable DFT_MON_STMT: exit=" + result.getExitCode() +
+                "Failed to recycle DB2 instance with DFT_MON_STMT ON: exit=" + result.getExitCode() +
                 " stdout=" + result.getStdout() +
                 " stderr=" + result.getStderr());
         }
+        // Give the freshly started instance a moment before opening JDBC connections
+        Thread.sleep(5000);
 
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
         SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
@@ -123,13 +130,6 @@ class Db2ReceiverSnapshotIntegrationTest {
         ExecutorService exec = Executors.newSingleThreadExecutor();
         Connection bgConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
         bgConn.setAutoCommit(false);
-        // Enable the statement monitor switch for bgConn via ADMIN_CMD — this is the
-        // only reliable way to ensure SNAP_GET_STMT captures STMT_TEXT for this
-        // specific JDBC connection. DFT_MON_STMT ON sets the default for new
-        // connections, but JDBC drivers may not honour it; ADMIN_CMD forces it on.
-        try (Statement mst = bgConn.createStatement()) {
-            mst.execute("CALL SYSPROC.ADMIN_CMD('UPDATE MONITOR SWITCHES USING STATEMENT ON')");
-        } catch (Exception ignored) {}
         Statement bgStmt = bgConn.createStatement();
         Future<?> bgQuery = exec.submit(() -> {
             try {
