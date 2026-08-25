@@ -155,13 +155,11 @@ class Db2ReceiverSnapshotIntegrationTest {
             int diagCount = 0;
             while (diagRs.next()) {
                 diagCount++;
-                org.slf4j.LoggerFactory.getLogger(Db2ReceiverSnapshotIntegrationTest.class)
-                    .info("SNAP_GET_STMT row: agent={} status={} stop={} text={}",
-                        diagRs.getString("AGENT_ID"), diagRs.getString("APPL_STATUS"),
-                        diagRs.getString("STMT_STOP"), diagRs.getString("STMT_TEXT"));
+                System.out.printf("[DIAG] SNAP row agent=%s status=%s stop=%s text=%s%n",
+                    diagRs.getString("AGENT_ID"), diagRs.getString("APPL_STATUS"),
+                    diagRs.getString("STMT_STOP"), diagRs.getString("STMT_TEXT"));
             }
-            org.slf4j.LoggerFactory.getLogger(Db2ReceiverSnapshotIntegrationTest.class)
-                .info("SNAP_GET_STMT total rows (all statuses): {}", diagCount);
+            System.out.printf("[DIAG] SNAP_GET_STMT total rows: %d%n", diagCount);
         }
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
