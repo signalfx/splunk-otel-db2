@@ -247,9 +247,10 @@ class Db2ReceiverIntegrationTest {
         props.setProperty("user",     db2.getUsername());
         props.setProperty("password", db2.getPassword());
 
-        // Run a 4-way cross-join that produces billions of rows — guaranteed to stay active
-        // for well over 30 seconds on any container size. No literals, so the obfuscated
-        // form is identical to the input.
+        // COUNT(*) over a 4-way cross-join forces DB2 to scan all combinations before
+        // returning a single row, so executeQuery() blocks for the entire duration.
+        // A plain SELECT would let DB2 buffer the first rows and flip the session to IDLE
+        // before our MON_CURRENT_SQL poll fires — COUNT(*) prevents that.
         // Start the background query BEFORE the sampler so it is already executing when
         // the first MON_CURRENT_SQL poll fires.
         ExecutorService exec = Executors.newSingleThreadExecutor();
@@ -258,15 +259,16 @@ class Db2ReceiverIntegrationTest {
         Future<?> bgQuery = exec.submit(() -> {
             try {
                 bgStmt.executeQuery(
-                    "SELECT A.COLNAME FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B, " +
+                    "SELECT COUNT(*) FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B, " +
                     "SYSCAT.COLUMNS C, SYSCAT.COLUMNS D");
             } catch (Exception ignored) {
                 // cancelled when bgStmt.cancel() is called below — expected
             }
         });
 
-        // Give the background query a moment to reach the engine before the first poll
-        Thread.sleep(2000);
+        // Give the background query time to reach the engine before the first poll.
+        // On slow CI runners DB2 startup is still settling — 5s is conservative but reliable.
+        Thread.sleep(5000);
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
@@ -275,7 +277,7 @@ class Db2ReceiverIntegrationTest {
             // Wait until the sampler emits at least one record whose query text
             // contains the sentinel table name from our background query.
             Awaitility.await()
-                .atMost(60, TimeUnit.SECONDS)
+                .atMost(90, TimeUnit.SECONDS)
                 .pollInterval(1, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
                     .anyMatch(r -> {
