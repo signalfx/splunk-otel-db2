@@ -148,7 +148,11 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
 -- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
--- Also requires (run as SYSADM): CALL SYSPROC.ADMIN_CMD('UPDATE DBM CFG USING DFT_MON_STMT ON')
+-- Also requires DFT_MON_STMT ON. Run the following as SYSADM, then restart the instance:
+--   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
+--   db2stop force && db2start
+-- DFT_MON_STMT ON takes effect only after the instance is cycled; without the restart
+-- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
 ```
 
 > **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.

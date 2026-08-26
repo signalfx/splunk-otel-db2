@@ -32,9 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Integration test for the snapshot monitor path (use_snapshot_monitor=true).
  *
- * Requires DFT_MON_STMT ON — enabled via JDBC before the sampler starts.
- * Runs as a separate CI job tagged "snapshot" so it does not block the main
- * integration-test job.
+ * Requires DFT_MON_STMT ON — set via UPDATE DBM CFG, then the instance is
+ * restarted (db2stop force / db2start) so the new default takes effect for
+ * all subsequent connections. Runs as a separate CI job tagged "snapshot".
  *
  * Run with: ./gradlew integrationTestSnapshot
  */
@@ -78,7 +78,6 @@ class Db2ReceiverSnapshotIntegrationTest {
         // DFT_MON_STMT ON takes effect only at next database activation (IBM docs).
         // db2stop force + db2start recycles the instance so the new default is
         // active for every subsequent JDBC connection. Run as db2inst1 (SYSADM).
-        String dbName = db2.getDatabaseName().toUpperCase();
         String script =
             "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
             "db2stop force && " +
