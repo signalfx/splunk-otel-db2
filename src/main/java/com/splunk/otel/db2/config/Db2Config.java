@@ -126,7 +126,9 @@ public class Db2Config {
             throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
         rc.getCollectionIntervalDuration();    // triggers duration parse validation
         rc.getQuerySampleIntervalDuration();   // triggers duration parse validation
-        rc.getTopQueryIntervalDuration();      // triggers duration parse validation
+        if (rc.isTopQueryEnabled()) {
+            rc.getTopQueryIntervalDuration();  // 60s minimum only enforced when feature is on
+        }
 
         String endpoint = cfg.getExporters().getOtlp().getEndpoint();
         if (endpoint == null || endpoint.isBlank())

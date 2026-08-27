@@ -42,6 +42,9 @@ class TopQueryQueryTest {
         // Default: INSERT_TIMESTAMP null → treated as Epoch → section is always "old".
         // Tests that need a "new" section override this explicitly.
         when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null);
+        // Default: SERVER_NOW = a fixed past timestamp (simulates Db2 server clock).
+        // Tests override per-cycle to simulate the passage of time.
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(Timestamp.from(Instant.EPOCH.plusSeconds(1000)));
     }
 
     private TopQueryQuery query() {
@@ -81,9 +84,15 @@ class TopQueryQueryTest {
     void newEntryAfterBaselineIsEmittedUsingCurrentCounters() throws Exception {
         TopQueryQuery q = query();
 
+        // Use fixed server-clock values so INSERT_TIMESTAMP comparison is deterministic.
+        // Cycle 1 SERVER_NOW = T+100; cycle 2 exec2 INSERT_TIMESTAMP = T+150 (after T+100).
+        Timestamp cycle1ServerNow  = Timestamp.from(Instant.EPOCH.plusSeconds(100));
+        Timestamp exec2InsertTs    = Timestamp.from(Instant.EPOCH.plusSeconds(150));
+
         // Cycle 1: seed with exec1 only
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(cycle1ServerNow);
         q.collect();
         verify(otelLogger, never()).logRecordBuilder();
 
@@ -105,9 +114,9 @@ class TopQueryQueryTest {
         when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
-        // exec1 is old (null → Epoch); exec2 is genuinely new (compiled after the last scrape)
-        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(
-            null, Timestamp.from(Instant.now().plusSeconds(3600)));
+        // exec1: old section (Epoch < cycle1ServerNow); exec2: compiled after cycle 1 server clock
+        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null, exec2InsertTs);
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(Timestamp.from(Instant.EPOCH.plusSeconds(200)));
 
         q.collect();
 
@@ -173,9 +182,13 @@ class TopQueryQueryTest {
     void newEntryWithZeroExecTimeButNonZeroExecutionsIsEmitted() throws Exception {
         TopQueryQuery q = query();
 
+        Timestamp cycle1ServerNow = Timestamp.from(Instant.EPOCH.plusSeconds(100));
+        Timestamp exec2InsertTs   = Timestamp.from(Instant.EPOCH.plusSeconds(150));
+
         // Seed with exec1
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(cycle1ServerNow);
         q.collect();
 
         // Cycle 2: exec2 is new, STMT_EXEC_TIME=0 (very fast query) but has 2 executions
@@ -196,9 +209,9 @@ class TopQueryQueryTest {
         when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
-        // exec1 is old; exec2 is genuinely new
-        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(
-            null, Timestamp.from(Instant.now().plusSeconds(3600)));
+        // exec1 is old (Epoch); exec2 was compiled after cycle 1 server clock
+        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null, exec2InsertTs);
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(Timestamp.from(Instant.EPOCH.plusSeconds(200)));
 
         q.collect();
 
@@ -376,6 +389,7 @@ class TopQueryQueryTest {
         assertThat(sql).containsIgnoringCase("MON_GET_PKG_CACHE_STMT");
         assertThat(sql).containsIgnoringCase("EXECUTABLE_ID");
         assertThat(sql).containsIgnoringCase("INSERT_TIMESTAMP");
+        assertThat(sql).containsIgnoringCase("SERVER_NOW");
         assertThat(sql).containsIgnoringCase("STMT_EXEC_TIME");
         assertThat(sql).containsIgnoringCase("NUM_EXECUTIONS");
         assertThat(sql).containsIgnoringCase("TOTAL_SECTION_SORTS");
@@ -403,6 +417,11 @@ class TopQueryQueryTest {
         assertThat(sql).contains("MON_GET_DATABASE");
         assertThat(sql).contains("MON_GET_BUFFERPOOL");
         assertThat(sql).contains("MON_GET_TABLESPACE");
+        assertThat(sql).contains("MON_CURRENT_SQL");
+        assertThat(sql).contains("MON_GET_CONNECTION");
+        assertThat(sql).contains("SNAP_GET_APPL_INFO");
+        assertThat(sql).contains("SNAP_GET_STMT");
+        assertThat(sql).contains("SYSDUMMY1");
     }
 
     @Test
@@ -654,14 +673,20 @@ class TopQueryQueryTest {
     @Test
     void genuinelyNewSectionEmitsCurrentCountersAsIntervalDelta() throws Exception {
         // A section compiled AFTER the last scrape is truly new — its counters are the interval delta.
+        // Uses fixed server-clock values: cycle 1 SERVER_NOW=T+100, exec2 INSERT_TIMESTAMP=T+150.
+        // T+150 is after T+100 so exec2 is classified as genuinely new in cycle 2.
         TopQueryQuery q = query();
+
+        Timestamp cycle1ServerNow = Timestamp.from(Instant.EPOCH.plusSeconds(100));
+        Timestamp exec2InsertTs   = Timestamp.from(Instant.EPOCH.plusSeconds(150));
 
         // Seed cycle
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(cycle1ServerNow);
         q.collect();
 
-        // Cycle 2: exec2 appears for the first time with INSERT_TIMESTAMP after the last scrape
+        // Cycle 2: exec2 appears for the first time with INSERT_TIMESTAMP after cycle 1 server clock
         reset(stmt, rs, otelLogger, logBuilder);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
@@ -679,9 +704,9 @@ class TopQueryQueryTest {
         when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
-        // exec1 is old; exec2 was compiled after the last scrape
-        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(
-            null, Timestamp.from(Instant.now().plusSeconds(3600)));
+        // exec1: old section (Epoch < T+100); exec2: compiled between cycle 1 and cycle 2
+        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null, exec2InsertTs);
+        when(rs.getTimestamp("SERVER_NOW")).thenReturn(Timestamp.from(Instant.EPOCH.plusSeconds(200)));
         q.collect();
 
         // Only exec2 emitted; exec1 has zero delta

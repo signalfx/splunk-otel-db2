@@ -34,14 +34,19 @@ import java.util.function.Supplier;
  * consecutive absences.
  *
  * Cache-miss classification via INSERT_TIMESTAMP: on a cache miss, the section's
- * INSERT_TIMESTAMP is compared to lastScrapeInstant (time of the previous
- * successful scrape):
- *   - insertTs &gt; lastScrapeInstant → section was compiled after the last scrape →
+ * INSERT_TIMESTAMP is compared to lastServerScrapeInstant (Db2 CURRENT TIMESTAMP
+ * captured during the previous successful scrape):
+ *   - insertTs &gt; lastServerScrapeInstant → section was compiled after the last scrape →
  *     genuinely new → use current counters as interval delta.
- *   - insertTs &lt;= lastScrapeInstant → section predates the last scrape and was
+ *   - insertTs &lt;= lastServerScrapeInstant → section predates the last scrape and was
  *     evicted while inactive → seed baseline and skip emission this cycle.
  * This prevents lifetime cumulative totals from being emitted as a single interval
  * when an evicted-but-old section resumes execution.
+ *
+ * Server-clock comparison: both INSERT_TIMESTAMP and CURRENT TIMESTAMP originate from
+ * the Db2 server (same clock, same timezone). Comparing two server-local timestamps via
+ * JDBC avoids the JVM/Db2 timezone skew that would arise if a JVM Instant were used as
+ * the boundary.
  *
  * Recency filter: {@code LAST_METRICS_UPDATE > CURRENT TIMESTAMP - N MINUTES} where
  * N is derived from the collection interval (2x, minimum 5 minutes) so statements
@@ -62,6 +67,9 @@ public class TopQueryQuery {
     //   installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
     // INSERT_TIMESTAMP: when this plan-cache section was compiled. Used to distinguish genuinely
     //   new sections from evicted-old sections that resume execution.
+    // CURRENT TIMESTAMP: captured alongside each query result so cache-miss classification
+    //   compares two server-local timestamps (same clock, same timezone) rather than mixing
+    //   server time with JVM time.
     // STMT_EXEC_TIME: cumulative execution elapsed time (ms), excludes compile/bind cost.
     // TOTAL_CPU_TIME: cumulative CPU time (µs).
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
@@ -72,6 +80,7 @@ public class TopQueryQuery {
         "       MEMBER, " +
         "       EXECUTABLE_ID, " +
         "       INSERT_TIMESTAMP, " +
+        "       CURRENT TIMESTAMP AS SERVER_NOW, " +
         "       NUM_EXECUTIONS, " +
         "       STMT_EXEC_TIME, " +
         "       TOTAL_CPU_TIME, " +
@@ -88,7 +97,12 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_DATABASE%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_BUFFERPOOL%%%%' " +
-        "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_TABLESPACE%%%%'";
+        "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_TABLESPACE%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
 
     // Counter array indices — I_NUM_EXEC is NUM_EXECUTIONS (total), not NUM_EXEC_WITH_METRICS
     private static final int I_EXEC_TIME = 0;
@@ -111,9 +125,10 @@ public class TopQueryQuery {
     private final Map<String, CacheEntry> baselineCache = new HashMap<>();
     private int scrapeGen = 0;
 
-    // Time of the most recent successful DB query, used to classify cache misses.
+    // Db2 CURRENT TIMESTAMP from the most recent successful scrape, used to classify cache misses.
+    // Stored as a server-local Timestamp so INSERT_TIMESTAMP comparison stays on the server clock.
     // Null until the first scrape completes.
-    private Instant lastScrapeInstant = null;
+    private java.sql.Timestamp lastServerScrapeInstant = null;
 
     private static final class CacheEntry {
         long[] counters;
@@ -148,12 +163,13 @@ public class TopQueryQuery {
     }
 
     public void collect() {
-        Map<String, long[]>  curr             = new HashMap<>();
-        List<String[]>       texts            = new ArrayList<>(); // [rawSql, secType, key, member]
-        List<long[]>         counters         = new ArrayList<>();
-        List<Instant>        insertTimestamps = new ArrayList<>();
-        // Snapshot the query start time before hitting the DB; used to classify cache misses below.
-        Instant thisScrapeInstant = Instant.now();
+        Map<String, long[]>        curr              = new HashMap<>();
+        List<String[]>             texts             = new ArrayList<>(); // [rawSql, secType, key, member]
+        List<long[]>               counters          = new ArrayList<>();
+        List<java.sql.Timestamp>   insertTimestamps  = new ArrayList<>();
+        // SERVER_NOW from the first result row (same for all rows in one query).
+        // Null until at least one row is processed; left null on empty result sets.
+        java.sql.Timestamp thisServerNow = null;
 
         try {
             Connection conn = connSupplier.get();
@@ -163,6 +179,9 @@ public class TopQueryQuery {
                     while (rs.next()) {
                         String rawSql = rs.getString("STMT_TEXT");
                         if (rawSql == null || rawSql.isBlank()) continue;
+                        if (thisServerNow == null) {
+                            thisServerNow = rs.getTimestamp("SERVER_NOW");
+                        }
                         long member   = rs.getLong("MEMBER");
                         String execId = rs.getString("EXECUTABLE_ID");
                         String key    = member + ":" + execId;
@@ -183,13 +202,17 @@ public class TopQueryQuery {
                         counters.add(c);
                         // Null INSERT_TIMESTAMP (unexpected) treated as Epoch — always predates
                         // any real scrape, so the section is conservatively seeded, never inflated.
-                        insertTimestamps.add(insertTs != null ? insertTs.toInstant() : Instant.EPOCH);
+                        insertTimestamps.add(insertTs != null ? insertTs
+                            : new java.sql.Timestamp(0));
                     }
                 }
             }
         } catch (Exception e) {
             log.warn("TopQueryQuery collection failed: {}", e.getMessage());
-            return; // lastScrapeInstant not updated — next cycle re-classifies misses correctly
+            return; // lastServerScrapeInstant not updated — next cycle re-classifies misses correctly
+        }
+        if (curr.size() > 5000) {
+            log.warn("TopQueryQuery: plan cache returned {} rows — consider tuning LAST_METRICS_UPDATE lookback", curr.size());
         }
 
         scrapeGen++;
@@ -219,8 +242,20 @@ public class TopQueryQuery {
             if (it.next().lastSeenGen < scrapeGen - MAX_STALE_CYCLES) it.remove();
         }
 
-        // Record the time of this successful scrape before any early return.
-        lastScrapeInstant = thisScrapeInstant;
+        // Capture the PREVIOUS scrape boundary before overwriting it.
+        // The delta loop must compare INSERT_TIMESTAMP against the *previous* scrape's server
+        // clock — not the current one. Overwriting first caused A1: insertTs.isAfter(current)
+        // is always false (no section is compiled in the future), so every cache miss was
+        // silently seeded instead of emitted.
+        java.sql.Timestamp prevServerScrapeInstant = lastServerScrapeInstant;
+        // Only advance the boundary when the query returned rows (SERVER_NOW is set).
+        // An empty result set means the lookback window matched nothing — the previous
+        // boundary is still the correct reference for the next cycle's cache-miss classification.
+        // Resetting to Epoch here would incorrectly classify every returning old section as
+        // new because virtually every INSERT_TIMESTAMP is after Epoch.
+        if (thisServerNow != null) {
+            lastServerScrapeInstant = thisServerNow;
+        }
 
         if (isFirstCollection) {
             log.debug("TopQueryQuery: first collection, seeding delta baseline ({} rows)", curr.size());
@@ -230,10 +265,12 @@ public class TopQueryQuery {
         // Compute interval deltas.
         // prevC != null → normal delta path.
         // prevC == null → cache miss; use INSERT_TIMESTAMP to decide:
-        //   - insertTs > lastScrapeInstant: compiled after the last scrape → genuinely new →
-        //     use current counters as delta (correct interval contribution).
-        //   - insertTs <= lastScrapeInstant: section predates the last scrape, was evicted while
-        //     inactive → skip emission; baseline is already seeded in cache for the next cycle.
+        //   - insertTs > prevServerScrapeInstant: compiled after the last scrape → genuinely
+        //     new → use current counters as delta (correct interval contribution).
+        //   - insertTs <= prevServerScrapeInstant: section predates the last scrape, was
+        //     evicted while inactive → skip emission; baseline is already seeded in cache.
+        //   - prevServerScrapeInstant == null (first post-seed cycle): treat all misses as old
+        //     (conservative — no prior server clock to compare against; next cycle is normal).
         // deltas[i] = [row_index, execTimeDelta, numExecDelta]
         List<long[]> deltas = new ArrayList<>();
         for (int i = 0; i < texts.size(); i++) {
@@ -243,8 +280,8 @@ public class TopQueryQuery {
             long execTimeDelta;
             long numExecDelta;
             if (prevC == null) {
-                Instant insertTs = insertTimestamps.get(i);
-                if (!insertTs.isAfter(lastScrapeInstant)) {
+                java.sql.Timestamp insertTs = insertTimestamps.get(i);
+                if (prevServerScrapeInstant == null || !insertTs.after(prevServerScrapeInstant)) {
                     // Old section resuming after eviction — emit nothing; next cycle has the baseline.
                     continue;
                 }
