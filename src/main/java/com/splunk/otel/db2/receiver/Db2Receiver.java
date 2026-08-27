@@ -93,11 +93,13 @@ public class Db2Receiver {
         }
 
         if (otelLogger != null && config.isTopQueryEnabled()) {
+            long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
             TopQueryQuery topQueryQuery = new TopQueryQuery(
                 connSupplier,
                 config.getDatabase(),
                 otelLogger,
-                config.getTopQueryCount()
+                config.getTopQueryCount(),
+                topQueryIntervalSeconds
             );
 
             topQueryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -105,7 +107,6 @@ public class Db2Receiver {
                 t.setDaemon(true);
                 return t;
             });
-            long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
             topQueryScheduler.scheduleAtFixedRate(
                 () -> {
                     try {

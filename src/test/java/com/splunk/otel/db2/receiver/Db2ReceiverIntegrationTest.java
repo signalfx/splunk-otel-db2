@@ -360,21 +360,34 @@ class Db2ReceiverIntegrationTest {
             )
             .build();
 
+        // Use a short interval so the test completes quickly.
+        // Cycle 1 (t=0s): receiver starts, seeds the delta baseline.
+        // Workload: run a non-filtered recognisable query AFTER the seed collection.
+        // Cycle 2 (t=4s): delta is computed, top_query records are emitted.
+        // SPLUNK_OTEL_TOPQ_PROBE is used as a unique marker in the alias; it contains
+        // no literals so the obfuscated text is identical to the raw text.
         Db2ReceiverConfig config = buildConfig();
         config.setTopQueryEnabled(true);
-        config.setTopQueryInterval("3s");   // two cycles: seed at 0s, emit at 3s
+        config.setTopQueryInterval("4s");
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
         props.setProperty("password", db2.getPassword());
 
-        // Run a recognisable workload query so MON_GET_PKG_CACHE_STMT has something to return.
-        // SPLUNK_OTEL_TOP_QUERY_TEST has no literals so obfuscated text == raw text.
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        // Wait for the first (seeding) collection to complete before running workload.
+        // The scheduler fires at t=0 and t=4s; sleeping 2s puts us safely between cycles.
+        Thread.sleep(2000);
+
+        // Run a recognisable query that is NOT filtered by the NOT LIKE clauses.
+        // Using SYSCAT.TABLES ensures the plan cache entry persists across cycles.
         Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
         try (Statement st = workConn.createStatement()) {
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < 3; i++) {
                 try (ResultSet r = st.executeQuery(
-                        "SELECT COUNT(*) FROM TABLE(MON_GET_DATABASE(-2)) AS SPLUNK_OTEL_TOP_QUERY_TEST")) {
+                        "SELECT COUNT(*) AS SPLUNK_OTEL_TOPQ_PROBE FROM SYSCAT.TABLES")) {
                     while (r.next()) { /* drain */ }
                 }
             }
@@ -382,11 +395,8 @@ class Db2ReceiverIntegrationTest {
             workConn.close();
         }
 
-        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
-        receiver.start();
-
         try {
-            // Wait for at least one top_query log record to appear (requires two scheduler cycles).
+            // Wait for the second collection cycle to emit records.
             Awaitility.await()
                 .atMost(30, TimeUnit.SECONDS)
                 .pollInterval(2, TimeUnit.SECONDS)
@@ -399,7 +409,6 @@ class Db2ReceiverIntegrationTest {
                     .findFirst()
                     .orElseThrow();
 
-            // Core OTel attributes
             assertThat(record.getSeverity())
                 .isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
             assertThat(record.getAttributes().get(TopQueryEvent.DB_SYSTEM))
@@ -407,12 +416,10 @@ class Db2ReceiverIntegrationTest {
             assertThat(record.getAttributes().get(TopQueryEvent.DB_NAMESPACE))
                 .isEqualTo(config.getDatabase());
 
-            // Query text must be present and obfuscated (no raw literals)
             String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);
             assertThat(queryText).isNotBlank();
             assertThat(queryText).doesNotContain("'");
 
-            // Numeric attributes must be present and non-negative
             assertThat(record.getAttributes().get(TopQueryEvent.DB2_MEMBER)).isNotNull();
             assertThat(record.getAttributes().get(TopQueryEvent.DB2_EXECUTIONS)).isNotNull();
             assertThat(record.getAttributes().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME))
