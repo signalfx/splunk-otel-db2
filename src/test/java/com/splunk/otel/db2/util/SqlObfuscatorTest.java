@@ -154,6 +154,21 @@ class SqlObfuscatorTest {
     }
 
     @Test
+    void unterminatedDoubleQuotedIdentifierWithStringLiteralTailReturnsFailed() {
+        // The tail after the opening " is verbatim output and then blanked by
+        // containsResidualLiteral — sensitive values would never be flagged without
+        // the unterminated-" check in hasMalformedQuoting.
+        assertThat(SqlObfuscator.obfuscate("SELECT \"unterminated WHERE secret='password'"))
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
+    void unterminatedDoubleQuotedIdentifierWithNumericTailReturnsFailed() {
+        assertThat(SqlObfuscator.obfuscate("SELECT \"unterminated WHERE account=123456"))
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
     void doubleQuotedIdentifierInternalWhitespacePreserved() {
         // "Order  History" (two spaces) is a different object from "Order History" (one space)
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM \"Order  History\""))
@@ -339,6 +354,26 @@ class SqlObfuscatorTest {
             .isEqualTo("SELECT * FROM T WHERE C = ?");
     }
 
+    @Test
+    void supplementaryPlaneFormatCharStripped() {
+        // U+E0020 TAG SPACE (supplementary-plane Cf) is encoded as a surrogate pair in Java.
+        // Character.getType(char) on either surrogate returns SURROGATE, not FORMAT — only
+        // codepoint-aware iteration detects it. Verify it is stripped so 1<U+E0020>E123
+        // is not left as ?E123 (which would re-trigger residual-literal detection as a
+        // standalone digit-run).
+        String tagSpace = new String(Character.toChars(0xE0020));
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 1" + tagSpace + "E123"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void supplementaryPlaneFormatCharBetweenQuoteAndLiteral() {
+        // U+E0020 between opening quote and content must not prevent obfuscation
+        String tagSpace = new String(Character.toChars(0xE0020));
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE K = '" + tagSpace + "secret'"))
+            .isEqualTo("SELECT * FROM T WHERE K = ?");
+    }
+
     // --- Prefixed literal identifier boundary ---
 
     @Test
@@ -454,7 +489,66 @@ class SqlObfuscatorTest {
     void unterminatedSingleQuotedString() {
         // unterminated string is consumed to end and replaced with ? — no data leak
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = 'unterminated"))
-            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
+    void malformedSqlWithOddQuoteCountReturnsFailed() {
+        // Three single-quotes outside delimited identifiers = unbalanced → fail-closed
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE A = 'x' AND B = 'y"))
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
+    void apostropheInsideLineCommentDoesNotTriggerFailClosed() {
+        // -- user's query: the ' is inside a comment, not a string literal
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T -- user's query\nWHERE ID = 1"))
+            .isEqualTo("SELECT * FROM T WHERE ID = ?");
+    }
+
+    @Test
+    void apostropheInsideBlockCommentDoesNotTriggerFailClosed() {
+        assertThat(SqlObfuscator.obfuscate("SELECT /* it's fine */ * FROM T WHERE ID = 1"))
+            .isEqualTo("SELECT * FROM T WHERE ID = ?");
+    }
+
+    @Test
+    void lineCommentTokenInsideSingleQuotedStringNotTreatedAsComment() {
+        // 'abc--def' is a valid string literal containing --; must not be treated as a
+        // line comment by hasUnbalancedQuotes, which would desync the quote count
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'abc--def'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void blockCommentTokenInsideSingleQuotedStringNotTreatedAsComment() {
+        // 'abc/*def*/' is a valid string literal containing /* */
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'abc/*def*/'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void nestedBlockCommentInHasUnbalancedQuotesCheck() {
+        // Nested /* /* */ */ — both depth levels must be consumed without exposing the
+        // apostrophe inside the inner comment to the quote counter
+        assertThat(SqlObfuscator.obfuscate("SELECT /* outer /* it's nested */ end */ * FROM T WHERE ID = 1"))
+            .isEqualTo("SELECT * FROM T WHERE ID = ?");
+    }
+
+    @Test
+    void doubleQuoteInsideSingleQuotedStringDoesNotFlipIdentifierState() {
+        // A " inside a string literal must not cause stripFormatCodepoints to enter
+        // inDoubleQuotedId mode — the quote is part of the literal content.
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'he said \"hi\"'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void formatCharInsideSingleQuotedStringContainingDoubleQuote() {
+        // Combines both: format char inside a string that also contains a "
+        // The " must not desync the identifier-tracking state in stripFormatCodepoints.
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'he\u200B said \"hi\"'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
     }
 
     @Test
@@ -466,7 +560,7 @@ class SqlObfuscatorTest {
     @Test
     void unterminatedHexLiteral() {
         assertThat(SqlObfuscator.obfuscate("WHERE X = X'deadbeef"))
-            .isEqualTo("WHERE X = ?");
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
     }
 
     @Test

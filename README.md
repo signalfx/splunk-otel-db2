@@ -1,6 +1,6 @@
 # splunk-otel-db2
 
-A standalone OpenTelemetry receiver for IBM Db2. Collects metrics from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud. Query log collection (top queries, active sessions) is planned for a future release.
+A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and active query samples from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud.
 
 ## Requirements
 
@@ -34,10 +34,11 @@ receivers:
     database: "SAMPLE"          # database name (uppercase)
     collection_interval: "30s"  # metrics collection interval
     top_query_count: 250        # top N queries by exec time (future PR)
-    max_query_sample_count: 1000
-    query_sample_interval: "10s"
-    top_query_interval: "60s"
-    use_snapshot_monitor: false
+    query_sample_enabled: false      # set true to enable query sampling (opt-in)
+    max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
+    query_sample_interval: "10s"     # how often to sample active queries
+    top_query_interval: "60s"        # top-query collection interval (future PR)
+    use_snapshot_monitor: false      # set true to use SNAP_GET_STMT fallback path
     tls:
       insecure: true            # set false to enable TLS
 
@@ -60,7 +61,7 @@ All metrics carry `db.namespace` (database name) and `db2.member` (member number
 | `db2.connection.active` | UpDownCounter | `{connection}` | Connections executing in the engine |
 | `db2.connection.max` | UpDownCounter | `{connection}` | Peak simultaneous connections |
 | `db2.lock.wait.count` | Counter | `{wait}` | Total lock waits |
-| `db2.lock.wait_time` | Counter | `ms` | Total time spent waiting for locks |
+| `db2.lock.wait_time` | Counter | `s` | Total time spent waiting for locks |
 | `db2.lock.timeout.count` | Counter | `{timeout}` | Lock timeouts |
 | `db2.lock.escalation.count` | Counter | `{escalation}` | Lock escalations (row → table) |
 | `db2.lock.space_used` | UpDownCounter | `By` | Lock list memory in use |
@@ -77,8 +78,8 @@ Additional attributes: `db2.bufferpool` (pool name), `db2.read_type` (`data`, `i
 | `db2.buffer_pool.logical_reads` | Counter | `{read}` | Logical page reads |
 | `db2.buffer_pool.physical_reads` | Counter | `{read}` | Physical page reads from disk |
 | `db2.buffer_pool.writes` | Counter | `{write}` | Pages written to disk (data + index + XDA) |
-| `db2.buffer_pool.read_time` | Counter | `ms` | Time spent reading from disk |
-| `db2.buffer_pool.write_time` | Counter | `ms` | Time spent writing to disk |
+| `db2.buffer_pool.read_time` | Counter | `s` | Time spent reading from disk |
+| `db2.buffer_pool.write_time` | Counter | `s` | Time spent writing to disk |
 
 ### Tablespace (`MON_GET_TABLESPACE`)
 
@@ -87,6 +88,74 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 | Metric | Type | Unit | Description |
 |---|---|---|---|
 | `db2.tablespace.size` | UpDownCounter | `By` | Tablespace size broken down by usage |
+
+## Query samples (log records)
+
+Active statements are sampled at `query_sample_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `query_sample_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+
+The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
+
+| Attribute | Description |
+|---|---|
+| `db.system.name` | Always `ibm.db2` |
+| `db.namespace` | Database name |
+| `db.query.text` | Obfuscated SQL statement |
+| `db2.application_handle` | Application handle / agent ID |
+| `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
+| `db2.query_start` | Statement start timestamp |
+| `db2.session.duration` | Wall-clock elapsed time in seconds |
+| `db2.member` | Db2 member number |
+| `db2.cpu_time` | CPU time in seconds (default path only) |
+| `user.name` | Authenticated user ID |
+| `client.address` | Client workstation name |
+
+**Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `SYSIBMADM.MON_CURRENT_SQL` view + `MON_GET_CONNECTION` TVF JOIN. No `DFT_MON_STMT` requirement. Filters out IDLE sessions and the receiver's own queries.
+
+**Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
+
+## Required permissions
+
+Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
+
+```bash
+# Create the OS user on the Db2 server (Linux example)
+useradd -m db2mon
+echo 'db2mon:<password>' | chpasswd
+```
+
+```sql
+-- Connect to the database as SYSADM or DBADM, then grant:
+
+-- Basic connect
+GRANT CONNECT ON DATABASE TO USER db2mon;
+
+-- Stored procedure called unconditionally on every connection
+GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
+
+-- Core metrics scrapers
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
+
+-- Query sampling (query_sample_enabled: true, default path)
+GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+
+-- Db2 10.5+ wait time attribute (db2.wait_time)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
+
+-- Snapshot monitor path (use_snapshot_monitor: true)
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
+-- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
+-- Also requires DFT_MON_STMT ON. Run the following as SYSADM, then restart the instance:
+--   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
+--   db2stop force && db2start
+-- DFT_MON_STMT ON takes effect only after the instance is cycled; without the restart
+-- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
+```
+
+> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
 
 ## Development
 

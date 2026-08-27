@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver.queries;
 
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.ObservableDoubleMeasurement;
 import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,8 +30,8 @@ public class BufferpoolQuery {
     private ObservableLongMeasurement logicalReads;
     private ObservableLongMeasurement physicalReads;
     private ObservableLongMeasurement writes;
-    private ObservableLongMeasurement readTime;
-    private ObservableLongMeasurement writeTime;
+    private ObservableDoubleMeasurement readTime;
+    private ObservableDoubleMeasurement writeTime;
 
     public BufferpoolQuery(Supplier<Connection> connSupplier, String dbName, Meter meter) {
         this.connSupplier = connSupplier;
@@ -55,13 +56,15 @@ public class BufferpoolQuery {
             .buildObserver();
 
         readTime = meter.counterBuilder("db2.buffer_pool.read_time")
-            .setDescription("Total elapsed time in milliseconds spent reading from disk into the buffer pool.")
-            .setUnit("ms")
+            .ofDoubles()
+            .setDescription("Total elapsed time spent reading from disk into the buffer pool.")
+            .setUnit("s")
             .buildObserver();
 
         writeTime = meter.counterBuilder("db2.buffer_pool.write_time")
-            .setDescription("Total elapsed time in milliseconds spent writing from the buffer pool to disk.")
-            .setUnit("ms")
+            .ofDoubles()
+            .setDescription("Total elapsed time spent writing from the buffer pool to disk.")
+            .setUnit("s")
             .buildObserver();
 
         meter.batchCallback(this::collect, logicalReads, physicalReads, writes, readTime, writeTime);
@@ -108,8 +111,8 @@ public class BufferpoolQuery {
                                      + rs.getLong("POOL_INDEX_WRITES")
                                      + rs.getLong("POOL_XDA_WRITES");
                     writes   .record(totalWrites,                   bpAttrs);
-                    readTime .record(rs.getLong("POOL_READ_TIME"),  bpAttrs);
-                    writeTime.record(rs.getLong("POOL_WRITE_TIME"), bpAttrs);
+                    readTime .record(rs.getLong("POOL_READ_TIME")  / 1000.0, bpAttrs);
+                    writeTime.record(rs.getLong("POOL_WRITE_TIME") / 1000.0, bpAttrs);
                 }
             }
         } catch (Exception e) {

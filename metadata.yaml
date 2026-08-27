@@ -3,7 +3,7 @@ type: db2
 status:
   class: receiver
   stability:
-    development: [metrics]
+    development: [metrics, logs]
 
 resource_attributes:
   db.namespace:
@@ -22,21 +22,34 @@ resource_attributes:
     description: The port of the DB2 server.
     type: int
     enabled: true
+  service.name:
+    description: Always splunk-otel-db2.
+    type: string
+    enabled: true
+  service.instance.id:
+    description: Unique instance identifier in the form host:port/database.
+    type: string
+    enabled: true
 
 attributes:
+  # --- shared metric attributes ---
   db.namespace:
     description: The name of the database.
-    type: string
-  db2.bufferpool:
-    description: Name of the buffer pool.
     type: string
   db2.member:
     description: The DB2 member number in a pureScale or DPF environment.
     type: int
+
+  # --- buffer pool metric attributes ---
+  db2.bufferpool:
+    description: Name of the buffer pool.
+    type: string
   db2.read_type:
     description: Type of buffer pool read operation.
     type: string
     enum: [data, index, xda]
+
+  # --- tablespace metric attributes ---
   db2.tablespace:
     description: Name of the tablespace.
     type: string
@@ -50,6 +63,43 @@ attributes:
     description: Tablespace size breakdown dimension.
     type: string
     enum: [capacity, used, free]
+
+  # --- query sample event attributes ---
+  db.query.text:
+    description: Obfuscated SQL statement text. Literal values replaced with ?.
+    type: string
+  db2.application_handle:
+    description: Application handle / agent ID.
+    type: string
+  db2.activity_state:
+    description: >
+      Activity state concatenated with type, e.g. "EXECUTING SELECT", "LOCKWAIT DML".
+      Values from MON_CURRENT_SQL.ACTIVITY_STATE + ACTIVITY_TYPE.
+    type: string
+  db2.query_start:
+    description: Statement start timestamp (DB2 LOCAL_START_TIME format).
+    type: string
+  db2.session.duration:
+    description: Wall-clock elapsed time since statement start, in seconds.
+    type: double
+  db2.cpu_time:
+    description: >
+      CPU time consumed by the connection in seconds (default path only,
+      from MON_GET_CONNECTION.TOTAL_CPU_TIME which is in microseconds).
+      Omitted on the snapshot monitor path.
+    type: double
+  db2.wait_time:
+    description: >
+      Cumulative lock wait time in seconds (Db2 10.5+ default path only,
+      from MON_GET_ACTIVITY.LOCK_WAIT_TIME which is in milliseconds).
+      Omitted on Db2 < 10.5 and on the snapshot monitor path.
+    type: double
+  user.name:
+    description: Authenticated user ID (CLIENT_USERID from MON_GET_CONNECTION).
+    type: string
+  client.address:
+    description: Client workstation name (CLIENT_WRKSTNNAME from MON_GET_CONNECTION).
+    type: string
 
 metrics:
   db2.buffer_pool.logical_reads:
@@ -76,25 +126,25 @@ metrics:
 
   db2.buffer_pool.read_time:
     attributes: [db2.bufferpool, db2.member]
-    description: Total elapsed time in milliseconds spent reading from disk into the buffer pool.
+    description: Total elapsed time spent reading from disk into the buffer pool.
     enabled: true
     stability: development
     sum:
       aggregation_temporality: cumulative
       monotonic: true
-      value_type: int
-    unit: "ms"
+      value_type: double
+    unit: "s"
 
   db2.buffer_pool.write_time:
     attributes: [db2.bufferpool, db2.member]
-    description: Total elapsed time in milliseconds spent writing from the buffer pool to disk.
+    description: Total elapsed time spent writing from the buffer pool to disk.
     enabled: true
     stability: development
     sum:
       aggregation_temporality: cumulative
       monotonic: true
-      value_type: int
-    unit: "ms"
+      value_type: double
+    unit: "s"
 
   db2.buffer_pool.writes:
     attributes: [db2.bufferpool, db2.member]
@@ -195,14 +245,14 @@ metrics:
 
   db2.lock.wait_time:
     attributes: [db2.member]
-    description: Total elapsed time in milliseconds spent waiting for locks.
+    description: Total elapsed time spent waiting for locks.
     enabled: true
     stability: development
     sum:
       aggregation_temporality: cumulative
       monotonic: true
-      value_type: int
-    unit: "ms"
+      value_type: double
+    unit: "s"
 
   db2.sort.count:
     attributes: [db2.member]
@@ -236,3 +286,25 @@ metrics:
       monotonic: false
       value_type: int
     unit: "By"
+
+events:
+  db.server.query_sample:
+    enabled: false
+    description: >
+      An active SQL statement sampled from MON_CURRENT_SQL (default path, Db2 9.7+)
+      or SNAP_GET_STMT (snapshot monitor path). SQL text is obfuscated before emission —
+      literal values are replaced with ?. Emitted at query_sample_interval as OTel log
+      records with severity INFO.
+    attributes:
+      - db.system.name
+      - db.namespace
+      - db.query.text
+      - db2.application_handle
+      - db2.activity_state
+      - db2.query_start
+      - db2.session.duration
+      - db2.member
+      - db2.cpu_time       # default path only; omitted on snapshot path
+      - db2.wait_time      # Db2 10.5+ default path only; omitted otherwise
+      - user.name
+      - client.address

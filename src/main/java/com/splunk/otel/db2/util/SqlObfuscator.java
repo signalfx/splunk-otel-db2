@@ -52,21 +52,35 @@ public final class SqlObfuscator {
             return sql;
         }
 
+        // Pre-strip ALL Unicode format (Cf) codepoints before lexical analysis.
+        // Character.getType(char) misses supplementary-plane FORMAT codepoints such as
+        // U+E0020 (TAG SPACE) which are encoded as surrogate pairs in Java Strings —
+        // iterating chars would see two non-FORMAT chars and leave the codepoint intact,
+        // potentially bypassing delimiter detection. Iterating by codepoint is exact.
+        // Double-quoted identifier bodies are not yet parsed here; format chars inside
+        // them are re-introduced by the main loop via the raw sql reference — they are
+        // preserved by design (a "A\u200BB" identifier is distinct from "AB").
+        sql = stripFormatCodepoints(sql);
+
+        // Fail-closed early: malformed SQL with an unterminated single-quoted literal or an
+        // unterminated double-quoted identifier cannot be safely obfuscated.
+        //   • Unterminated '...: the lexer consumes the rest of the input as literal body
+        //     and emits a single ?, but a desync before that point can leave literal text
+        //     in the output and bypass the residual check.
+        //   • Unterminated "...: everything after the opening " is treated as a delimited
+        //     identifier and written verbatim to the output. containsResidualLiteral then
+        //     blanks the "..." body before scanning, so sensitive values inside the
+        //     unterminated identifier are never flagged — a direct data-leak path.
+        if (hasMalformedQuoting(sql)) {
+            return OBFUSCATION_FAILED;
+        }
+
         StringBuilder out = new StringBuilder(sql.length());
         int i = 0;
         int len = sql.length();
 
         while (i < len) {
             char c = sql.charAt(i);
-
-            // Skip Unicode format chars (Cf) outside all other lexical contexts.
-            // All delimiter and boundary checks below are independently format-char-aware
-            // via nextNonFormat / prevNonFormat, so skipping here does not mis-classify
-            // adjacent tokens.
-            if (Character.getType(c) == Character.FORMAT) {
-                i++;
-                continue;
-            }
 
             // Line comment: -- ... \n or \r  (format-char-aware dash pair)
             if (c == '-') {
@@ -275,12 +289,103 @@ public final class SqlObfuscator {
     /**
      * Returns the first non-format character found scanning backward from {@code i}.
      * Returns a space (safe "not an identifier char" sentinel) if no such character exists.
+     *
+     * Uses {@code codePointBefore} so that a supplementary-plane character stored as a
+     * surrogate pair is evaluated as a single codepoint, matching the codepoint-aware
+     * {@code stripFormatCodepoints} pass that runs first.
      */
     private static char prevNonFormat(String sql, int i) {
-        while (i >= 0 && Character.getType(sql.charAt(i)) == Character.FORMAT) {
-            i--;
+        while (i >= 0) {
+            int cp = sql.codePointBefore(i + 1);
+            if (Character.getType(cp) != Character.FORMAT) {
+                return (char) cp; // for BMP chars this is the exact char; for supplementary, only low surrogate returned — safe as "not identifier-char"
+            }
+            i -= Character.charCount(cp);
         }
-        return (i >= 0) ? sql.charAt(i) : ' ';
+        return ' ';
+    }
+
+    /**
+     * Returns true if {@code sql} (already format-stripped) contains any malformed quoting:
+     * an odd number of single-quotes (unterminated string literal) or an unterminated
+     * double-quoted identifier (the scanner reaches end-of-input while still inside {@code "}).
+     *
+     * Either condition defeats the fail-closed guarantee:
+     * - An unterminated {@code '} causes the lexer to consume the rest of input as literal
+     *   body; a desync before that point can leave literal fragments in the output.
+     * - An unterminated {@code "} causes everything after it to be emitted verbatim as an
+     *   identifier, and {@code containsResidualLiteral} blanks that body before scanning,
+     *   so sensitive values inside it are never flagged.
+     *
+     * State machine mirrors the main lexer — single-quoted strings, double-quoted identifiers,
+     * line comments, and nested block comments — so {@code --}/{@code /*} tokens inside a
+     * string literal are not mis-classified as comment delimiters.
+     */
+    private static boolean hasMalformedQuoting(String sql) {
+        int singleQuoteCount = 0;
+        boolean inSingleQuoted = false;
+        boolean inDoubleQuoted = false;
+        int i = 0;
+        int len = sql.length();
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (inSingleQuoted) {
+                if (c == '\'') {
+                    if (i + 1 < len && sql.charAt(i + 1) == '\'') {
+                        i += 2; // '' escape — both quotes belong to this literal
+                    } else {
+                        singleQuoteCount++; // closing quote
+                        inSingleQuoted = false;
+                        i++;
+                    }
+                } else {
+                    i++;
+                }
+            } else if (inDoubleQuoted) {
+                if (c == '"') {
+                    if (i + 1 < len && sql.charAt(i + 1) == '"') {
+                        i += 2; // "" escape
+                    } else {
+                        inDoubleQuoted = false;
+                        i++;
+                    }
+                } else {
+                    i++;
+                }
+            } else if (c == '\'') {
+                singleQuoteCount++; // opening quote
+                inSingleQuoted = true;
+                i++;
+            } else if (c == '"') {
+                inDoubleQuoted = true;
+                i++;
+            } else if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+                // line comment — skip to end of line
+                i += 2;
+                while (i < len && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') i++;
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                // nested block comment — depth-tracked, matching the main lexer
+                i += 2;
+                int depth = 1;
+                while (i < len && depth > 0) {
+                    if (sql.charAt(i) == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                        depth++;
+                        i += 2;
+                    } else if (sql.charAt(i) == '*' && i + 1 < len && sql.charAt(i + 1) == '/') {
+                        depth--;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
+                }
+            } else {
+                i++;
+            }
+        }
+        // Unterminated double-quoted identifier: scanner ended while still inside "..."
+        if (inDoubleQuoted) return true;
+        // Odd single-quote count: at least one string literal is unterminated
+        return (singleQuoteCount % 2) != 0;
     }
 
     /**
@@ -395,6 +500,79 @@ public final class SqlObfuscator {
         while (start < end && sb.charAt(start) == ' ') start++;
         while (end > start && sb.charAt(end - 1) == ' ') end--;
         return sb.substring(start, end);
+    }
+
+    /**
+     * Strips Unicode FORMAT (Cf) codepoints from SQL outside double-quoted identifiers,
+     * iterating by codepoint to handle supplementary-plane FORMAT chars (e.g. U+E0020
+     * TAG SPACE) that {@code Character.getType(char)} misses (it sees surrogate chars, not
+     * the actual codepoint). FORMAT chars inside {@code "..."} identifiers are preserved
+     * unchanged — a {@code "A\u200BB"} identifier is lexically distinct from {@code "AB"}.
+     */
+    static String stripFormatCodepoints(String s) {
+        // Fast path: most SQL contains no FORMAT codepoints at all.
+        boolean hasFormat = false;
+        for (int i = 0, len = s.length(); i < len; ) {
+            int cp = s.codePointAt(i);
+            if (Character.getType(cp) == Character.FORMAT) {
+                hasFormat = true;
+                break;
+            }
+            i += Character.charCount(cp);
+        }
+        if (!hasFormat) return s;
+
+        StringBuilder sb = new StringBuilder(s.length());
+        boolean inDoubleQuotedId = false; // inside "..."
+        boolean inSingleQuotedStr = false; // inside '...'
+        for (int i = 0, len = s.length(); i < len; ) {
+            int cp = s.codePointAt(i);
+            int charCount = Character.charCount(cp);
+
+            if (inDoubleQuotedId) {
+                // Inside "..." — preserve everything verbatim (format chars included)
+                sb.appendCodePoint(cp);
+                if (cp == '"') {
+                    // Check for "" escape: peek at next codepoint
+                    int next = i + charCount;
+                    if (next < len && s.codePointAt(next) == '"') {
+                        sb.appendCodePoint('"');
+                        i = next + Character.charCount('"');
+                        continue;
+                    }
+                    inDoubleQuotedId = false; // closing quote
+                }
+            } else if (inSingleQuotedStr) {
+                // Inside '...' — strip FORMAT codepoints, track '' escape
+                if (cp == '\'') {
+                    int next = i + charCount;
+                    if (next < len && s.codePointAt(next) == '\'') {
+                        // '' escape — emit both, skip both
+                        sb.appendCodePoint(cp);
+                        sb.appendCodePoint(cp);
+                        i = next + charCount;
+                        continue;
+                    }
+                    // Closing quote
+                    sb.appendCodePoint(cp);
+                    inSingleQuotedStr = false;
+                } else if (Character.getType(cp) != Character.FORMAT) {
+                    sb.appendCodePoint(cp);
+                }
+                // else: strip FORMAT codepoint inside string (main loop handles it later)
+            } else if (cp == '"') {
+                inDoubleQuotedId = true;
+                sb.appendCodePoint(cp);
+            } else if (cp == '\'') {
+                inSingleQuotedStr = true;
+                sb.appendCodePoint(cp);
+            } else if (Character.getType(cp) != Character.FORMAT) {
+                sb.appendCodePoint(cp);
+                // else: strip FORMAT codepoint outside identifier/string
+            }
+            i += charCount;
+        }
+        return sb.toString();
     }
 
     /**

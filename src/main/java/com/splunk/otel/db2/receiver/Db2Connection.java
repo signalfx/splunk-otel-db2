@@ -46,7 +46,7 @@ public class Db2Connection {
         }
         connection = DriverManager.getConnection(url, props);
         try (Statement st = connection.createStatement()) {
-            st.execute("CALL WLM_SET_CLIENT_INFO(NULL, NULL, NULL, 'splunk-otel-db2', NULL)");
+            st.execute("CALL WLM_SET_CLIENT_INFO(NULL, NULL, 'splunk-otel-db2', NULL, NULL)");
         }
         log.info("Connected to DB2 successfully");
     }

@@ -57,7 +57,20 @@ test {
 }
 
 task integrationTest(type: Test) {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        excludeTags 'snapshot'
+    }
+    includes = ['**/*IntegrationTest*']
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+}
+
+// Snapshot monitor path — requires DFT_MON_STMT ON on the DB2 instance.
+// Run via a separate CI job: ./gradlew integrationTestSnapshot
+task integrationTestSnapshot(type: Test) {
+    useJUnitPlatform {
+        includeTags 'snapshot'
+    }
     includes = ['**/*IntegrationTest*']
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath

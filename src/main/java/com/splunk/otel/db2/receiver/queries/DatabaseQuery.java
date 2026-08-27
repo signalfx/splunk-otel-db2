@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver.queries;
 
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.ObservableDoubleMeasurement;
 import io.opentelemetry.api.metrics.ObservableLongMeasurement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,7 +29,7 @@ public class DatabaseQuery {
     private ObservableLongMeasurement activeConnections;
     private ObservableLongMeasurement maxConnections;
     private ObservableLongMeasurement lockWaits;
-    private ObservableLongMeasurement lockWaitTime;
+    private ObservableDoubleMeasurement lockWaitTime;
     private ObservableLongMeasurement deadlocks;
     private ObservableLongMeasurement lockTimeouts;
     private ObservableLongMeasurement lockEscalations;
@@ -65,8 +66,9 @@ public class DatabaseQuery {
             .buildObserver();
 
         lockWaitTime = meter.counterBuilder("db2.lock.wait_time")
-            .setDescription("Total elapsed time in milliseconds spent waiting for locks.")
-            .setUnit("ms")
+            .ofDoubles()
+            .setDescription("Total elapsed time spent waiting for locks.")
+            .setUnit("s")
             .buildObserver();
 
         deadlocks = meter.counterBuilder("db2.deadlock.count")
@@ -120,7 +122,7 @@ public class DatabaseQuery {
                     activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);
                     maxConnections    .record(rs.getLong("CONNECTIONS_TOP"),  attrs);
                     lockWaits         .record(rs.getLong("LOCK_WAITS"),       attrs);
-                    lockWaitTime      .record(rs.getLong("LOCK_WAIT_TIME"),   attrs);
+                    lockWaitTime      .record(rs.getLong("LOCK_WAIT_TIME") / 1000.0, attrs);
                     deadlocks         .record(rs.getLong("DEADLOCKS"),        attrs);
                     lockTimeouts      .record(rs.getLong("LOCK_TIMEOUTS"),    attrs);
                     lockEscalations   .record(rs.getLong("LOCK_ESCALS"),      attrs);

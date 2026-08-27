@@ -11,6 +11,7 @@ public class Db2ReceiverConfig {
     private String collectionInterval = "30s";
     private int topQueryCount = 250;
     private int maxQuerySampleCount = 1000;
+    private boolean querySampleEnabled = false;
     private boolean useSnapshotMonitor = false;
     private String querySampleInterval = "10s";
     private String topQueryInterval = "60s";
@@ -51,7 +52,15 @@ public class Db2ReceiverConfig {
     public void setTopQueryCount(int topQueryCount) { this.topQueryCount = topQueryCount; }
 
     public int getMaxQuerySampleCount() { return maxQuerySampleCount; }
-    public void setMaxQuerySampleCount(int maxQuerySampleCount) { this.maxQuerySampleCount = maxQuerySampleCount; }
+    public void setMaxQuerySampleCount(int maxQuerySampleCount) {
+        if (maxQuerySampleCount <= 0) {
+            throw new IllegalArgumentException("max_query_sample_count must be > 0, got " + maxQuerySampleCount);
+        }
+        this.maxQuerySampleCount = maxQuerySampleCount;
+    }
+
+    public boolean isQuerySampleEnabled() { return querySampleEnabled; }
+    public void setQuerySampleEnabled(boolean querySampleEnabled) { this.querySampleEnabled = querySampleEnabled; }
 
     public boolean isUseSnapshotMonitor() { return useSnapshotMonitor; }
     public void setUseSnapshotMonitor(boolean useSnapshotMonitor) { this.useSnapshotMonitor = useSnapshotMonitor; }
