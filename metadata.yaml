@@ -64,6 +64,43 @@ attributes:
     type: string
     enum: [capacity, used, free]
 
+  # --- top query event attributes ---
+  db2.executions:
+    description: Number of times the statement has been executed.
+    type: int
+  db2.total_exec_time:
+    description: >
+      Interval delta of statement execution elapsed time, in seconds.
+      Computed as the difference in STMT_EXEC_TIME between two consecutive collections.
+    type: double
+  db2.avg_exec_time:
+    description: Average execution elapsed time per execution this interval, in seconds.
+    type: double
+  db2.total_cpu_time:
+    description: >
+      Total CPU time consumed by the statement, in seconds
+      (from TOTAL_CPU_TIME which is in microseconds).
+    type: double
+  db2.rows_read:
+    description: Number of rows read by the statement.
+    type: int
+  db2.rows_returned:
+    description: Number of rows returned to the client.
+    type: int
+  db2.rows_modified:
+    description: Number of rows inserted, updated, or deleted.
+    type: int
+  db2.sorts:
+    description: Number of sorts performed for the statement.
+    type: int
+  db2.sort_overflows:
+    description: Number of sorts that ran out of sort heap and required disk space.
+    type: int
+  db2.stmt_type:
+    description: >
+      Statement type from the package cache. D = dynamic SQL, S = static (package) SQL.
+    type: string
+
   # --- query sample event attributes ---
   db.query.text:
     description: Obfuscated SQL statement text. Literal values replaced with ?.
@@ -308,3 +345,27 @@ events:
       - db2.wait_time      # Db2 10.5+ default path only; omitted otherwise
       - user.name
       - client.address
+
+  db.server.top_query:
+    enabled: false
+    description: >
+      A top SQL statement from the Db2 plan cache, ranked by execution elapsed time
+      added during the current collection interval. SQL text is obfuscated before
+      emission — literal values are replaced with ?. Emitted at top_query_interval
+      as OTel log records with severity INFO.
+      The first collection after startup seeds the delta baseline and emits nothing.
+    attributes:
+      - db.system.name
+      - db.namespace
+      - db.query.text
+      - db2.member
+      - db2.executions
+      - db2.total_exec_time
+      - db2.avg_exec_time
+      - db2.total_cpu_time
+      - db2.rows_read
+      - db2.rows_returned
+      - db2.rows_modified
+      - db2.sorts
+      - db2.sort_overflows
+      - db2.stmt_type

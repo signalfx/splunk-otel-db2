@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.receiver.queries.QuerySampleEvent;
+import com.splunk.otel.db2.receiver.queries.TopQueryEvent;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
@@ -340,6 +341,88 @@ class Db2ReceiverIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
         assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+    }
+
+    @Test
+    void topQueryEmitsObfuscatedRecordAfterTwoCollectionCycles() throws Exception {
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2ReceiverConfig config = buildConfig();
+        config.setTopQueryEnabled(true);
+        config.setTopQueryInterval("3s");   // two cycles: seed at 0s, emit at 3s
+
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        // Run a recognisable workload query so MON_GET_PKG_CACHE_STMT has something to return.
+        // SPLUNK_OTEL_TOP_QUERY_TEST has no literals so obfuscated text == raw text.
+        Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (Statement st = workConn.createStatement()) {
+            for (int i = 0; i < 5; i++) {
+                try (ResultSet r = st.executeQuery(
+                        "SELECT COUNT(*) FROM TABLE(MON_GET_DATABASE(-2)) AS SPLUNK_OTEL_TOP_QUERY_TEST")) {
+                    while (r.next()) { /* drain */ }
+                }
+            }
+        } finally {
+            workConn.close();
+        }
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        try {
+            // Wait for at least one top_query log record to appear (requires two scheduler cycles).
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(2, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())));
+
+            io.opentelemetry.sdk.logs.data.LogRecordData record =
+                logExporter.getFinishedLogRecordItems().stream()
+                    .filter(r -> "db.server.top_query".equals(r.getEventName()))
+                    .findFirst()
+                    .orElseThrow();
+
+            // Core OTel attributes
+            assertThat(record.getSeverity())
+                .isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+            assertThat(record.getAttributes().get(TopQueryEvent.DB_SYSTEM))
+                .isEqualTo("ibm.db2");
+            assertThat(record.getAttributes().get(TopQueryEvent.DB_NAMESPACE))
+                .isEqualTo(config.getDatabase());
+
+            // Query text must be present and obfuscated (no raw literals)
+            String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);
+            assertThat(queryText).isNotBlank();
+            assertThat(queryText).doesNotContain("'");
+
+            // Numeric attributes must be present and non-negative
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_MEMBER)).isNotNull();
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_EXECUTIONS)).isNotNull();
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME))
+                .isNotNull()
+                .matches(v -> v >= 0.0);
+        } finally {
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
     }
 
     private static List<String> metricNames(InMemoryMetricExporter exporter) {

@@ -5,6 +5,7 @@ import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
 import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
 import com.splunk.otel.db2.receiver.queries.TablespaceQuery;
+import com.splunk.otel.db2.receiver.queries.TopQueryQuery;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
 import org.slf4j.LoggerFactory;
@@ -24,6 +25,7 @@ public class Db2Receiver {
     private final Logger otelLogger;
     private final Db2Connection db2Connection;
     private ScheduledExecutorService scheduler;
+    private ScheduledExecutorService topQueryScheduler;
 
     public Db2Receiver(Db2ReceiverConfig config, Meter meter, Logger otelLogger) {
         this.config        = config;
@@ -90,6 +92,32 @@ public class Db2Receiver {
             );
         }
 
+        if (otelLogger != null && config.isTopQueryEnabled()) {
+            TopQueryQuery topQueryQuery = new TopQueryQuery(
+                connSupplier,
+                config.getDatabase(),
+                otelLogger,
+                config.getTopQueryCount()
+            );
+
+            topQueryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "db2-top-query-collector");
+                t.setDaemon(true);
+                return t;
+            });
+            long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
+            topQueryScheduler.scheduleAtFixedRate(
+                () -> {
+                    try {
+                        topQueryQuery.collect();
+                    } catch (Exception e) {
+                        log.warn("Top query collection error: {}", e.getMessage());
+                    }
+                },
+                0, topQueryIntervalSeconds, TimeUnit.SECONDS
+            );
+        }
+
         log.info("DB2 receiver started");
     }
 
@@ -113,6 +141,7 @@ public class Db2Receiver {
 
     public void stopScheduler() {
         if (scheduler != null) scheduler.shutdownNow();
+        if (topQueryScheduler != null) topQueryScheduler.shutdownNow();
     }
 
     public void closeConnection() {
