@@ -44,13 +44,13 @@ class TopQueryQueryTest {
     }
 
     // Stub a single result row. stmtExecMs is STMT_EXEC_TIME (cumulative ms).
-    private void stubRow(String stmtText, long member, String execId, long numExecWithMetrics,
+    private void stubRow(String stmtText, long member, String execId, long numExecutions,
                          long stmtExecMs, long cpuUs, long rowsRead, long rowsRet, long rowsMod,
                          long sorts, long sortOvf, String secType) throws Exception {
         when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
         when(rs.getLong("MEMBER")).thenReturn(member);
         when(rs.getString("EXECUTABLE_ID")).thenReturn(execId);
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(numExecWithMetrics);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(numExecutions);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(stmtExecMs);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(cpuUs);
         when(rs.getLong("ROWS_READ")).thenReturn(rowsRead);
@@ -90,7 +90,7 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(5L, 3L);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(5L, 3L);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(1000L, 500L); // exec1 unchanged (delta=0), exec2 new
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
@@ -178,7 +178,7 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(5L, 2L);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(5L, 2L);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(1000L, 0L); // exec1 no delta; exec2 new, 0ms
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
@@ -208,13 +208,13 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 1 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(3L);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(3L);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
         when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
         when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
-        when(rs.getLong("STMT_SORTS")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
         q.collect();
@@ -228,13 +228,13 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 1 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(4L);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(4L);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(150L, 300L);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
         when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
         when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
-        when(rs.getLong("STMT_SORTS")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
         q.collect();
@@ -318,13 +318,13 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(1L);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L, 300L);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
         when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
         when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
-        when(rs.getLong("STMT_SORTS")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
         q.collect();
@@ -338,13 +338,13 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
-        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(2L);
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(200L, 500L, 600L);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
         when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
         when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
-        when(rs.getLong("STMT_SORTS")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
 
@@ -364,7 +364,7 @@ class TopQueryQueryTest {
         assertThat(sql).containsIgnoringCase("MON_GET_PKG_CACHE_STMT");
         assertThat(sql).containsIgnoringCase("EXECUTABLE_ID");
         assertThat(sql).containsIgnoringCase("STMT_EXEC_TIME");
-        assertThat(sql).containsIgnoringCase("NUM_EXEC_WITH_METRICS");
+        assertThat(sql).containsIgnoringCase("NUM_EXECUTIONS");
         assertThat(sql).containsIgnoringCase("TOTAL_SECTION_SORTS");
         assertThat(sql).containsIgnoringCase("SORT_OVERFLOWS");
         assertThat(sql).containsIgnoringCase("LAST_METRICS_UPDATE");
@@ -374,6 +374,7 @@ class TopQueryQueryTest {
         assertThat(sql).doesNotContainIgnoringCase("LAST_EXEC_TIME");
         assertThat(sql).doesNotContainIgnoringCase("TOTAL_EXEC_TIME");
         assertThat(sql).doesNotContainIgnoringCase("NUM_COMPILATIONS");
+        assertThat(sql).doesNotContainIgnoringCase("NUM_EXEC_WITH_METRICS");
     }
 
     @Test

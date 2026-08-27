@@ -128,7 +128,7 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement (also set as log body) |
 | `db2.member` | Db2 member number |
-| `db2.executions` | Executions added during this interval |
+| `db2.executions` | Total executions added during this interval |
 | `db2.total_exec_time` | Interval execution elapsed time in seconds |
 | `db2.avg_exec_time` | Average execution time per execution this interval, in seconds |
 | `db2.total_cpu_time` | Interval CPU time in seconds |

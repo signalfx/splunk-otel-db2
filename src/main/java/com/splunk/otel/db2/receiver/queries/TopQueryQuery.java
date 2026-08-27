@@ -21,10 +21,10 @@ import java.util.function.Supplier;
  * Source: {@code MON_GET_PKG_CACHE_STMT} (Db2 9.7+), all members (-2).
  *
  * Ranking: per-interval delta of all cumulative counters (STMT_EXEC_TIME,
- * NUM_EXEC_WITH_METRICS, TOTAL_CPU_TIME, ROWS_READ, ROWS_RETURNED, ROWS_MODIFIED,
- * STMT_SORTS, SORT_OVERFLOWS). Statements are ranked by the STMT_EXEC_TIME delta
- * so only work done in the current collection window is ranked — consistent with
- * contrib top-query scrapers. The first collection seeds the baseline; nothing is emitted.
+ * NUM_EXECUTIONS, TOTAL_CPU_TIME, ROWS_READ, ROWS_RETURNED, ROWS_MODIFIED,
+ * TOTAL_SECTION_SORTS, SORT_OVERFLOWS). Statements are ranked by the STMT_EXEC_TIME delta;
+ * when STMT_EXEC_TIME=0 (sub-millisecond queries) NUM_EXECUTIONS delta is used as tiebreaker.
+ * The first collection seeds the baseline; nothing is emitted.
  *
  * Cache key: member + EXECUTABLE_ID uniquely identifies a plan-cache section.
  * Using raw SQL text as a key is incorrect because Db2 can hold multiple sections
@@ -41,7 +41,9 @@ public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
 
     // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
-    // NUM_EXEC_WITH_METRICS: executions whose activity metrics were captured; used for avg.
+    // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
+    //   NUM_EXEC_WITH_METRICS is NOT used — it requires WLM activity monitoring and is 0 on most
+    //   vanilla Db2 installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
     // STMT_EXEC_TIME: cumulative execution elapsed time (ms), excludes compile/bind cost.
     // TOTAL_CPU_TIME: cumulative CPU time (µs).
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
@@ -51,7 +53,7 @@ public class TopQueryQuery {
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
         "       EXECUTABLE_ID, " +
-        "       NUM_EXEC_WITH_METRICS, " +
+        "       NUM_EXECUTIONS, " +
         "       STMT_EXEC_TIME, " +
         "       TOTAL_CPU_TIME, " +
         "       ROWS_READ, " +
@@ -80,7 +82,7 @@ public class TopQueryQuery {
     // Single-threaded scheduler — HashMap is safe without synchronization.
     private Map<String, long[]> prevCounters = new HashMap<>();
 
-    // Counter array indices
+    // Counter array indices — I_NUM_EXEC is NUM_EXECUTIONS (total), not NUM_EXEC_WITH_METRICS
     private static final int I_EXEC_TIME = 0;
     private static final int I_NUM_EXEC  = 1;
     private static final int I_CPU_US    = 2;
@@ -120,7 +122,7 @@ public class TopQueryQuery {
                     String key      = member + ":" + execId;
                     long[] c = {
                         rs.getLong("STMT_EXEC_TIME"),
-                        rs.getLong("NUM_EXEC_WITH_METRICS"),
+                        rs.getLong("NUM_EXECUTIONS"),
                         rs.getLong("TOTAL_CPU_TIME"),
                         rs.getLong("ROWS_READ"),
                         rs.getLong("ROWS_RETURNED"),
@@ -139,10 +141,15 @@ public class TopQueryQuery {
             return;
         }
 
-        Map<String, long[]> prev = prevCounters;
-        prevCounters = curr;
+        boolean isFirstCollection = prevCounters.isEmpty();
+        // Snapshot the old baseline before merging so delta computation uses pre-update values.
+        // Then merge curr into the persistent baseline: update existing entries, add new ones,
+        // but never remove entries. This ensures that an entry aging out of the lookback
+        // window retains its baseline counters so its delta is not inflated when it returns.
+        Map<String, long[]> prev = isFirstCollection ? new HashMap<>() : new HashMap<>(prevCounters);
+        prevCounters.putAll(curr);
 
-        if (prev.isEmpty()) {
+        if (isFirstCollection) {
             log.debug("TopQueryQuery: first collection, seeding delta baseline ({} rows)", curr.size());
             return;
         }
@@ -150,8 +157,8 @@ public class TopQueryQuery {
         // Compute interval deltas; skip entries with no new executions this interval.
         // New entries (prevC == null): compiled/executed since the last scrape — use current
         // counters as the interval delta (PostgreSQL contrib cache-miss handling).
-        // For new entries with STMT_EXEC_TIME=0 (very fast queries), emit if NUM_EXEC_WITH_METRICS>0.
-        // deltas[i] = [row_index, execTimeDeltaMs]
+        // For new entries with STMT_EXEC_TIME=0 (very fast queries), emit if numExecDelta>0.
+        // deltas[i] = [row_index, execTimeDeltaMs, rankValue]
         List<long[]> deltas = new ArrayList<>();
         for (int i = 0; i < texts.size(); i++) {
             long[] c     = counters.get(i);
@@ -205,7 +212,6 @@ public class TopQueryQuery {
             }
 
             double totalExecSec = execTimeDelta / 1000.0;
-            // Average over interval executions (NUM_EXEC_WITH_METRICS delta)
             double avgExecSec   = numExecDelta > 0 ? totalExecSec / numExecDelta : 0.0;
 
             TopQueryEvent.of(dbName, obfuscated, member, numExecDelta, totalExecSec)
