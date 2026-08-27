@@ -72,6 +72,47 @@ class TopQueryQueryTest {
     }
 
     @Test
+    void newEntryAfterBaselineIsEmittedUsingCurrentCounters() throws Exception {
+        TopQueryQuery q = query();
+
+        // Cycle 1: seed with exec1 only
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+        verify(otelLogger, never()).logRecordBuilder();
+
+        // Cycle 2: exec1 unchanged (zero delta, skipped) + exec2 is brand new
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
+        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(5L, 3L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(1000L, 500L); // exec1 unchanged, exec2 new
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+
+        q.collect();
+
+        // Only exec2 (new entry) should be emitted; exec1 has zero delta
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // exec2: current STMT_EXEC_TIME=500ms → 0.5s, numExec=3
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.5);
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(3L);
+    }
+
+    @Test
     void secondCollectionEmitsDeltaRecord() throws Exception {
         TopQueryQuery q = query();
 

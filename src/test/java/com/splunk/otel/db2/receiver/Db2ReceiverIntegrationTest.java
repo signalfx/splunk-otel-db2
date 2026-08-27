@@ -396,16 +396,24 @@ class Db2ReceiverIntegrationTest {
         }
 
         try {
-            // Wait for the second collection cycle to emit records.
+            // Wait for the probe query to appear as a top_query record.
+            // The probe alias SPLUNK_OTEL_TOPQ_PROBE is unique and not filtered by any NOT LIKE clause.
+            // New entries (compiled after the baseline) are emitted using their current counters.
             Awaitility.await()
                 .atMost(30, TimeUnit.SECONDS)
                 .pollInterval(2, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
-                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())));
+                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_TOPQ_PROBE")));
 
             io.opentelemetry.sdk.logs.data.LogRecordData record =
                 logExporter.getFinishedLogRecordItems().stream()
-                    .filter(r -> "db.server.top_query".equals(r.getEventName()))
+                    .filter(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_TOPQ_PROBE"))
                     .findFirst()
                     .orElseThrow();
 
@@ -419,12 +427,15 @@ class Db2ReceiverIntegrationTest {
             String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);
             assertThat(queryText).isNotBlank();
             assertThat(queryText).doesNotContain("'");
+            assertThat(queryText).containsIgnoringCase("SPLUNK_OTEL_TOPQ_PROBE");
 
             assertThat(record.getAttributes().get(TopQueryEvent.DB2_MEMBER)).isNotNull();
-            assertThat(record.getAttributes().get(TopQueryEvent.DB2_EXECUTIONS)).isNotNull();
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_EXECUTIONS))
+                .isNotNull()
+                .isGreaterThan(0L);
             assertThat(record.getAttributes().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME))
                 .isNotNull()
-                .matches(v -> v >= 0.0);
+                .matches(v -> v > 0.0);
         } finally {
             receiver.stop();
             loggerProvider.shutdown();

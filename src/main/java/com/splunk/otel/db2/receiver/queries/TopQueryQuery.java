@@ -147,13 +147,16 @@ public class TopQueryQuery {
             return;
         }
 
-        // Compute interval deltas for every counter; skip new entries and zero exec-time deltas.
+        // Compute interval deltas; skip only zero-delta entries.
+        // New entries (prevC == null) were compiled/executed since the last scrape — use their
+        // current counters as the interval delta, matching PostgreSQL contrib's cache-miss handling.
         // deltas[i] = [row_index, execTimeDeltaMs]
         List<long[]> deltas = new ArrayList<>();
         for (int i = 0; i < texts.size(); i++) {
             long[] prevC = prev.get(texts.get(i)[2]);
-            if (prevC == null) continue;
-            long execTimeDelta = counters.get(i)[I_EXEC_TIME] - prevC[I_EXEC_TIME];
+            long execTimeDelta = prevC == null
+                ? counters.get(i)[I_EXEC_TIME]
+                : counters.get(i)[I_EXEC_TIME] - prevC[I_EXEC_TIME];
             if (execTimeDelta <= 0) continue;
             deltas.add(new long[]{i, execTimeDelta});
         }
@@ -166,21 +169,21 @@ public class TopQueryQuery {
             int  idx           = (int) deltas.get(rank)[0];
             long execTimeDelta = deltas.get(rank)[1];
             long[] c           = counters.get(idx);
-            long[] prevC       = prev.get(texts.get(idx)[2]);
+            long[] prevC       = prev.get(texts.get(idx)[2]); // null for new entries
             String[] t         = texts.get(idx);
 
             String rawSql  = t[0];
             String secType = t[1];
             long member    = Long.parseLong(t[3]);
 
-            // Delta all cumulative counters
-            long numExecDelta  = c[I_NUM_EXEC]  - prevC[I_NUM_EXEC];
-            long cpuUsDelta    = c[I_CPU_US]    - prevC[I_CPU_US];
-            long rowsReadDelta = c[I_ROWS_READ] - prevC[I_ROWS_READ];
-            long rowsRetDelta  = c[I_ROWS_RET]  - prevC[I_ROWS_RET];
-            long rowsModDelta  = c[I_ROWS_MOD]  - prevC[I_ROWS_MOD];
-            long sortsDelta    = c[I_SORTS]     - prevC[I_SORTS];
-            long sortOvfDelta  = c[I_SORT_OVF]  - prevC[I_SORT_OVF];
+            // Delta all cumulative counters; new entries use current value as full interval delta.
+            long numExecDelta  = prevC == null ? c[I_NUM_EXEC]  : c[I_NUM_EXEC]  - prevC[I_NUM_EXEC];
+            long cpuUsDelta    = prevC == null ? c[I_CPU_US]    : c[I_CPU_US]    - prevC[I_CPU_US];
+            long rowsReadDelta = prevC == null ? c[I_ROWS_READ] : c[I_ROWS_READ] - prevC[I_ROWS_READ];
+            long rowsRetDelta  = prevC == null ? c[I_ROWS_RET]  : c[I_ROWS_RET]  - prevC[I_ROWS_RET];
+            long rowsModDelta  = prevC == null ? c[I_ROWS_MOD]  : c[I_ROWS_MOD]  - prevC[I_ROWS_MOD];
+            long sortsDelta    = prevC == null ? c[I_SORTS]     : c[I_SORTS]     - prevC[I_SORTS];
+            long sortOvfDelta  = prevC == null ? c[I_SORT_OVF]  : c[I_SORT_OVF]  - prevC[I_SORT_OVF];
 
             String obfuscated = SqlObfuscator.obfuscate(rawSql.trim());
             if (SqlObfuscator.OBFUSCATION_FAILED.equals(obfuscated)) {
