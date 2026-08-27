@@ -62,11 +62,16 @@ public final class SqlObfuscator {
         // preserved by design (a "A\u200BB" identifier is distinct from "AB").
         sql = stripFormatCodepoints(sql);
 
-        // Fail-closed early: malformed SQL with an odd number of single-quotes (outside
-        // double-quoted identifiers) cannot be safely obfuscated — a quote desync would
-        // cause literal text to be emitted as identifier text, bypassing the residual
-        // check. Return OBFUSCATION_FAILED rather than risk leaking data.
-        if (hasUnbalancedQuotes(sql)) {
+        // Fail-closed early: malformed SQL with an unterminated single-quoted literal or an
+        // unterminated double-quoted identifier cannot be safely obfuscated.
+        //   • Unterminated '...: the lexer consumes the rest of the input as literal body
+        //     and emits a single ?, but a desync before that point can leave literal text
+        //     in the output and bypass the residual check.
+        //   • Unterminated "...: everything after the opening " is treated as a delimited
+        //     identifier and written verbatim to the output. containsResidualLiteral then
+        //     blanks the "..." body before scanning, so sensitive values inside the
+        //     unterminated identifier are never flagged — a direct data-leak path.
+        if (hasMalformedQuoting(sql)) {
             return OBFUSCATION_FAILED;
         }
 
@@ -301,18 +306,23 @@ public final class SqlObfuscator {
     }
 
     /**
-     * Returns true if {@code sql} (already format-stripped) contains an odd number of
-     * single-quote characters outside of double-quoted identifiers and outside of comments.
-     * An odd count means at least one literal is unterminated, which would desync the lexer
-     * and risk emitting literal text as identifier output.
+     * Returns true if {@code sql} (already format-stripped) contains any malformed quoting:
+     * an odd number of single-quotes (unterminated string literal) or an unterminated
+     * double-quoted identifier (the scanner reaches end-of-input while still inside {@code "}).
      *
-     * State machine mirrors the main lexer: single-quoted strings, double-quoted identifiers,
-     * line comments, and nested block comments are all handled, so {@code --} / {@code /*}
-     * tokens inside a string literal (e.g. {@code 'abc--def'}) are not mis-classified as
-     * comment delimiters.
+     * Either condition defeats the fail-closed guarantee:
+     * - An unterminated {@code '} causes the lexer to consume the rest of input as literal
+     *   body; a desync before that point can leave literal fragments in the output.
+     * - An unterminated {@code "} causes everything after it to be emitted verbatim as an
+     *   identifier, and {@code containsResidualLiteral} blanks that body before scanning,
+     *   so sensitive values inside it are never flagged.
+     *
+     * State machine mirrors the main lexer — single-quoted strings, double-quoted identifiers,
+     * line comments, and nested block comments — so {@code --}/{@code /*} tokens inside a
+     * string literal are not mis-classified as comment delimiters.
      */
-    private static boolean hasUnbalancedQuotes(String sql) {
-        int quoteCount = 0;
+    private static boolean hasMalformedQuoting(String sql) {
+        int singleQuoteCount = 0;
         boolean inSingleQuoted = false;
         boolean inDoubleQuoted = false;
         int i = 0;
@@ -324,7 +334,7 @@ public final class SqlObfuscator {
                     if (i + 1 < len && sql.charAt(i + 1) == '\'') {
                         i += 2; // '' escape — both quotes belong to this literal
                     } else {
-                        quoteCount++; // closing quote
+                        singleQuoteCount++; // closing quote
                         inSingleQuoted = false;
                         i++;
                     }
@@ -343,7 +353,7 @@ public final class SqlObfuscator {
                     i++;
                 }
             } else if (c == '\'') {
-                quoteCount++; // opening quote
+                singleQuoteCount++; // opening quote
                 inSingleQuoted = true;
                 i++;
             } else if (c == '"') {
@@ -372,8 +382,10 @@ public final class SqlObfuscator {
                 i++;
             }
         }
-        // Even count = every opening quote has a matching closing quote
-        return (quoteCount % 2) != 0;
+        // Unterminated double-quoted identifier: scanner ended while still inside "..."
+        if (inDoubleQuoted) return true;
+        // Odd single-quote count: at least one string literal is unterminated
+        return (singleQuoteCount % 2) != 0;
     }
 
     /**

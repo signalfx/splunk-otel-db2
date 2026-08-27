@@ -154,6 +154,21 @@ class SqlObfuscatorTest {
     }
 
     @Test
+    void unterminatedDoubleQuotedIdentifierWithStringLiteralTailReturnsFailed() {
+        // The tail after the opening " is verbatim output and then blanked by
+        // containsResidualLiteral — sensitive values would never be flagged without
+        // the unterminated-" check in hasMalformedQuoting.
+        assertThat(SqlObfuscator.obfuscate("SELECT \"unterminated WHERE secret='password'"))
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
+    void unterminatedDoubleQuotedIdentifierWithNumericTailReturnsFailed() {
+        assertThat(SqlObfuscator.obfuscate("SELECT \"unterminated WHERE account=123456"))
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
     void doubleQuotedIdentifierInternalWhitespacePreserved() {
         // "Order  History" (two spaces) is a different object from "Order History" (one space)
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM \"Order  History\""))
