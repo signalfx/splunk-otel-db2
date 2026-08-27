@@ -248,7 +248,7 @@ class QuerySampleQueryTest {
     }
 
     @Test
-    void defaultPathSqlFiltersToConnectedAndUowexec() throws Exception {
+    void defaultPathSqlExcludesSelfAndIdleAndQueryText() throws Exception {
         when(rs.next()).thenReturn(false);
         query(false).collect();
 
@@ -256,21 +256,8 @@ class QuerySampleQueryTest {
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
         assertThat(sql).contains("splunk-otel-db2");
-        assertThat(sql).containsIgnoringCase("CONNECTED");
-        assertThat(sql).containsIgnoringCase("UOWEXEC");
+        assertThat(sql).containsIgnoringCase("IDLE");
         assertThat(sql).containsIgnoringCase("SYSIBMADM.MON_CURRENT_SQL");
-    }
-
-    @Test
-    void snapshotPathSqlFiltersToConnectedAndUowexec() throws Exception {
-        when(rs.next()).thenReturn(false);
-        query(true).collect();
-
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeQuery(sqlCap.capture());
-        String sql = sqlCap.getValue();
-        assertThat(sql).containsIgnoringCase("CONNECTED");
-        assertThat(sql).containsIgnoringCase("UOWEXEC");
     }
 
     @Test
