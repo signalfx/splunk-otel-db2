@@ -45,7 +45,7 @@ public class TopQueryQuery {
     // STMT_EXEC_TIME: cumulative execution elapsed time (ms), excludes compile/bind cost.
     // TOTAL_CPU_TIME: cumulative CPU time (µs).
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
-    // STMT_SORTS: correct column name (not TOTAL_SECTION_SORTS).
+    // TOTAL_SECTION_SORTS: correct column name (not STMT_SORTS).
     // Lookback is parameterised as %d minutes, derived from the collection interval.
     private static final String SQL =
         "SELECT STMT_TEXT, " +
@@ -57,7 +57,7 @@ public class TopQueryQuery {
         "       ROWS_READ, " +
         "       ROWS_RETURNED, " +
         "       ROWS_MODIFIED, " +
-        "       STMT_SORTS, " +
+        "       TOTAL_SECTION_SORTS, " +
         "       SORT_OVERFLOWS, " +
         "       SECTION_TYPE " +
         "FROM TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, -2)) AS T " +
@@ -125,7 +125,7 @@ public class TopQueryQuery {
                         rs.getLong("ROWS_READ"),
                         rs.getLong("ROWS_RETURNED"),
                         rs.getLong("ROWS_MODIFIED"),
-                        rs.getLong("STMT_SORTS"),
+                        rs.getLong("TOTAL_SECTION_SORTS"),
                         rs.getLong("SORT_OVERFLOWS")
                     };
                     curr.put(key, c);

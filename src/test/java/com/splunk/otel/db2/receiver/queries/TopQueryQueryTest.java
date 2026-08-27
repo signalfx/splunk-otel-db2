@@ -56,7 +56,7 @@ class TopQueryQueryTest {
         when(rs.getLong("ROWS_READ")).thenReturn(rowsRead);
         when(rs.getLong("ROWS_RETURNED")).thenReturn(rowsRet);
         when(rs.getLong("ROWS_MODIFIED")).thenReturn(rowsMod);
-        when(rs.getLong("STMT_SORTS")).thenReturn(sorts);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(sorts);
         when(rs.getLong("SORT_OVERFLOWS")).thenReturn(sortOvf);
         when(rs.getString("SECTION_TYPE")).thenReturn(secType);
     }
@@ -285,12 +285,12 @@ class TopQueryQueryTest {
         assertThat(sql).containsIgnoringCase("EXECUTABLE_ID");
         assertThat(sql).containsIgnoringCase("STMT_EXEC_TIME");
         assertThat(sql).containsIgnoringCase("NUM_EXEC_WITH_METRICS");
-        assertThat(sql).containsIgnoringCase("STMT_SORTS");
+        assertThat(sql).containsIgnoringCase("TOTAL_SECTION_SORTS");
         assertThat(sql).containsIgnoringCase("SORT_OVERFLOWS");
         assertThat(sql).containsIgnoringCase("LAST_METRICS_UPDATE");
         // These wrong column names must NOT appear
         assertThat(sql).doesNotContainIgnoringCase("TOTAL_SORT_OVERFLOWS");
-        assertThat(sql).doesNotContainIgnoringCase("TOTAL_SECTION_SORTS");
+        assertThat(sql).doesNotContainIgnoringCase("STMT_SORTS");
         assertThat(sql).doesNotContainIgnoringCase("LAST_EXEC_TIME");
         assertThat(sql).doesNotContainIgnoringCase("TOTAL_EXEC_TIME");
         assertThat(sql).doesNotContainIgnoringCase("NUM_COMPILATIONS");
