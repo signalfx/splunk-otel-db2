@@ -31,8 +31,17 @@ import java.util.function.Supplier;
  *
  * Baseline cache: bounded TTL map keyed by "member:executableId". Entries are
  * updated each cycle they appear and evicted after {@link #MAX_STALE_CYCLES}
- * consecutive absences. This retains the baseline across transient lookback-window
- * gaps without unbounded growth.
+ * consecutive absences.
+ *
+ * Cache-miss classification via INSERT_TIMESTAMP: on a cache miss, the section's
+ * INSERT_TIMESTAMP is compared to lastScrapeInstant (time of the previous
+ * successful scrape):
+ *   - insertTs &gt; lastScrapeInstant → section was compiled after the last scrape →
+ *     genuinely new → use current counters as interval delta.
+ *   - insertTs &lt;= lastScrapeInstant → section predates the last scrape and was
+ *     evicted while inactive → seed baseline and skip emission this cycle.
+ * This prevents lifetime cumulative totals from being emitted as a single interval
+ * when an evicted-but-old section resumes execution.
  *
  * Recency filter: {@code LAST_METRICS_UPDATE > CURRENT TIMESTAMP - N MINUTES} where
  * N is derived from the collection interval (2x, minimum 5 minutes) so statements
@@ -45,13 +54,14 @@ public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
 
     // Entries absent from the plan-cache result for this many consecutive scrapes are evicted.
-    // Retains the baseline across short gaps (DB busy, lookback edge) without unbounded growth.
     static final int MAX_STALE_CYCLES = 3;
 
     // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
     // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
     //   NUM_EXEC_WITH_METRICS requires WLM activity monitoring and is 0 on most vanilla Db2
     //   installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
+    // INSERT_TIMESTAMP: when this plan-cache section was compiled. Used to distinguish genuinely
+    //   new sections from evicted-old sections that resume execution.
     // STMT_EXEC_TIME: cumulative execution elapsed time (ms), excludes compile/bind cost.
     // TOTAL_CPU_TIME: cumulative CPU time (µs).
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
@@ -61,6 +71,7 @@ public class TopQueryQuery {
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
         "       EXECUTABLE_ID, " +
+        "       INSERT_TIMESTAMP, " +
         "       NUM_EXECUTIONS, " +
         "       STMT_EXEC_TIME, " +
         "       TOTAL_CPU_TIME, " +
@@ -100,6 +111,10 @@ public class TopQueryQuery {
     private final Map<String, CacheEntry> baselineCache = new HashMap<>();
     private int scrapeGen = 0;
 
+    // Time of the most recent successful DB query, used to classify cache misses.
+    // Null until the first scrape completes.
+    private Instant lastScrapeInstant = null;
+
     private static final class CacheEntry {
         long[] counters;
         int lastSeenGen;
@@ -133,9 +148,12 @@ public class TopQueryQuery {
     }
 
     public void collect() {
-        Map<String, long[]> curr  = new HashMap<>();
-        List<String[]>      texts = new ArrayList<>(); // [rawSql, secType, key, member]
-        List<long[]>        counters = new ArrayList<>();
+        Map<String, long[]>  curr             = new HashMap<>();
+        List<String[]>       texts            = new ArrayList<>(); // [rawSql, secType, key, member]
+        List<long[]>         counters         = new ArrayList<>();
+        List<Instant>        insertTimestamps = new ArrayList<>();
+        // Snapshot the query start time before hitting the DB; used to classify cache misses below.
+        Instant thisScrapeInstant = Instant.now();
 
         try {
             Connection conn = connSupplier.get();
@@ -148,6 +166,7 @@ public class TopQueryQuery {
                         long member   = rs.getLong("MEMBER");
                         String execId = rs.getString("EXECUTABLE_ID");
                         String key    = member + ":" + execId;
+                        java.sql.Timestamp insertTs = rs.getTimestamp("INSERT_TIMESTAMP");
                         long[] c = {
                             rs.getLong("STMT_EXEC_TIME"),
                             rs.getLong("NUM_EXECUTIONS"),
@@ -162,27 +181,28 @@ public class TopQueryQuery {
                         texts.add(new String[]{rawSql, rs.getString("SECTION_TYPE"),
                                                key, String.valueOf(member)});
                         counters.add(c);
+                        // Null INSERT_TIMESTAMP (unexpected) treated as Epoch — always predates
+                        // any real scrape, so the section is conservatively seeded, never inflated.
+                        insertTimestamps.add(insertTs != null ? insertTs.toInstant() : Instant.EPOCH);
                     }
                 }
             }
         } catch (Exception e) {
             log.warn("TopQueryQuery collection failed: {}", e.getMessage());
-            return;
+            return; // lastScrapeInstant not updated — next cycle re-classifies misses correctly
         }
 
         scrapeGen++;
         boolean isFirstCollection = (scrapeGen == 1);
 
-        // For each entry in curr, snapshot the old baseline counters (before updating the cache).
-        // Only entries present in curr need to be snapshotted — avoids copying the whole cache.
+        // Snapshot old baseline counters for keys present in curr (before updating the cache).
         Map<String, long[]> prev = new HashMap<>();
         for (String key : curr.keySet()) {
             CacheEntry existing = baselineCache.get(key);
             if (existing != null) prev.put(key, existing.counters);
-            // null means new entry this cycle — prev.get(key) will return null (handled below)
         }
 
-        // Update cache with current values, marking each entry as seen in this generation.
+        // Update cache: add new entries, refresh existing ones.
         for (Map.Entry<String, long[]> e : curr.entrySet()) {
             CacheEntry ce = baselineCache.get(e.getKey());
             if (ce == null) {
@@ -199,22 +219,41 @@ public class TopQueryQuery {
             if (it.next().lastSeenGen < scrapeGen - MAX_STALE_CYCLES) it.remove();
         }
 
+        // Record the time of this successful scrape before any early return.
+        lastScrapeInstant = thisScrapeInstant;
+
         if (isFirstCollection) {
             log.debug("TopQueryQuery: first collection, seeding delta baseline ({} rows)", curr.size());
             return;
         }
 
-        // Compute interval deltas; skip entries with no activity this interval.
-        // New entries (prev.get(key) == null): compiled/executed since the last scrape —
-        // use current counters as the interval delta (PostgreSQL contrib cache-miss handling).
+        // Compute interval deltas.
+        // prevC != null → normal delta path.
+        // prevC == null → cache miss; use INSERT_TIMESTAMP to decide:
+        //   - insertTs > lastScrapeInstant: compiled after the last scrape → genuinely new →
+        //     use current counters as delta (correct interval contribution).
+        //   - insertTs <= lastScrapeInstant: section predates the last scrape, was evicted while
+        //     inactive → skip emission; baseline is already seeded in cache for the next cycle.
         // deltas[i] = [row_index, execTimeDelta, numExecDelta]
         List<long[]> deltas = new ArrayList<>();
         for (int i = 0; i < texts.size(); i++) {
             String key   = texts.get(i)[2];
             long[] c     = counters.get(i);
             long[] prevC = prev.get(key);
-            long execTimeDelta = prevC == null ? c[I_EXEC_TIME] : delta(c[I_EXEC_TIME], prevC[I_EXEC_TIME]);
-            long numExecDelta  = prevC == null ? c[I_NUM_EXEC]  : delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
+            long execTimeDelta;
+            long numExecDelta;
+            if (prevC == null) {
+                Instant insertTs = insertTimestamps.get(i);
+                if (!insertTs.isAfter(lastScrapeInstant)) {
+                    // Old section resuming after eviction — emit nothing; next cycle has the baseline.
+                    continue;
+                }
+                execTimeDelta = c[I_EXEC_TIME];
+                numExecDelta  = c[I_NUM_EXEC];
+            } else {
+                execTimeDelta = delta(c[I_EXEC_TIME], prevC[I_EXEC_TIME]);
+                numExecDelta  = delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
+            }
             if (execTimeDelta <= 0 && numExecDelta <= 0) continue;
             deltas.add(new long[]{i, execTimeDelta, numExecDelta});
         }
@@ -232,7 +271,6 @@ public class TopQueryQuery {
         for (int rank = 0; rank < Math.min(topQueryCount, deltas.size()); rank++) {
             int  idx           = (int) deltas.get(rank)[0];
             long execTimeDelta = deltas.get(rank)[1];
-            long numExecDelta2 = deltas.get(rank)[2];
             long[] c           = counters.get(idx);
             long[] prevC       = prev.get(texts.get(idx)[2]); // null for new entries
             String[] t         = texts.get(idx);
@@ -241,7 +279,6 @@ public class TopQueryQuery {
             String secType = t[1];
             long member    = Long.parseLong(t[3]);
 
-            // Delta all cumulative counters; new entries use current value as full interval delta.
             long numExecDelta  = prevC == null ? c[I_NUM_EXEC]  : delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
             long cpuUsDelta    = prevC == null ? c[I_CPU_US]    : delta(c[I_CPU_US],    prevC[I_CPU_US]);
             long rowsReadDelta = prevC == null ? c[I_ROWS_READ] : delta(c[I_ROWS_READ], prevC[I_ROWS_READ]);
