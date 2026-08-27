@@ -37,13 +37,17 @@ public class QuerySampleQuery {
     // MON_GET_CONNECTION JOIN. MON_CURRENT_SQL is a VIEW, not a table function —
     // do not wrap in TABLE(). Uses ELAPSED_TIME_SEC (seconds) and COORD_MEMBER.
     // No DFT_MON_STMT requirement. Filters IDLE sessions and the receiver itself.
+    // LOCAL_START_TIME: reconstructed from CURRENT TIMESTAMP - ELAPSED_TIME_SEC (MON_CURRENT_SQL
+    // does not expose a statement-start column directly).
+    // CLIENT_USERID: COALESCE with SESSION_AUTH_ID — CLIENT_USERID is often empty when the
+    // JDBC client does not set it explicitly, but SESSION_AUTH_ID is always populated.
     private static final String SQL_MON_CURRENT =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
         "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
-        "       CAST(NULL AS VARCHAR(26)) AS LOCAL_START_TIME, " +
+        "       CHAR(CURRENT TIMESTAMP - S.ELAPSED_TIME_SEC SECONDS) AS LOCAL_START_TIME, " +
         "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
-        "       C.CLIENT_USERID, " +
+        "       COALESCE(NULLIF(C.CLIENT_USERID, ''), S.SESSION_AUTH_ID) AS CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
         "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
@@ -51,6 +55,7 @@ public class QuerySampleQuery {
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        " AND C.MEMBER = S.COORD_MEMBER " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
         "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
@@ -65,9 +70,9 @@ public class QuerySampleQuery {
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
         "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
-        "       CAST(NULL AS VARCHAR(26)) AS LOCAL_START_TIME, " +
+        "       CHAR(CURRENT TIMESTAMP - S.ELAPSED_TIME_SEC SECONDS) AS LOCAL_START_TIME, " +
         "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
-        "       C.CLIENT_USERID, " +
+        "       COALESCE(NULLIF(C.CLIENT_USERID, ''), S.SESSION_AUTH_ID) AS CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
         "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
@@ -75,6 +80,7 @@ public class QuerySampleQuery {
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        " AND C.MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A " +
         "  ON A.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND A.UOW_ID = S.UOW_ID " +
@@ -99,7 +105,7 @@ public class QuerySampleQuery {
         "         END ) AS ACTIVITY_STATE, " +
         "       CHAR(SS.STMT_START) AS LOCAL_START_TIME, " +
         "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) AS WALL_ELAPSED_SEC, " +
-        "       SA.EXECUTION_ID AS CLIENT_USERID, " +
+        "       COALESCE(NULLIF(SA.EXECUTION_ID, ''), SA.APPL_ID) AS CLIENT_USERID, " +
         "       SA.CLIENT_NNAME AS CLIENT_WRKSTNNAME, " +
         "       SA.AGENT_ID AS APPLICATION_HANDLE, " +
         "       SA.DBPARTITIONNUM AS MEMBER, " +
@@ -111,13 +117,15 @@ public class QuerySampleQuery {
         "  ON (S.PKGNAME = SS.PACKAGE_NAME AND S.SECTNO = SS.SECTION_NUMBER) " +
         "WHERE SS.STMT_STOP IS NULL " +
         "  AND SA.AGENT_ID = SS.AGENT_ID " +
+        "  AND COALESCE(SS.STMT_TEXT, S.TEXT) IS NOT NULL " +
         "  AND COALESCE(SA.APPL_NAME, '') <> 'splunk-otel-db2' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%SNAP_GET_STMT%%' " +
+        "ORDER BY TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) DESC " +
         "FETCH FIRST %d ROWS ONLY";
 
-    /** Encoded as {@code major * 100 + minor}, e.g. 1050 for 10.5, 970 for 9.7. */
-    static final int DB2_VERSION_10_5 = 1050;
+    /** Encoded as {@code major * 1000 + minor}, e.g. 10005 for 10.5, 9007 for 9.7. */
+    static final int DB2_VERSION_10_5 = 10005;
 
     private final Supplier<Connection> connSupplier;
     private final String dbName;
@@ -168,13 +176,12 @@ public class QuerySampleQuery {
                     String rawSql = rs.getString("STMT_TEXT");
                     if (rawSql == null || rawSql.isBlank()) continue;
 
+                    String appHandle  = rs.getString("APPLICATION_HANDLE");
                     String obfuscated = SqlObfuscator.obfuscate(rawSql.trim());
                     if (SqlObfuscator.OBFUSCATION_FAILED.equals(obfuscated)) {
-                        log.warn("QuerySampleQuery: obfuscation failed for a statement — record dropped");
+                        log.warn("QuerySampleQuery: obfuscation failed for application_handle={} — record dropped", appHandle);
                         continue;
                     }
-
-                    String appHandle  = rs.getString("APPLICATION_HANDLE");
                     String state      = rs.getString("ACTIVITY_STATE");
                     String startTime  = rs.getString("LOCAL_START_TIME");
                     double elapsedSec = rs.getLong("WALL_ELAPSED_SEC");

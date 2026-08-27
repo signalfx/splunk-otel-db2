@@ -474,7 +474,44 @@ class SqlObfuscatorTest {
     void unterminatedSingleQuotedString() {
         // unterminated string is consumed to end and replaced with ? — no data leak
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE NAME = 'unterminated"))
-            .isEqualTo("SELECT * FROM T WHERE NAME = ?");
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
+    void malformedSqlWithOddQuoteCountReturnsFailed() {
+        // Three single-quotes outside delimited identifiers = unbalanced → fail-closed
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE A = 'x' AND B = 'y"))
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
+    }
+
+    @Test
+    void apostropheInsideLineCommentDoesNotTriggerFailClosed() {
+        // -- user's query: the ' is inside a comment, not a string literal;
+        // hasUnbalancedQuotes must skip comment text or this valid query returns OBFUSCATION_FAILED
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T -- user's query\nWHERE ID = 1"))
+            .isEqualTo("SELECT * FROM T WHERE ID = ?");
+    }
+
+    @Test
+    void apostropheInsideBlockCommentDoesNotTriggerFailClosed() {
+        assertThat(SqlObfuscator.obfuscate("SELECT /* it's fine */ * FROM T WHERE ID = 1"))
+            .isEqualTo("SELECT * FROM T WHERE ID = ?");
+    }
+
+    @Test
+    void doubleQuoteInsideSingleQuotedStringDoesNotFlipIdentifierState() {
+        // A " inside a string literal must not cause stripFormatCodepoints to enter
+        // inDoubleQuotedId mode — the quote is part of the literal content.
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'he said \"hi\"'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void formatCharInsideSingleQuotedStringContainingDoubleQuote() {
+        // Combines both: format char inside a string that also contains a "
+        // The " must not desync the identifier-tracking state in stripFormatCodepoints.
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'he\u200B said \"hi\"'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
     }
 
     @Test
@@ -486,7 +523,7 @@ class SqlObfuscatorTest {
     @Test
     void unterminatedHexLiteral() {
         assertThat(SqlObfuscator.obfuscate("WHERE X = X'deadbeef"))
-            .isEqualTo("WHERE X = ?");
+            .isEqualTo(SqlObfuscator.OBFUSCATION_FAILED);
     }
 
     @Test

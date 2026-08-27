@@ -62,6 +62,14 @@ public final class SqlObfuscator {
         // preserved by design (a "A\u200BB" identifier is distinct from "AB").
         sql = stripFormatCodepoints(sql);
 
+        // Fail-closed early: malformed SQL with an odd number of single-quotes (outside
+        // double-quoted identifiers) cannot be safely obfuscated — a quote desync would
+        // cause literal text to be emitted as identifier text, bypassing the residual
+        // check. Return OBFUSCATION_FAILED rather than risk leaking data.
+        if (hasUnbalancedQuotes(sql)) {
+            return OBFUSCATION_FAILED;
+        }
+
         StringBuilder out = new StringBuilder(sql.length());
         int i = 0;
         int len = sql.length();
@@ -276,12 +284,67 @@ public final class SqlObfuscator {
     /**
      * Returns the first non-format character found scanning backward from {@code i}.
      * Returns a space (safe "not an identifier char" sentinel) if no such character exists.
+     *
+     * Uses {@code codePointBefore} so that a supplementary-plane character stored as a
+     * surrogate pair is evaluated as a single codepoint, matching the codepoint-aware
+     * {@code stripFormatCodepoints} pass that runs first.
      */
     private static char prevNonFormat(String sql, int i) {
-        while (i >= 0 && Character.getType(sql.charAt(i)) == Character.FORMAT) {
-            i--;
+        while (i >= 0) {
+            int cp = sql.codePointBefore(i + 1);
+            if (Character.getType(cp) != Character.FORMAT) {
+                return (char) cp; // for BMP chars this is the exact char; for supplementary, only low surrogate returned — safe as "not identifier-char"
+            }
+            i -= Character.charCount(cp);
         }
-        return (i >= 0) ? sql.charAt(i) : ' ';
+        return ' ';
+    }
+
+    /**
+     * Returns true if {@code sql} (already format-stripped) contains an odd number of
+     * single-quote characters outside of double-quoted identifiers and outside of comments.
+     * An odd count means at least one literal is unterminated, which would desync the lexer
+     * and risk emitting literal text as identifier output.
+     *
+     * Comments are skipped to avoid false positives on valid SQL like
+     * {@code SELECT * FROM T -- user's query}.
+     */
+    private static boolean hasUnbalancedQuotes(String sql) {
+        int quoteCount = 0;
+        boolean inDoubleQuoted = false;
+        int i = 0;
+        int len = sql.length();
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (inDoubleQuoted) {
+                if (c == '"') {
+                    if (i + 1 < len && sql.charAt(i + 1) == '"') {
+                        i += 2; // "" escape
+                        continue;
+                    }
+                    inDoubleQuoted = false;
+                }
+                i++;
+            } else if (c == '"') {
+                inDoubleQuoted = true;
+                i++;
+            } else if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+                // line comment — skip to end of line
+                i += 2;
+                while (i < len && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') i++;
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                // block comment — skip to */
+                i += 2;
+                while (i + 1 < len && !(sql.charAt(i) == '*' && sql.charAt(i + 1) == '/')) i++;
+                i += 2; // consume */
+            } else if (c == '\'') {
+                quoteCount++;
+                i++;
+            } else {
+                i++;
+            }
+        }
+        return (quoteCount % 2) != 0;
     }
 
     /**
@@ -419,30 +482,52 @@ public final class SqlObfuscator {
         if (!hasFormat) return s;
 
         StringBuilder sb = new StringBuilder(s.length());
-        boolean inIdentifier = false;
+        boolean inDoubleQuotedId = false; // inside "..."
+        boolean inSingleQuotedStr = false; // inside '...'
         for (int i = 0, len = s.length(); i < len; ) {
             int cp = s.codePointAt(i);
             int charCount = Character.charCount(cp);
 
-            if (inIdentifier) {
-                // Inside "..." — preserve everything verbatim
+            if (inDoubleQuotedId) {
+                // Inside "..." — preserve everything verbatim (format chars included)
                 sb.appendCodePoint(cp);
                 if (cp == '"') {
                     // Check for "" escape: peek at next codepoint
                     int next = i + charCount;
                     if (next < len && s.codePointAt(next) == '"') {
                         sb.appendCodePoint('"');
-                        i = next + 1; // skip both
+                        i = next + Character.charCount('"');
                         continue;
                     }
-                    inIdentifier = false; // closing quote
+                    inDoubleQuotedId = false; // closing quote
                 }
+            } else if (inSingleQuotedStr) {
+                // Inside '...' — strip FORMAT codepoints, track '' escape
+                if (cp == '\'') {
+                    int next = i + charCount;
+                    if (next < len && s.codePointAt(next) == '\'') {
+                        // '' escape — emit both, skip both
+                        sb.appendCodePoint(cp);
+                        sb.appendCodePoint(cp);
+                        i = next + charCount;
+                        continue;
+                    }
+                    // Closing quote
+                    sb.appendCodePoint(cp);
+                    inSingleQuotedStr = false;
+                } else if (Character.getType(cp) != Character.FORMAT) {
+                    sb.appendCodePoint(cp);
+                }
+                // else: strip FORMAT codepoint inside string (main loop handles it later)
             } else if (cp == '"') {
-                inIdentifier = true;
+                inDoubleQuotedId = true;
+                sb.appendCodePoint(cp);
+            } else if (cp == '\'') {
+                inSingleQuotedStr = true;
                 sb.appendCodePoint(cp);
             } else if (Character.getType(cp) != Character.FORMAT) {
                 sb.appendCodePoint(cp);
-                // else: strip FORMAT codepoint outside identifier
+                // else: strip FORMAT codepoint outside identifier/string
             }
             i += charCount;
         }
