@@ -35,7 +35,7 @@ receivers:
     collection_interval: "30s"  # metrics collection interval
     top_query_enabled: false         # set true to enable top query collection (opt-in)
     top_query_count: 250             # top N queries to emit per interval (must be > 0)
-    top_query_interval: "60s"        # how often to collect top queries
+    top_query_interval: "60s"        # how often to collect top queries (minimum 60s)
     query_sample_enabled: false      # set true to enable query sampling (opt-in)
     max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"     # how often to sample active queries

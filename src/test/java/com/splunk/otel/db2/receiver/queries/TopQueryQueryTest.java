@@ -552,6 +552,159 @@ class TopQueryQueryTest {
         return cap.getValue();
     }
 
+    // --- Bounded TTL cache tests ---
+
+    @Test
+    void cacheEntryEvictedAfterMaxStaleCycles() throws Exception {
+        TopQueryQuery q = query();
+
+        // Seed: exec1 enters cache
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Cycles 2..MAX_STALE_CYCLES+1: exec1 absent — stale counter increments each cycle.
+        // On cycle (MAX_STALE_CYCLES+2), the entry should be evicted and exec1 treated as new.
+        for (int i = 0; i < TopQueryQuery.MAX_STALE_CYCLES + 1; i++) {
+            reset(stmt, rs, otelLogger, logBuilder);
+            when(conn.createStatement()).thenReturn(stmt);
+            when(stmt.executeQuery(anyString())).thenReturn(rs);
+            when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+            when(rs.next()).thenReturn(false); // exec1 absent from plan cache
+            q.collect();
+        }
+
+        // exec1 returns — baseline should be gone (evicted), so it is treated as new entry
+        // and its current counters used as interval delta. exec_time=500ms → 0.5s.
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 2L, 500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // New-entry path: execTimeDelta = current = 500ms → emitted
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.5);
+    }
+
+    @Test
+    void cacheEntryRetainedWithinStaleCycles() throws Exception {
+        TopQueryQuery q = query();
+
+        // Seed: exec1 enters cache with exec_time=1000ms
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // exec1 absent for (MAX_STALE_CYCLES - 1) cycles — still within retention window
+        for (int i = 0; i < TopQueryQuery.MAX_STALE_CYCLES - 1; i++) {
+            reset(stmt, rs, otelLogger, logBuilder);
+            when(conn.createStatement()).thenReturn(stmt);
+            when(stmt.executeQuery(anyString())).thenReturn(rs);
+            when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+            when(rs.next()).thenReturn(false);
+            q.collect();
+        }
+
+        // exec1 returns with exec_time=1200ms — baseline still 1000, delta = 200ms → 0.2s
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1200L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // Delta-based: 1200 - 1000 = 200ms → 0.2s (NOT inflated to 1.2s)
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.2);
+    }
+
+    // --- Ranking tests ---
+
+    @Test
+    void rankingByExecTimeThenExecCount() throws Exception {
+        // Three entries: high exec count / zero time, medium exec time, high exec time.
+        // Expected rank: high exec time first, medium exec time second, zero time third.
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 3, 60L);
+
+        // Seed all three
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q_HIGH_TIME", "Q_MED_TIME", "Q_ZERO_TIME");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(0L, 0L, 0L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // Cycle 2: Q_HIGH_TIME gets 9000ms, Q_MED_TIME gets 4000ms, Q_ZERO_TIME gets 10000 execs
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q_HIGH_TIME", "Q_MED_TIME", "Q_ZERO_TIME");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L, 3L, 10001L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(9000L, 4000L, 0L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // All three emitted; capture in order
+        verify(logBuilder, times(3)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder, times(3)).setAllAttributes(cap.capture());
+        java.util.List<io.opentelemetry.api.common.Attributes> allAttrs = cap.getAllValues();
+
+        // Rank 0: Q_HIGH_TIME (9000ms)
+        assertThat(allAttrs.get(0).get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(9.0);
+        // Rank 1: Q_MED_TIME (4000ms)
+        assertThat(allAttrs.get(1).get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(4.0);
+        // Rank 2: Q_ZERO_TIME (0ms — only wins tiebreaker among zero-time entries)
+        assertThat(allAttrs.get(2).get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.0);
+        assertThat(allAttrs.get(2).get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(10000L);
+    }
+
+    // --- Config validation tests ---
+
+    @Test
+    void configRejectsTopQueryIntervalBelowMinimum() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        cfg.setTopQueryInterval("30s");
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            cfg::getTopQueryIntervalDuration);
+    }
+
+    @Test
+    void configAcceptsTopQueryIntervalAtMinimum() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        cfg.setTopQueryInterval("60s");
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(cfg::getTopQueryIntervalDuration);
+    }
+
     @Test
     void configRejectsZeroTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();

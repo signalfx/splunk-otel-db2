@@ -10,6 +10,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -20,15 +21,18 @@ import java.util.function.Supplier;
  *
  * Source: {@code MON_GET_PKG_CACHE_STMT} (Db2 9.7+), all members (-2).
  *
- * Ranking: per-interval delta of all cumulative counters (STMT_EXEC_TIME,
- * NUM_EXECUTIONS, TOTAL_CPU_TIME, ROWS_READ, ROWS_RETURNED, ROWS_MODIFIED,
- * TOTAL_SECTION_SORTS, SORT_OVERFLOWS). Statements are ranked by the STMT_EXEC_TIME delta;
- * when STMT_EXEC_TIME=0 (sub-millisecond queries) NUM_EXECUTIONS delta is used as tiebreaker.
- * The first collection seeds the baseline; nothing is emitted.
+ * Ranking: per-interval delta of STMT_EXEC_TIME (primary) then NUM_EXECUTIONS
+ * (tiebreaker for sub-millisecond queries). Both keys are in their natural units
+ * so the sort is always meaningful.
  *
  * Cache key: member + EXECUTABLE_ID uniquely identifies a plan-cache section.
  * Using raw SQL text as a key is incorrect because Db2 can hold multiple sections
  * with identical text for different compilation environments or packages.
+ *
+ * Baseline cache: bounded TTL map keyed by "member:executableId". Entries are
+ * updated each cycle they appear and evicted after {@link #MAX_STALE_CYCLES}
+ * consecutive absences. This retains the baseline across transient lookback-window
+ * gaps without unbounded growth.
  *
  * Recency filter: {@code LAST_METRICS_UPDATE > CURRENT TIMESTAMP - N MINUTES} where
  * N is derived from the collection interval (2x, minimum 5 minutes) so statements
@@ -40,10 +44,14 @@ import java.util.function.Supplier;
 public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
 
+    // Entries absent from the plan-cache result for this many consecutive scrapes are evicted.
+    // Retains the baseline across short gaps (DB busy, lookback edge) without unbounded growth.
+    static final int MAX_STALE_CYCLES = 3;
+
     // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
     // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
-    //   NUM_EXEC_WITH_METRICS is NOT used — it requires WLM activity monitoring and is 0 on most
-    //   vanilla Db2 installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
+    //   NUM_EXEC_WITH_METRICS requires WLM activity monitoring and is 0 on most vanilla Db2
+    //   installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
     // STMT_EXEC_TIME: cumulative execution elapsed time (ms), excludes compile/bind cost.
     // TOTAL_CPU_TIME: cumulative CPU time (µs).
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
@@ -71,18 +79,6 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_BUFFERPOOL%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_TABLESPACE%%%%'";
 
-    private final Supplier<Connection> connSupplier;
-    private final String dbName;
-    private final Logger otelLogger;
-    private final int topQueryCount;
-    private final String sql;
-    private final int queryTimeoutSeconds;
-
-    // Delta baseline keyed by "member:executableId" — unique per plan-cache section.
-    // Stores all cumulative counters from the previous cycle.
-    // Single-threaded scheduler — HashMap is safe without synchronization.
-    private Map<String, long[]> prevCounters = new HashMap<>();
-
     // Counter array indices — I_NUM_EXEC is NUM_EXECUTIONS (total), not NUM_EXEC_WITH_METRICS
     private static final int I_EXEC_TIME = 0;
     private static final int I_NUM_EXEC  = 1;
@@ -92,6 +88,23 @@ public class TopQueryQuery {
     private static final int I_ROWS_MOD  = 5;
     private static final int I_SORTS     = 6;
     private static final int I_SORT_OVF  = 7;
+
+    private final Supplier<Connection> connSupplier;
+    private final String dbName;
+    private final Logger otelLogger;
+    private final int topQueryCount;
+    private final String sql;
+    private final int queryTimeoutSeconds;
+
+    // TTL-bounded delta baseline. Single-threaded scheduler — no synchronization needed.
+    private final Map<String, CacheEntry> baselineCache = new HashMap<>();
+    private int scrapeGen = 0;
+
+    private static final class CacheEntry {
+        long[] counters;
+        int lastSeenGen;
+        CacheEntry(long[] counters, int gen) { this.counters = counters; this.lastSeenGen = gen; }
+    }
 
     /**
      * Reset-aware delta for cumulative Db2 counters.
@@ -113,8 +126,7 @@ public class TopQueryQuery {
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
         this.sql = String.format(SQL, lookbackMinutes);
-        // Timeout = half the interval, minimum 30s — prevents a slow plan-cache scan from
-        // blocking the scheduler thread into the next collection cycle.
+        // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
         log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s",
             topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds);
@@ -122,7 +134,7 @@ public class TopQueryQuery {
 
     public void collect() {
         Map<String, long[]> curr  = new HashMap<>();
-        List<String[]>      texts = new ArrayList<>(); // [rawSql, secType, key]
+        List<String[]>      texts = new ArrayList<>(); // [rawSql, secType, key, member]
         List<long[]>        counters = new ArrayList<>();
 
         try {
@@ -158,53 +170,69 @@ public class TopQueryQuery {
             return;
         }
 
-        boolean isFirstCollection = prevCounters.isEmpty();
-        // Snapshot the old baseline before merging so delta computation uses pre-update values.
-        // Then merge curr into the persistent baseline: update existing entries, add new ones,
-        // but never remove entries. This ensures that an entry aging out of the lookback
-        // window retains its baseline counters so its delta is not inflated when it returns.
-        Map<String, long[]> prev = isFirstCollection ? new HashMap<>() : new HashMap<>(prevCounters);
-        prevCounters.putAll(curr);
+        scrapeGen++;
+        boolean isFirstCollection = (scrapeGen == 1);
+
+        // For each entry in curr, snapshot the old baseline counters (before updating the cache).
+        // Only entries present in curr need to be snapshotted — avoids copying the whole cache.
+        Map<String, long[]> prev = new HashMap<>();
+        for (String key : curr.keySet()) {
+            CacheEntry existing = baselineCache.get(key);
+            if (existing != null) prev.put(key, existing.counters);
+            // null means new entry this cycle — prev.get(key) will return null (handled below)
+        }
+
+        // Update cache with current values, marking each entry as seen in this generation.
+        for (Map.Entry<String, long[]> e : curr.entrySet()) {
+            CacheEntry ce = baselineCache.get(e.getKey());
+            if (ce == null) {
+                baselineCache.put(e.getKey(), new CacheEntry(e.getValue(), scrapeGen));
+            } else {
+                ce.counters    = e.getValue();
+                ce.lastSeenGen = scrapeGen;
+            }
+        }
+
+        // Evict entries absent for more than MAX_STALE_CYCLES consecutive scrapes.
+        Iterator<CacheEntry> it = baselineCache.values().iterator();
+        while (it.hasNext()) {
+            if (it.next().lastSeenGen < scrapeGen - MAX_STALE_CYCLES) it.remove();
+        }
 
         if (isFirstCollection) {
             log.debug("TopQueryQuery: first collection, seeding delta baseline ({} rows)", curr.size());
             return;
         }
 
-        // Compute interval deltas; skip entries with no new executions this interval.
-        // New entries (prevC == null): compiled/executed since the last scrape — use current
-        // counters as the interval delta (PostgreSQL contrib cache-miss handling).
-        // For new entries with STMT_EXEC_TIME=0 (very fast queries), emit if numExecDelta>0.
-        // deltas[i] = [row_index, execTimeDeltaMs, rankValue]
+        // Compute interval deltas; skip entries with no activity this interval.
+        // New entries (prev.get(key) == null): compiled/executed since the last scrape —
+        // use current counters as the interval delta (PostgreSQL contrib cache-miss handling).
+        // deltas[i] = [row_index, execTimeDelta, numExecDelta]
         List<long[]> deltas = new ArrayList<>();
         for (int i = 0; i < texts.size(); i++) {
+            String key   = texts.get(i)[2];
             long[] c     = counters.get(i);
-            long[] prevC = prev.get(texts.get(i)[2]);
-            long execTimeDelta;
-            long numExecDelta;
-            if (prevC == null) {
-                execTimeDelta = c[I_EXEC_TIME];
-                numExecDelta  = c[I_NUM_EXEC];
-            } else {
-                execTimeDelta = delta(c[I_EXEC_TIME], prevC[I_EXEC_TIME]);
-                numExecDelta  = delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
-            }
-            // Emit if there was new execution time, or if new executions occurred (fast queries)
+            long[] prevC = prev.get(key);
+            long execTimeDelta = prevC == null ? c[I_EXEC_TIME] : delta(c[I_EXEC_TIME], prevC[I_EXEC_TIME]);
+            long numExecDelta  = prevC == null ? c[I_NUM_EXEC]  : delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
             if (execTimeDelta <= 0 && numExecDelta <= 0) continue;
-            // Rank by exec time delta; use numExecDelta as tiebreaker for zero-time entries.
-            // Store [row_index, execTimeDeltaMs, rankValue] so emit loop always uses the real
-            // exec time delta (not the tiebreaker) when computing totalExecSec.
-            long rankValue = execTimeDelta > 0 ? execTimeDelta : numExecDelta;
-            deltas.add(new long[]{i, execTimeDelta, rankValue});
+            deltas.add(new long[]{i, execTimeDelta, numExecDelta});
         }
 
-        deltas.sort((a, b) -> Long.compare(b[2], a[2]));
+        // Primary sort: STMT_EXEC_TIME delta DESC (elapsed time ranks highest).
+        // Tiebreaker: NUM_EXECUTIONS delta DESC (for sub-millisecond queries with same exec time).
+        // Units are never mixed — both keys are independent sort criteria.
+        deltas.sort((a, b) -> {
+            int cmp = Long.compare(b[1], a[1]);
+            return cmp != 0 ? cmp : Long.compare(b[2], a[2]);
+        });
 
         Instant now = Instant.now();
         int emitCount = 0;
         for (int rank = 0; rank < Math.min(topQueryCount, deltas.size()); rank++) {
             int  idx           = (int) deltas.get(rank)[0];
-            long execTimeDelta = deltas.get(rank)[1]; // real exec time delta, not rank value
+            long execTimeDelta = deltas.get(rank)[1];
+            long numExecDelta2 = deltas.get(rank)[2];
             long[] c           = counters.get(idx);
             long[] prevC       = prev.get(texts.get(idx)[2]); // null for new entries
             String[] t         = texts.get(idx);
@@ -243,6 +271,6 @@ public class TopQueryQuery {
                 .emit(otelLogger, now);
             emitCount++;
         }
-        log.debug("TopQueryQuery: emitted {} top queries", emitCount);
+        log.debug("TopQueryQuery: emitted {} top queries (cache size={})", emitCount, baselineCache.size());
     }
 }

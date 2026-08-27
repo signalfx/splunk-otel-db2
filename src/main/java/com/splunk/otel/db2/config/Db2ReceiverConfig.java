@@ -76,7 +76,12 @@ public class Db2ReceiverConfig {
     public Duration getQuerySampleIntervalDuration() { return parseDuration(querySampleInterval, 10); }
     public void setQuerySampleInterval(String querySampleInterval) { this.querySampleInterval = querySampleInterval; }
 
-    public Duration getTopQueryIntervalDuration() { return parseDuration(topQueryInterval, 60); }
+    public Duration getTopQueryIntervalDuration() {
+        Duration d = parseDuration(topQueryInterval, 60);
+        if (d.getSeconds() < 60)
+            throw new IllegalArgumentException("top_query_interval must be at least 60s, got '" + topQueryInterval + "'");
+        return d;
+    }
     public void setTopQueryInterval(String topQueryInterval) { this.topQueryInterval = topQueryInterval; }
 
     public TlsConfig getTls() { return tls; }

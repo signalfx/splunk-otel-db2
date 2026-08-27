@@ -24,6 +24,7 @@ public class Db2Receiver {
     private final Meter meter;
     private final Logger otelLogger;
     private final Db2Connection db2Connection;
+    private Db2Connection topQueryConnection; // dedicated; never shared with metric callbacks
     private ScheduledExecutorService scheduler;
     private ScheduledExecutorService topQueryScheduler;
 
@@ -94,32 +95,48 @@ public class Db2Receiver {
 
         if (otelLogger != null && config.isTopQueryEnabled()) {
             long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
-            TopQueryQuery topQueryQuery = new TopQueryQuery(
-                connSupplier,
-                config.getDatabase(),
-                otelLogger,
-                config.getTopQueryCount(),
-                topQueryIntervalSeconds
-            );
-
-            topQueryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "db2-top-query-collector");
-                t.setDaemon(true);
-                return t;
-            });
-            topQueryScheduler.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        topQueryQuery.collect();
-                    } catch (Exception e) {
-                        log.warn("Top query collection error: {}", e.getMessage());
-                    }
-                },
-                0, topQueryIntervalSeconds, TimeUnit.SECONDS
-            );
+            startTopQueryScheduler(topQueryIntervalSeconds);
         }
 
         log.info("DB2 receiver started");
+    }
+
+    // Package-private: allows integration tests to inject a short interval without violating the
+    // production minimum. Production code always calls start() which enforces the 60s minimum
+    // via getTopQueryIntervalDuration().
+    void startTopQueryScheduler(long intervalSeconds) {
+        topQueryConnection = new Db2Connection(config);
+        Supplier<Connection> topQueryConnSupplier = () -> {
+            try {
+                return topQueryConnection.getOrConnect();
+            } catch (SQLException e) {
+                throw new RuntimeException("DB2 top-query connection failed: " + e.getMessage(), e);
+            }
+        };
+        TopQueryQuery topQueryQuery = new TopQueryQuery(
+            topQueryConnSupplier,
+            config.getDatabase(),
+            otelLogger,
+            config.getTopQueryCount(),
+            intervalSeconds
+        );
+        topQueryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "db2-top-query-collector");
+            t.setDaemon(true);
+            return t;
+        });
+        // scheduleWithFixedDelay: next execution starts after the previous one finishes,
+        // so a slow plan-cache scan never causes back-to-back overlapping executions.
+        topQueryScheduler.scheduleWithFixedDelay(
+            () -> {
+                try {
+                    topQueryQuery.collect();
+                } catch (Exception e) {
+                    log.warn("Top query collection error: {}", e.getMessage());
+                }
+            },
+            0, intervalSeconds, TimeUnit.SECONDS
+        );
     }
 
     private static int detectDb2Version(Supplier<Connection> connSupplier) {
@@ -147,6 +164,7 @@ public class Db2Receiver {
 
     public void closeConnection() {
         db2Connection.close();
+        if (topQueryConnection != null) topQueryConnection.close();
         log.info("DB2 receiver stopped");
     }
 }

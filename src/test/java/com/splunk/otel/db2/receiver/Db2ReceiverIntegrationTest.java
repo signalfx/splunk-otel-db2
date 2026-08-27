@@ -363,12 +363,14 @@ class Db2ReceiverIntegrationTest {
         // Use a short interval so the test completes quickly.
         // Cycle 1 (t=0s): receiver starts, seeds the delta baseline.
         // Workload: run a non-filtered recognisable query AFTER the seed collection.
-        // Cycle 2 (t=4s): delta is computed, top_query records are emitted.
+        // Cycle 2 (t~4s): delta is computed, top_query records are emitted.
         // SPLUNK_OTEL_TOPQ_PROBE is used as a unique marker in the alias; it contains
         // no literals so the obfuscated text is identical to the raw text.
+        //
+        // top_query_interval minimum is 60s in production; use startTopQueryScheduler()
+        // directly to inject a 4s interval for test speed without bypassing config validation.
         Db2ReceiverConfig config = buildConfig();
-        config.setTopQueryEnabled(true);
-        config.setTopQueryInterval("4s");
+        config.setTopQueryEnabled(false); // prevent start() from also scheduling top-query
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -376,9 +378,9 @@ class Db2ReceiverIntegrationTest {
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
+        receiver.startTopQueryScheduler(4L); // inject short interval for test
 
         // Wait for the first (seeding) collection to complete before running workload.
-        // The scheduler fires at t=0 and t=4s; sleeping 2s puts us safely between cycles.
         Thread.sleep(2000);
 
         // Run a recognisable query that is NOT filtered by any NOT LIKE clause.
