@@ -76,6 +76,7 @@ public class TopQueryQuery {
     private final Logger otelLogger;
     private final int topQueryCount;
     private final String sql;
+    private final int queryTimeoutSeconds;
 
     // Delta baseline keyed by "member:executableId" — unique per plan-cache section.
     // Stores all cumulative counters from the previous cycle.
@@ -92,6 +93,17 @@ public class TopQueryQuery {
     private static final int I_SORTS     = 6;
     private static final int I_SORT_OVF  = 7;
 
+    /**
+     * Reset-aware delta for cumulative Db2 counters.
+     * If {@code curr >= prev} the counter advanced normally; return the difference.
+     * If {@code curr < prev} the plan cache was flushed or the database was restarted and
+     * the counter restarted from zero; treat {@code curr} itself as the interval contribution
+     * (same approach as DB Agent ADBQueryStatistics#accept).
+     */
+    static long delta(long curr, long prev) {
+        return curr >= prev ? curr - prev : curr;
+    }
+
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds) {
         this.connSupplier  = connSupplier;
@@ -101,8 +113,11 @@ public class TopQueryQuery {
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
         this.sql = String.format(SQL, lookbackMinutes);
-        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min",
-            topQueryCount, intervalSeconds, lookbackMinutes);
+        // Timeout = half the interval, minimum 30s — prevents a slow plan-cache scan from
+        // blocking the scheduler thread into the next collection cycle.
+        this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
+        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s",
+            topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds);
     }
 
     public void collect() {
@@ -112,28 +127,30 @@ public class TopQueryQuery {
 
         try {
             Connection conn = connSupplier.get();
-            try (Statement st = conn.createStatement();
-                 ResultSet rs = st.executeQuery(sql)) {
-                while (rs.next()) {
-                    String rawSql   = rs.getString("STMT_TEXT");
-                    if (rawSql == null || rawSql.isBlank()) continue;
-                    long member     = rs.getLong("MEMBER");
-                    String execId   = rs.getString("EXECUTABLE_ID");
-                    String key      = member + ":" + execId;
-                    long[] c = {
-                        rs.getLong("STMT_EXEC_TIME"),
-                        rs.getLong("NUM_EXECUTIONS"),
-                        rs.getLong("TOTAL_CPU_TIME"),
-                        rs.getLong("ROWS_READ"),
-                        rs.getLong("ROWS_RETURNED"),
-                        rs.getLong("ROWS_MODIFIED"),
-                        rs.getLong("TOTAL_SECTION_SORTS"),
-                        rs.getLong("SORT_OVERFLOWS")
-                    };
-                    curr.put(key, c);
-                    texts.add(new String[]{rawSql, rs.getString("SECTION_TYPE"),
-                                           key, String.valueOf(member)});
-                    counters.add(c);
+            try (Statement st = conn.createStatement()) {
+                st.setQueryTimeout(queryTimeoutSeconds);
+                try (ResultSet rs = st.executeQuery(sql)) {
+                    while (rs.next()) {
+                        String rawSql = rs.getString("STMT_TEXT");
+                        if (rawSql == null || rawSql.isBlank()) continue;
+                        long member   = rs.getLong("MEMBER");
+                        String execId = rs.getString("EXECUTABLE_ID");
+                        String key    = member + ":" + execId;
+                        long[] c = {
+                            rs.getLong("STMT_EXEC_TIME"),
+                            rs.getLong("NUM_EXECUTIONS"),
+                            rs.getLong("TOTAL_CPU_TIME"),
+                            rs.getLong("ROWS_READ"),
+                            rs.getLong("ROWS_RETURNED"),
+                            rs.getLong("ROWS_MODIFIED"),
+                            rs.getLong("TOTAL_SECTION_SORTS"),
+                            rs.getLong("SORT_OVERFLOWS")
+                        };
+                        curr.put(key, c);
+                        texts.add(new String[]{rawSql, rs.getString("SECTION_TYPE"),
+                                               key, String.valueOf(member)});
+                        counters.add(c);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -169,8 +186,8 @@ public class TopQueryQuery {
                 execTimeDelta = c[I_EXEC_TIME];
                 numExecDelta  = c[I_NUM_EXEC];
             } else {
-                execTimeDelta = c[I_EXEC_TIME] - prevC[I_EXEC_TIME];
-                numExecDelta  = c[I_NUM_EXEC]  - prevC[I_NUM_EXEC];
+                execTimeDelta = delta(c[I_EXEC_TIME], prevC[I_EXEC_TIME]);
+                numExecDelta  = delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
             }
             // Emit if there was new execution time, or if new executions occurred (fast queries)
             if (execTimeDelta <= 0 && numExecDelta <= 0) continue;
@@ -197,13 +214,13 @@ public class TopQueryQuery {
             long member    = Long.parseLong(t[3]);
 
             // Delta all cumulative counters; new entries use current value as full interval delta.
-            long numExecDelta  = prevC == null ? c[I_NUM_EXEC]  : c[I_NUM_EXEC]  - prevC[I_NUM_EXEC];
-            long cpuUsDelta    = prevC == null ? c[I_CPU_US]    : c[I_CPU_US]    - prevC[I_CPU_US];
-            long rowsReadDelta = prevC == null ? c[I_ROWS_READ] : c[I_ROWS_READ] - prevC[I_ROWS_READ];
-            long rowsRetDelta  = prevC == null ? c[I_ROWS_RET]  : c[I_ROWS_RET]  - prevC[I_ROWS_RET];
-            long rowsModDelta  = prevC == null ? c[I_ROWS_MOD]  : c[I_ROWS_MOD]  - prevC[I_ROWS_MOD];
-            long sortsDelta    = prevC == null ? c[I_SORTS]     : c[I_SORTS]     - prevC[I_SORTS];
-            long sortOvfDelta  = prevC == null ? c[I_SORT_OVF]  : c[I_SORT_OVF]  - prevC[I_SORT_OVF];
+            long numExecDelta  = prevC == null ? c[I_NUM_EXEC]  : delta(c[I_NUM_EXEC],  prevC[I_NUM_EXEC]);
+            long cpuUsDelta    = prevC == null ? c[I_CPU_US]    : delta(c[I_CPU_US],    prevC[I_CPU_US]);
+            long rowsReadDelta = prevC == null ? c[I_ROWS_READ] : delta(c[I_ROWS_READ], prevC[I_ROWS_READ]);
+            long rowsRetDelta  = prevC == null ? c[I_ROWS_RET]  : delta(c[I_ROWS_RET],  prevC[I_ROWS_RET]);
+            long rowsModDelta  = prevC == null ? c[I_ROWS_MOD]  : delta(c[I_ROWS_MOD],  prevC[I_ROWS_MOD]);
+            long sortsDelta    = prevC == null ? c[I_SORTS]     : delta(c[I_SORTS],     prevC[I_SORTS]);
+            long sortOvfDelta  = prevC == null ? c[I_SORT_OVF]  : delta(c[I_SORT_OVF],  prevC[I_SORT_OVF]);
 
             String obfuscated = SqlObfuscator.obfuscate(rawSql.trim());
             if (SqlObfuscator.OBFUSCATION_FAILED.equals(obfuscated)) {

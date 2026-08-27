@@ -441,6 +441,117 @@ class TopQueryQueryTest {
         verify(otelLogger, never()).logRecordBuilder();
     }
 
+    // --- Query timeout tests ---
+
+    @Test
+    void queryTimeoutIsSetBeforeExecution() throws Exception {
+        // 120s interval → timeout = max(30, 60) = 60s
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 120L);
+        when(rs.next()).thenReturn(false);
+        q.collect();
+        verify(stmt).setQueryTimeout(60);
+    }
+
+    @Test
+    void queryTimeoutMinimumIsThirtySeconds() throws Exception {
+        // 10s interval → timeout = max(30, 5) = 30s
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 10L);
+        when(rs.next()).thenReturn(false);
+        q.collect();
+        verify(stmt).setQueryTimeout(30);
+    }
+
+    // --- Reset / counter-wrap tests ---
+
+    @Test
+    void deltaFunctionNormalAdvance() {
+        assertThat(TopQueryQuery.delta(1500L, 1000L)).isEqualTo(500L);
+        assertThat(TopQueryQuery.delta(1000L, 1000L)).isEqualTo(0L);
+    }
+
+    @Test
+    void deltaFunctionCounterReset() {
+        // After a plan-cache flush or DB restart the counter restarts from 0.
+        // The current value is itself the work done since the reset.
+        assertThat(TopQueryQuery.delta(200L, 1000L)).isEqualTo(200L);
+        assertThat(TopQueryQuery.delta(0L, 500L)).isEqualTo(0L);
+    }
+
+    @Test
+    void counterResetProducesPositiveDeltaNotNegative() throws Exception {
+        TopQueryQuery q = query();
+
+        // Seed: exec_time=2000ms, numExec=10
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 10L, 2000L, 1000L, 50L, 20L, 5L, 3L, 1L, "D");
+        q.collect();
+
+        // Cycle 2 after monitor reset: all counters restarted; current < previous on every field.
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, false);
+        // exec_time reset to 300ms (< 2000), numExec reset to 2 (< 10), cpu reset to 150µs (< 1000)
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 2L, 300L, 150L, 8L, 3L, 1L, 1L, 0L, "D");
+        q.collect();
+
+        // Must emit — current counters are the interval delta, all positive
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+
+        io.opentelemetry.api.common.Attributes attrs = cap.getValue();
+        // exec_time delta = 300ms (reset path) → 0.3s
+        assertThat(attrs.get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.3);
+        // numExec delta = 2 (reset path)
+        assertThat(attrs.get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(2L);
+        // cpu delta = 150µs (reset path)
+        assertThat(attrs.get(TopQueryEvent.DB2_TOTAL_CPU_TIME)).isEqualTo(150 / 1_000_000.0);
+        // rows_read delta = 8 (reset path)
+        assertThat(attrs.get(TopQueryEvent.DB2_ROWS_READ)).isEqualTo(8L);
+        // No negatives anywhere
+        assertThat(attrs.get(TopQueryEvent.DB2_ROWS_RETURNED)).isGreaterThanOrEqualTo(0L);
+        assertThat(attrs.get(TopQueryEvent.DB2_ROWS_MODIFIED)).isGreaterThanOrEqualTo(0L);
+        assertThat(attrs.get(TopQueryEvent.DB2_SORTS)).isGreaterThanOrEqualTo(0L);
+        assertThat(attrs.get(TopQueryEvent.DB2_SORT_OVERFLOWS)).isGreaterThanOrEqualTo(0L);
+    }
+
+    @Test
+    void partialResetOnlyAffectedCountersUseCurrent() throws Exception {
+        // exec_time resets but numExec does not (independent Db2 internal counters)
+        TopQueryQuery q = query();
+
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, false);
+        // exec_time reset to 50ms; numExec grew normally to 7 (delta=2)
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 50L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+
+        // exec_time reset: delta = 50ms → 0.05s
+        assertThat(attrs(cap).get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.05);
+        // numExec normal: delta = 7 - 5 = 2
+        assertThat(attrs(cap).get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(2L);
+    }
+
+    private static io.opentelemetry.api.common.Attributes attrs(
+            ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap) {
+        return cap.getValue();
+    }
+
     @Test
     void configRejectsZeroTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
