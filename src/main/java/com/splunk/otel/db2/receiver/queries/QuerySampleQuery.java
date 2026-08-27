@@ -36,7 +36,9 @@ public class QuerySampleQuery {
     // Default path: SYSIBMADM.MON_CURRENT_SQL (administrative view, Db2 9.7+) +
     // MON_GET_CONNECTION JOIN. MON_CURRENT_SQL is a VIEW, not a table function —
     // do not wrap in TABLE(). Uses ELAPSED_TIME_SEC (seconds) and COORD_MEMBER.
-    // No DFT_MON_STMT requirement. Filters IDLE sessions and the receiver itself.
+    // No DFT_MON_STMT requirement.
+    // Activity filter: APPLICATION_STATUS IN ('CONNECTED', 'UOWEXEC') — matches the
+    // DB Agent's APPL_STATUS IN ('CONNECTED', 'UOWEXEC') whitelist approach.
     // LOCAL_START_TIME: reconstructed from CURRENT TIMESTAMP - ELAPSED_TIME_SEC (MON_CURRENT_SQL
     // does not expose a statement-start column directly).
     // CLIENT_USERID: COALESCE with SESSION_AUTH_ID — CLIENT_USERID is often empty when the
@@ -57,7 +59,7 @@ public class QuerySampleQuery {
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
-        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
+        "  AND C.APPLICATION_STATUS IN ('CONNECTED', 'UOWEXEC') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
@@ -86,7 +88,7 @@ public class QuerySampleQuery {
         " AND A.UOW_ID = S.UOW_ID " +
         " AND A.ACTIVITY_ID = S.ACTIVITY_ID " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
-        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
+        "  AND C.APPLICATION_STATUS IN ('CONNECTED', 'UOWEXEC') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
@@ -117,6 +119,7 @@ public class QuerySampleQuery {
         "  ON (S.PKGNAME = SS.PACKAGE_NAME AND S.SECTNO = SS.SECTION_NUMBER) " +
         "WHERE SS.STMT_STOP IS NULL " +
         "  AND SA.AGENT_ID = SS.AGENT_ID " +
+        "  AND SA.APPL_STATUS IN ('CONNECTED', 'UOWEXEC') " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT) IS NOT NULL " +
         "  AND COALESCE(SA.APPL_NAME, '') <> 'splunk-otel-db2' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
