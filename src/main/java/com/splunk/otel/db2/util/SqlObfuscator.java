@@ -306,24 +306,45 @@ public final class SqlObfuscator {
      * An odd count means at least one literal is unterminated, which would desync the lexer
      * and risk emitting literal text as identifier output.
      *
-     * Comments are skipped to avoid false positives on valid SQL like
-     * {@code SELECT * FROM T -- user's query}.
+     * State machine mirrors the main lexer: single-quoted strings, double-quoted identifiers,
+     * line comments, and nested block comments are all handled, so {@code --} / {@code /*}
+     * tokens inside a string literal (e.g. {@code 'abc--def'}) are not mis-classified as
+     * comment delimiters.
      */
     private static boolean hasUnbalancedQuotes(String sql) {
         int quoteCount = 0;
+        boolean inSingleQuoted = false;
         boolean inDoubleQuoted = false;
         int i = 0;
         int len = sql.length();
         while (i < len) {
             char c = sql.charAt(i);
-            if (inDoubleQuoted) {
+            if (inSingleQuoted) {
+                if (c == '\'') {
+                    if (i + 1 < len && sql.charAt(i + 1) == '\'') {
+                        i += 2; // '' escape — both quotes belong to this literal
+                    } else {
+                        quoteCount++; // closing quote
+                        inSingleQuoted = false;
+                        i++;
+                    }
+                } else {
+                    i++;
+                }
+            } else if (inDoubleQuoted) {
                 if (c == '"') {
                     if (i + 1 < len && sql.charAt(i + 1) == '"') {
                         i += 2; // "" escape
-                        continue;
+                    } else {
+                        inDoubleQuoted = false;
+                        i++;
                     }
-                    inDoubleQuoted = false;
+                } else {
+                    i++;
                 }
+            } else if (c == '\'') {
+                quoteCount++; // opening quote
+                inSingleQuoted = true;
                 i++;
             } else if (c == '"') {
                 inDoubleQuoted = true;
@@ -333,17 +354,25 @@ public final class SqlObfuscator {
                 i += 2;
                 while (i < len && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') i++;
             } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                // block comment — skip to */
+                // nested block comment — depth-tracked, matching the main lexer
                 i += 2;
-                while (i + 1 < len && !(sql.charAt(i) == '*' && sql.charAt(i + 1) == '/')) i++;
-                i += 2; // consume */
-            } else if (c == '\'') {
-                quoteCount++;
-                i++;
+                int depth = 1;
+                while (i < len && depth > 0) {
+                    if (sql.charAt(i) == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                        depth++;
+                        i += 2;
+                    } else if (sql.charAt(i) == '*' && i + 1 < len && sql.charAt(i + 1) == '/') {
+                        depth--;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
+                }
             } else {
                 i++;
             }
         }
+        // Even count = every opening quote has a matching closing quote
         return (quoteCount % 2) != 0;
     }
 

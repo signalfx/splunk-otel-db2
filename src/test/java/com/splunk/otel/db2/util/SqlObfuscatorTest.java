@@ -486,8 +486,7 @@ class SqlObfuscatorTest {
 
     @Test
     void apostropheInsideLineCommentDoesNotTriggerFailClosed() {
-        // -- user's query: the ' is inside a comment, not a string literal;
-        // hasUnbalancedQuotes must skip comment text or this valid query returns OBFUSCATION_FAILED
+        // -- user's query: the ' is inside a comment, not a string literal
         assertThat(SqlObfuscator.obfuscate("SELECT * FROM T -- user's query\nWHERE ID = 1"))
             .isEqualTo("SELECT * FROM T WHERE ID = ?");
     }
@@ -495,6 +494,29 @@ class SqlObfuscatorTest {
     @Test
     void apostropheInsideBlockCommentDoesNotTriggerFailClosed() {
         assertThat(SqlObfuscator.obfuscate("SELECT /* it's fine */ * FROM T WHERE ID = 1"))
+            .isEqualTo("SELECT * FROM T WHERE ID = ?");
+    }
+
+    @Test
+    void lineCommentTokenInsideSingleQuotedStringNotTreatedAsComment() {
+        // 'abc--def' is a valid string literal containing --; must not be treated as a
+        // line comment by hasUnbalancedQuotes, which would desync the quote count
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'abc--def'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void blockCommentTokenInsideSingleQuotedStringNotTreatedAsComment() {
+        // 'abc/*def*/' is a valid string literal containing /* */
+        assertThat(SqlObfuscator.obfuscate("SELECT * FROM T WHERE X = 'abc/*def*/'"))
+            .isEqualTo("SELECT * FROM T WHERE X = ?");
+    }
+
+    @Test
+    void nestedBlockCommentInHasUnbalancedQuotesCheck() {
+        // Nested /* /* */ */ — both depth levels must be consumed without exposing the
+        // apostrophe inside the inner comment to the quote counter
+        assertThat(SqlObfuscator.obfuscate("SELECT /* outer /* it's nested */ end */ * FROM T WHERE ID = 1"))
             .isEqualTo("SELECT * FROM T WHERE ID = ?");
     }
 
