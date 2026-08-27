@@ -381,13 +381,17 @@ class Db2ReceiverIntegrationTest {
         // The scheduler fires at t=0 and t=4s; sleeping 2s puts us safely between cycles.
         Thread.sleep(2000);
 
-        // Run a recognisable query that is NOT filtered by the NOT LIKE clauses.
-        // Using SYSCAT.TABLES ensures the plan cache entry persists across cycles.
+        // Run a recognisable query that is NOT filtered by any NOT LIKE clause.
+        // The cross-join generates real CPU/elapsed time so STMT_EXEC_TIME > 0 in the plan cache.
+        // SPLUNK_OTEL_TOPQ_PROBE appears in the alias and is unique enough to match in assertions.
         Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
         try (Statement st = workConn.createStatement()) {
             for (int i = 0; i < 3; i++) {
                 try (ResultSet r = st.executeQuery(
-                        "SELECT COUNT(*) AS SPLUNK_OTEL_TOPQ_PROBE FROM SYSCAT.TABLES")) {
+                        "SELECT COUNT(*) AS SPLUNK_OTEL_TOPQ_PROBE " +
+                        "FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B " +
+                        "WHERE A.TABSCHEMA = B.TABSCHEMA " +
+                        "FETCH FIRST 10000 ROWS ONLY")) {
                     while (r.next()) { /* drain */ }
                 }
             }

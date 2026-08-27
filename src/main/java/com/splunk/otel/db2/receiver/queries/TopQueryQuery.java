@@ -147,27 +147,40 @@ public class TopQueryQuery {
             return;
         }
 
-        // Compute interval deltas; skip only zero-delta entries.
-        // New entries (prevC == null) were compiled/executed since the last scrape — use their
-        // current counters as the interval delta, matching PostgreSQL contrib's cache-miss handling.
+        // Compute interval deltas; skip entries with no new executions this interval.
+        // New entries (prevC == null): compiled/executed since the last scrape — use current
+        // counters as the interval delta (PostgreSQL contrib cache-miss handling).
+        // For new entries with STMT_EXEC_TIME=0 (very fast queries), emit if NUM_EXEC_WITH_METRICS>0.
         // deltas[i] = [row_index, execTimeDeltaMs]
         List<long[]> deltas = new ArrayList<>();
         for (int i = 0; i < texts.size(); i++) {
+            long[] c     = counters.get(i);
             long[] prevC = prev.get(texts.get(i)[2]);
-            long execTimeDelta = prevC == null
-                ? counters.get(i)[I_EXEC_TIME]
-                : counters.get(i)[I_EXEC_TIME] - prevC[I_EXEC_TIME];
-            if (execTimeDelta <= 0) continue;
-            deltas.add(new long[]{i, execTimeDelta});
+            long execTimeDelta;
+            long numExecDelta;
+            if (prevC == null) {
+                execTimeDelta = c[I_EXEC_TIME];
+                numExecDelta  = c[I_NUM_EXEC];
+            } else {
+                execTimeDelta = c[I_EXEC_TIME] - prevC[I_EXEC_TIME];
+                numExecDelta  = c[I_NUM_EXEC]  - prevC[I_NUM_EXEC];
+            }
+            // Emit if there was new execution time, or if new executions occurred (fast queries)
+            if (execTimeDelta <= 0 && numExecDelta <= 0) continue;
+            // Rank by exec time delta; use numExecDelta as tiebreaker for zero-time entries.
+            // Store [row_index, execTimeDeltaMs, rankValue] so emit loop always uses the real
+            // exec time delta (not the tiebreaker) when computing totalExecSec.
+            long rankValue = execTimeDelta > 0 ? execTimeDelta : numExecDelta;
+            deltas.add(new long[]{i, execTimeDelta, rankValue});
         }
 
-        deltas.sort((a, b) -> Long.compare(b[1], a[1]));
+        deltas.sort((a, b) -> Long.compare(b[2], a[2]));
 
         Instant now = Instant.now();
         int emitCount = 0;
         for (int rank = 0; rank < Math.min(topQueryCount, deltas.size()); rank++) {
             int  idx           = (int) deltas.get(rank)[0];
-            long execTimeDelta = deltas.get(rank)[1];
+            long execTimeDelta = deltas.get(rank)[1]; // real exec time delta, not rank value
             long[] c           = counters.get(idx);
             long[] prevC       = prev.get(texts.get(idx)[2]); // null for new entries
             String[] t         = texts.get(idx);

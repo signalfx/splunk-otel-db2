@@ -81,7 +81,7 @@ class TopQueryQueryTest {
         q.collect();
         verify(otelLogger, never()).logRecordBuilder();
 
-        // Cycle 2: exec1 unchanged (zero delta, skipped) + exec2 is brand new
+        // Cycle 2: exec1 unchanged (zero delta, skipped) + exec2 is brand new with non-zero exec time
         reset(stmt, rs, otelLogger, logBuilder);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
@@ -91,7 +91,7 @@ class TopQueryQueryTest {
         when(rs.getLong("MEMBER")).thenReturn(0L);
         when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
         when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(5L, 3L);
-        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(1000L, 500L); // exec1 unchanged, exec2 new
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(1000L, 500L); // exec1 unchanged (delta=0), exec2 new
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
         when(rs.getLong("ROWS_READ")).thenReturn(0L);
         when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
@@ -158,6 +158,45 @@ class TopQueryQueryTest {
         assertThat(attrs.get(TopQueryEvent.DB2_SORTS)).isEqualTo(1L);
         assertThat(attrs.get(TopQueryEvent.DB2_SORT_OVERFLOWS)).isEqualTo(0L);
         assertThat(attrs.get(TopQueryEvent.DB2_STMT_TYPE)).isEqualTo("D");
+    }
+
+    @Test
+    void newEntryWithZeroExecTimeButNonZeroExecutionsIsEmitted() throws Exception {
+        TopQueryQuery q = query();
+
+        // Seed with exec1
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Cycle 2: exec2 is new, STMT_EXEC_TIME=0 (very fast query) but has 2 executions
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("exec1", "exec2");
+        when(rs.getLong("NUM_EXEC_WITH_METRICS")).thenReturn(5L, 2L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(1000L, 0L); // exec1 no delta; exec2 new, 0ms
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+
+        q.collect();
+
+        // exec2 should be emitted even with zero exec time because it has executions
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(2L);
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.0);
     }
 
     @Test
