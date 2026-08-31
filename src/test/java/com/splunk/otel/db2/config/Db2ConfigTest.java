@@ -219,6 +219,97 @@ class Db2ConfigTest {
         assertThat(new Db2ReceiverConfig().isQuerySampleEnabled()).isFalse();
     }
 
+    @Test
+    void unsupportedReceiverTypeFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  sqlserver:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: sa\n" +
+            "    password: secret\n" +
+            "    database: master\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("sqlserver");
+    }
+
+    @Test
+    void emptyNameAfterSlashFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2/:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("empty");
+    }
+
+    @Test
+    void nameWithInvalidCharactersFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  \"db2/bad name\":\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("invalid characters");
+    }
+
+    @Test
+    void nonMapReceiverValueFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2/prod: \"not-a-map\"\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("map");
+    }
+
+    @Test
+    void mixtureOfValidAndInvalidKeysFails() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2/prod:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: PROD\n" +
+            "  db3/typo:\n" +
+            "    hostname: other.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: OTHER\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("db3");
+    }
+
     private static Path writeConfig(Path dir, String content) throws IOException {
         Path f = dir.resolve("config.yaml");
         Files.writeString(f, content);

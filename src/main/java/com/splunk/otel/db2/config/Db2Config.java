@@ -10,8 +10,12 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public class Db2Config {
+
+    // Mirrors the OTel Collector nameRegexp: no Unicode separator (Z), control (C), or symbol (S) chars.
+    private static final Pattern NAME_PATTERN = Pattern.compile("^[^\\pZ\\pC\\pS]+$");
 
     private List<Db2ReceiverConfig> receivers = new ArrayList<>();
     private Exporters exporters = new Exporters();
@@ -41,8 +45,34 @@ public class Db2Config {
                 Map<String, Object> receiversMap = (Map<String, Object>) receiversNode;
                 for (Map.Entry<String, Object> entry : receiversMap.entrySet()) {
                     String key = entry.getKey();
-                    if (!key.equals("db2") && !key.startsWith("db2/")) continue;
-                    String name = key.contains("/") ? key.substring(key.indexOf('/') + 1) : "";
+                    int slashIdx = key.indexOf('/');
+                    String type = slashIdx < 0 ? key : key.substring(0, slashIdx);
+                    if (!type.equals("db2")) {
+                        throw new IllegalStateException(
+                            "Unsupported receiver type '" + type + "' in key '" + key +
+                            "': only 'db2' is supported");
+                    }
+                    String name = "";
+                    if (slashIdx >= 0) {
+                        name = key.substring(slashIdx + 1);
+                        if (name.isEmpty()) {
+                            throw new IllegalStateException(
+                                "Invalid receiver key '" + key + "': name after '/' must not be empty");
+                        }
+                        if (name.length() > 1024) {
+                            throw new IllegalStateException(
+                                "Invalid receiver key '" + key + "': name exceeds 1024 characters");
+                        }
+                        if (!NAME_PATTERN.matcher(name).matches()) {
+                            throw new IllegalStateException(
+                                "Invalid receiver key '" + key + "': name contains invalid characters " +
+                                "(no whitespace, control, or symbol characters allowed)");
+                        }
+                    }
+                    if (!(entry.getValue() instanceof Map)) {
+                        throw new IllegalStateException(
+                            "Receiver '" + key + "' must be a map of configuration fields");
+                    }
                     Db2ReceiverConfig rc = parseDb2Config((Map<String, Object>) entry.getValue());
                     rc.setComponentName(name);
                     cfg.getReceivers().add(rc);
