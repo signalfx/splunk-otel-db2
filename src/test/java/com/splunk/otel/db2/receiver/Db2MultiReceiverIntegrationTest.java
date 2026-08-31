@@ -132,33 +132,70 @@ class Db2MultiReceiverIntegrationTest {
     }
 
     @Test
-    void twoReceiversWithAllCollectorsEnabled() throws Exception {
-        io.opentelemetry.sdk.logs.LogRecordProcessor proc1 =
-            io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor.create(
-                io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter.create());
-        io.opentelemetry.sdk.logs.LogRecordProcessor proc2 =
-            io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor.create(
-                io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter.create());
+    void twoReceiversWithQuerySampleBothEmitRecords() throws Exception {
+        io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter logExporter1 =
+            io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter.create();
+        io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter logExporter2 =
+            io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter.create();
 
         io.opentelemetry.sdk.logs.SdkLoggerProvider logProvider1 =
-            io.opentelemetry.sdk.logs.SdkLoggerProvider.builder().addLogRecordProcessor(proc1).build();
+            io.opentelemetry.sdk.logs.SdkLoggerProvider.builder()
+                .addLogRecordProcessor(
+                    io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor.create(logExporter1))
+                .build();
         io.opentelemetry.sdk.logs.SdkLoggerProvider logProvider2 =
-            io.opentelemetry.sdk.logs.SdkLoggerProvider.builder().addLogRecordProcessor(proc2).build();
+            io.opentelemetry.sdk.logs.SdkLoggerProvider.builder()
+                .addLogRecordProcessor(
+                    io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor.create(logExporter2))
+                .build();
 
-        InMemoryMetricExporter exporter1 = InMemoryMetricExporter.create();
-        InMemoryMetricExporter exporter2 = InMemoryMetricExporter.create();
-        SdkMeterProvider meterProvider1 = buildMeterProvider(exporter1);
-        SdkMeterProvider meterProvider2 = buildMeterProvider(exporter2);
+        InMemoryMetricExporter metricExporter1 = InMemoryMetricExporter.create();
+        InMemoryMetricExporter metricExporter2 = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider1 = buildMeterProvider(metricExporter1);
+        SdkMeterProvider meterProvider2 = buildMeterProvider(metricExporter2);
 
         Db2ReceiverConfig config1 = buildConfig();
         config1.setQuerySampleEnabled(true);
-        config1.setQuerySampleInterval("2s");
-        config1.setTopQueryEnabled(false); // top-query tested separately; 60s min blocks here
+        config1.setQuerySampleInterval("1s");
+        config1.setTopQueryEnabled(false);
 
         Db2ReceiverConfig config2 = buildConfig();
         config2.setQuerySampleEnabled(true);
-        config2.setQuerySampleInterval("2s");
+        config2.setQuerySampleInterval("1s");
         config2.setTopQueryEnabled(false);
+
+        java.util.Properties props = new java.util.Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        // DDL connection — separate autoCommit=true so rollback only releases the row lock
+        java.sql.Connection ddlConn = java.sql.DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (java.sql.Statement st = ddlConn.createStatement()) {
+            try { st.execute("DROP TABLE SPLUNK_MULTI_LOCK_TEST"); } catch (Exception ignored) {}
+            st.execute("CREATE TABLE SPLUNK_MULTI_LOCK_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
+        }
+        ddlConn.close();
+
+        // ownerConn holds an X-lock via uncommitted INSERT
+        java.sql.Connection ownerConn = java.sql.DriverManager.getConnection(db2.getJdbcUrl(), props);
+        ownerConn.setAutoCommit(false);
+        try (java.sql.Statement st = ownerConn.createStatement()) {
+            st.execute("INSERT INTO SPLUNK_MULTI_LOCK_TEST VALUES (1, 99)");
+        }
+
+        // bgConn blocks in LOCKWAIT trying to read the locked row — this is the sampled query
+        java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.sql.Connection bgConn = java.sql.DriverManager.getConnection(db2.getJdbcUrl(), props);
+        bgConn.setAutoCommit(false);
+        java.sql.Statement bgStmt = bgConn.createStatement();
+        java.util.concurrent.Future<?> bgFuture = exec.submit(() -> {
+            try {
+                bgStmt.executeQuery("SELECT ID FROM SPLUNK_MULTI_LOCK_TEST WITH RR");
+            } catch (Exception ignored) {}
+        });
+
+        // Let the background connection enter LOCKWAIT before starting the receivers
+        Thread.sleep(2000);
 
         Db2Receiver receiver1 = new Db2Receiver(config1, meterProvider1.get("splunk-otel-db2"),
             logProvider1.get("splunk-otel-db2"));
@@ -169,12 +206,57 @@ class Db2MultiReceiverIntegrationTest {
         receiver2.start();
 
         try {
-            // Both receivers must emit core metrics — confirms independent connection + scheduler lifecycle
+            // Both receivers must independently observe and emit a query-sample record for the
+            // blocked SELECT — confirms each has its own querySampleConnection and scheduler.
             Awaitility.await()
-                .atMost(20, TimeUnit.SECONDS)
-                .until(() -> metricNames(exporter1).contains("db2.connection.count")
-                          && metricNames(exporter2).contains("db2.connection.count"));
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(1, TimeUnit.SECONDS)
+                .until(() -> {
+                    boolean r1HasRecord = logExporter1.getFinishedLogRecordItems().stream()
+                        .anyMatch(r -> {
+                            String text = r.getAttributes().get(
+                                com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB_QUERY_TEXT);
+                            return text != null && text.toUpperCase().contains("SPLUNK_MULTI_LOCK_TEST");
+                        });
+                    boolean r2HasRecord = logExporter2.getFinishedLogRecordItems().stream()
+                        .anyMatch(r -> {
+                            String text = r.getAttributes().get(
+                                com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB_QUERY_TEXT);
+                            return text != null && text.toUpperCase().contains("SPLUNK_MULTI_LOCK_TEST");
+                        });
+                    return r1HasRecord && r2HasRecord;
+                });
+
+            // Verify record structure from receiver1 (representative)
+            io.opentelemetry.sdk.logs.data.LogRecordData record =
+                logExporter1.getFinishedLogRecordItems().stream()
+                    .filter(r -> {
+                        String text = r.getAttributes().get(
+                            com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB_QUERY_TEXT);
+                        return text != null && text.toUpperCase().contains("SPLUNK_MULTI_LOCK_TEST");
+                    })
+                    .findFirst().orElseThrow();
+
+            assertThat(record.getAttributes().get(
+                com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB_SYSTEM))
+                .isEqualTo("ibm.db2");
+            assertThat(record.getAttributes().get(
+                com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB2_MEMBER))
+                .isNotNull();
+            assertThat(record.getSeverity())
+                .isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
         } finally {
+            ownerConn.rollback();
+            ownerConn.close();
+            bgStmt.cancel();
+            bgConn.rollback();
+            bgConn.close();
+            bgFuture.cancel(true);
+            exec.shutdownNow();
+            java.sql.Connection cleanConn = java.sql.DriverManager.getConnection(db2.getJdbcUrl(), props);
+            try (java.sql.Statement st = cleanConn.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_MULTI_LOCK_TEST");
+            } finally { cleanConn.close(); }
             receiver1.stop();
             receiver2.stop();
             logProvider1.shutdown();

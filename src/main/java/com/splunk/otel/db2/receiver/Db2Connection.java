@@ -28,9 +28,18 @@ public class Db2Connection {
     }
 
     public synchronized Connection getOrConnect() throws SQLException {
-        if (connection != null && connection.isValid(config.getConnectTimeoutSeconds())) {
-            consecutiveFailures = 0;
-            return connection;
+        if (connection != null) {
+            try {
+                if (connection.isValid(config.getConnectTimeoutSeconds())) {
+                    consecutiveFailures = 0;
+                    return connection;
+                }
+            } catch (SQLException e) {
+                log.warn("Db2Connection: validation threw, treating as broken: {}", e.getMessage());
+            }
+            // isValid returned false or threw — discard the broken connection
+            try { connection.close(); } catch (SQLException ignored) {}
+            connection = null;
         }
         long now = System.currentTimeMillis();
         if (consecutiveFailures > 0 && now < nextRetryAt) {
@@ -73,6 +82,10 @@ public class Db2Connection {
         connection = DriverManager.getConnection(url, props);
         try (Statement st = connection.createStatement()) {
             st.execute("CALL WLM_SET_CLIENT_INFO(NULL, NULL, 'splunk-otel-db2', NULL, NULL)");
+        } catch (SQLException e) {
+            try { connection.close(); } catch (SQLException ignored) {}
+            connection = null;
+            throw e;
         }
         log.info("Connected to DB2 successfully");
     }
