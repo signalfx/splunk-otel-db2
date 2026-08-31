@@ -33,11 +33,12 @@ receivers:
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"          # database name (uppercase)
     collection_interval: "30s"  # metrics collection interval
-    top_query_count: 250        # top N queries by exec time (future PR)
+    top_query_enabled: false         # set true to enable top query collection (opt-in)
+    top_query_count: 250             # top N queries to emit per interval (must be > 0)
+    top_query_interval: "60s"        # how often to collect top queries (minimum 60s)
     query_sample_enabled: false      # set true to enable query sampling (opt-in)
     max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"     # how often to sample active queries
-    top_query_interval: "60s"        # top-query collection interval (future PR)
     use_snapshot_monitor: false      # set true to use SNAP_GET_STMT fallback path
     tls:
       insecure: true            # set false to enable TLS
@@ -113,6 +114,33 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 **Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
 
+## Top queries (log records)
+
+Top SQL statements are collected from the Db2 plan cache at `top_query_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `top_query_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+
+Statements are ranked by execution elapsed time added during the current collection interval (per-interval delta of `STMT_EXEC_TIME`). The first collection after startup seeds the delta baseline and emits nothing. The lookback window is automatically set to 2× the configured interval (minimum 5 minutes) to ensure statements executed early in a long interval are not excluded before the next collection.
+
+**Cache-miss classification:** when a plan-cache section has no baseline (first appearance or returning after eviction), its `INSERT_TIMESTAMP` is compared against the Db2 server clock recorded at the end of the previous scrape. Sections compiled after the previous scrape are treated as genuinely new and their current counters are emitted as the interval delta. Sections that predate the previous scrape are conservatively seeded — their baseline is established and nothing is emitted until the next cycle. This prevents lifetime cumulative totals from being reported as a single interval spike when an evicted section resumes execution. Both timestamps originate from the Db2 server clock, avoiding JVM/server timezone skew.
+
+The log record's native `event_name` field is set to `db.server.top_query`.
+
+| Attribute | Description |
+|---|---|
+| `db.system.name` | Always `ibm.db2` |
+| `db.namespace` | Database name |
+| `db.query.text` | Obfuscated SQL statement (also set as log body) |
+| `db2.member` | Db2 member number |
+| `db2.executions` | Total executions added during this interval |
+| `db2.total_exec_time` | Interval execution elapsed time in seconds |
+| `db2.avg_exec_time` | Average execution time per execution this interval, in seconds |
+| `db2.total_cpu_time` | Interval CPU time in seconds |
+| `db2.rows_read` | Rows read during this interval |
+| `db2.rows_returned` | Rows returned during this interval |
+| `db2.rows_modified` | Rows inserted/updated/deleted during this interval |
+| `db2.sorts` | Sorts performed during this interval |
+| `db2.sort_overflows` | Sorts that spilled to disk during this interval |
+| `db2.stmt_type` | Statement type: `D` = dynamic SQL, `S` = static SQL |
+
 ## Required permissions
 
 Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
@@ -137,6 +165,9 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
+
+-- Top query collection (top_query_enabled: true)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
 
 -- Query sampling (query_sample_enabled: true, default path)
 GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;

@@ -10,6 +10,7 @@ public class Db2ReceiverConfig {
     private String database = "SAMPLE";
     private String collectionInterval = "30s";
     private int topQueryCount = 250;
+    private boolean topQueryEnabled = false;
     private int maxQuerySampleCount = 1000;
     private boolean querySampleEnabled = false;
     private boolean useSnapshotMonitor = false;
@@ -49,7 +50,14 @@ public class Db2ReceiverConfig {
     }
 
     public int getTopQueryCount() { return topQueryCount; }
-    public void setTopQueryCount(int topQueryCount) { this.topQueryCount = topQueryCount; }
+    public void setTopQueryCount(int topQueryCount) {
+        if (topQueryCount <= 0)
+            throw new IllegalArgumentException("top_query_count must be > 0, got " + topQueryCount);
+        this.topQueryCount = topQueryCount;
+    }
+
+    public boolean isTopQueryEnabled() { return topQueryEnabled; }
+    public void setTopQueryEnabled(boolean topQueryEnabled) { this.topQueryEnabled = topQueryEnabled; }
 
     public int getMaxQuerySampleCount() { return maxQuerySampleCount; }
     public void setMaxQuerySampleCount(int maxQuerySampleCount) {
@@ -68,7 +76,12 @@ public class Db2ReceiverConfig {
     public Duration getQuerySampleIntervalDuration() { return parseDuration(querySampleInterval, 10); }
     public void setQuerySampleInterval(String querySampleInterval) { this.querySampleInterval = querySampleInterval; }
 
-    public Duration getTopQueryIntervalDuration() { return parseDuration(topQueryInterval, 60); }
+    public Duration getTopQueryIntervalDuration() {
+        Duration d = parseDuration(topQueryInterval, 60);
+        if (d.getSeconds() < 60)
+            throw new IllegalArgumentException("top_query_interval must be at least 60s, got '" + topQueryInterval + "'");
+        return d;
+    }
     public void setTopQueryInterval(String topQueryInterval) { this.topQueryInterval = topQueryInterval; }
 
     public TlsConfig getTls() { return tls; }

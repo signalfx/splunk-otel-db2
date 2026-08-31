@@ -51,6 +51,7 @@ public class Db2Config {
                     if (db2.get("database") != null) rc.setDatabase(asString(db2, "database"));
                     if (db2.get("collection_interval") != null) rc.setCollectionInterval(asString(db2, "collection_interval"));
                     if (db2.get("top_query_count") != null) rc.setTopQueryCount(asInt(db2, "top_query_count"));
+                    if (db2.get("top_query_enabled") != null) rc.setTopQueryEnabled(asBool(db2, "top_query_enabled"));
                     if (db2.get("max_query_sample_count") != null) rc.setMaxQuerySampleCount(asInt(db2, "max_query_sample_count"));
                     if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
                     if (db2.get("top_query_interval") != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
@@ -123,7 +124,11 @@ public class Db2Config {
             throw new IllegalStateException("receivers.db2.hostname is required");
         if (rc.getPort() <= 0 || rc.getPort() > 65535)
             throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
-        rc.getCollectionIntervalDuration(); // triggers duration parse validation
+        rc.getCollectionIntervalDuration();    // triggers duration parse validation
+        rc.getQuerySampleIntervalDuration();   // triggers duration parse validation
+        if (rc.isTopQueryEnabled()) {
+            rc.getTopQueryIntervalDuration();  // 60s minimum only enforced when feature is on
+        }
 
         String endpoint = cfg.getExporters().getOtlp().getEndpoint();
         if (endpoint == null || endpoint.isBlank())

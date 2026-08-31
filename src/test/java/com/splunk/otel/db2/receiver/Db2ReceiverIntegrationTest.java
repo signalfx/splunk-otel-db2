@@ -2,6 +2,7 @@ package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.receiver.queries.QuerySampleEvent;
+import com.splunk.otel.db2.receiver.queries.TopQueryEvent;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
@@ -340,6 +341,115 @@ class Db2ReceiverIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
         assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+    }
+
+    @Test
+    void topQueryEmitsObfuscatedRecordAfterTwoCollectionCycles() throws Exception {
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        // Use a short interval so the test completes quickly.
+        // Cycle 1 (t=0s): receiver starts, seeds the delta baseline.
+        // Workload: run a non-filtered recognisable query AFTER the seed collection.
+        // Cycle 2 (t~4s): delta is computed, top_query records are emitted.
+        // SPLUNK_OTEL_TOPQ_PROBE is used as a unique marker in the alias; it contains
+        // no literals so the obfuscated text is identical to the raw text.
+        //
+        // top_query_interval minimum is 60s in production; use startTopQueryScheduler()
+        // directly to inject a 4s interval for test speed without bypassing config validation.
+        Db2ReceiverConfig config = buildConfig();
+        config.setTopQueryEnabled(false); // prevent start() from also scheduling top-query
+
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+        receiver.startTopQueryScheduler(4L); // inject short interval for test
+
+        // Wait for the first (seeding) collection to complete before running workload.
+        Thread.sleep(2000);
+
+        // Run a recognisable query that is NOT filtered by any NOT LIKE clause.
+        // Unbounded cross-join on SYSCAT.COLUMNS × SYSCAT.COLUMNS forces a full nested-loop
+        // scan that will produce STMT_EXEC_TIME > 0 even on minimal containers.
+        // SPLUNK_OTEL_TOPQ_PROBE appears in the alias — unique, no literals, not filtered.
+        Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (Statement st = workConn.createStatement()) {
+            // Run twice: once as a new entry (prevC=null, uses current counters as delta),
+            // and once more to ensure the second cycle sees an exec-time delta.
+            for (int i = 0; i < 2; i++) {
+                try (ResultSet r = st.executeQuery(
+                        "SELECT COUNT(*) AS SPLUNK_OTEL_TOPQ_PROBE " +
+                        "FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B " +
+                        "WHERE A.TABSCHEMA = B.TABSCHEMA")) {
+                    while (r.next()) { /* drain */ }
+                }
+            }
+        } finally {
+            workConn.close();
+        }
+
+        try {
+            // Wait for the probe query to appear as a top_query record.
+            // The probe alias SPLUNK_OTEL_TOPQ_PROBE is unique and not filtered by any NOT LIKE clause.
+            // New entries (compiled after the baseline) are emitted using their current counters.
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(2, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_TOPQ_PROBE")));
+
+            io.opentelemetry.sdk.logs.data.LogRecordData record =
+                logExporter.getFinishedLogRecordItems().stream()
+                    .filter(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_TOPQ_PROBE"))
+                    .findFirst()
+                    .orElseThrow();
+
+            assertThat(record.getSeverity())
+                .isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+            assertThat(record.getAttributes().get(TopQueryEvent.DB_SYSTEM))
+                .isEqualTo("ibm.db2");
+            assertThat(record.getAttributes().get(TopQueryEvent.DB_NAMESPACE))
+                .isEqualTo(config.getDatabase());
+
+            String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);
+            assertThat(queryText).isNotBlank();
+            assertThat(queryText).doesNotContain("'");
+            assertThat(queryText).containsIgnoringCase("SPLUNK_OTEL_TOPQ_PROBE");
+
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_MEMBER)).isNotNull();
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_EXECUTIONS))
+                .isNotNull()
+                .isGreaterThan(0L);
+            // exec time may be 0 for very fast queries; we only require it is non-negative
+            assertThat(record.getAttributes().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME))
+                .isNotNull()
+                .matches(v -> v >= 0.0);
+        } finally {
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
     }
 
     private static List<String> metricNames(InMemoryMetricExporter exporter) {
