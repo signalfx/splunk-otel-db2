@@ -99,6 +99,8 @@ There is no connection pool — the monitoring workload fires queries at interva
 
 Heap grows with the number of configured databases: each database gets its own OTel SDK pipeline, metric readers, OTLP exporters, schedulers, and in-memory caches (top-query delta baseline, query-sample deduplication). At steady state expect roughly 50–80 MB base plus ~15–30 MB per additional database. The dominant per-cycle allocation is the `MON_GET_PKG_CACHE_STMT` result set (all matching rows are loaded; `top_query_count` limits how many are emitted after sorting) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
 
+There is no hard limit on the number of databases in a single process. Beyond ~20–30 databases, heap pressure becomes the practical ceiling — raise `-Xmx` or split databases across multiple processes as needed.
+
 ## Metrics
 
 All metrics carry `db.namespace` (database name) and `db2.member` (member number) attributes.
