@@ -21,6 +21,7 @@ public class Db2Connection {
     private final Db2ReceiverConfig config;
     private Connection connection;
     private int consecutiveFailures = 0;
+    private long nextRetryAt = 0; // epoch ms; 0 = retry immediately
 
     public Db2Connection(Db2ReceiverConfig config) {
         this.config = config;
@@ -31,23 +32,25 @@ public class Db2Connection {
             consecutiveFailures = 0;
             return connection;
         }
-        connectWithBackoff();
-        return connection;
-    }
-
-    private void connectWithBackoff() throws SQLException {
-        if (consecutiveFailures > 0) {
-            long waitSeconds = BACKOFF_SECONDS[Math.min(consecutiveFailures - 1, BACKOFF_SECONDS.length - 1)];
-            log.warn("Db2Connection: reconnect attempt {} — backing off {}s", consecutiveFailures, waitSeconds);
-            try { Thread.sleep(waitSeconds * 1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        long now = System.currentTimeMillis();
+        if (consecutiveFailures > 0 && now < nextRetryAt) {
+            throw new SQLException(String.format(
+                "DB2 reconnect backing off; next attempt in %ds",
+                (nextRetryAt - now) / 1000));
         }
         try {
             connect();
             consecutiveFailures = 0;
+            nextRetryAt = 0;
         } catch (SQLException e) {
             consecutiveFailures++;
+            long waitSeconds = BACKOFF_SECONDS[Math.min(consecutiveFailures - 1, BACKOFF_SECONDS.length - 1)];
+            nextRetryAt = System.currentTimeMillis() + waitSeconds * 1000L;
+            log.warn("Db2Connection: connect attempt {} failed; backing off {}s: {}",
+                consecutiveFailures, waitSeconds, e.getMessage());
             throw e;
         }
+        return connection;
     }
 
     private void connect() throws SQLException {

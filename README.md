@@ -87,9 +87,17 @@ Credential values can be literals or `${env:VAR_NAME}` references.
 
 ## Resource usage
 
-Each monitored database requires two JDBC connections (one for metric callbacks, one dedicated for top-query collection). There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure.
+Each monitored database uses 1–3 JDBC connections depending on which collectors are enabled:
 
-Heap at steady state is approximately 50–80 MB per process, independent of the number of monitored databases (each database gets its own JVM process when managed by a supervisor). The dominant allocations per collection cycle are the `MON_GET_PKG_CACHE_STMT` result set (bounded by `top_query_count` after sort) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
+| Collector | Connection | Always open? |
+|---|---|---|
+| Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
+| Query sample (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
+| Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+
+There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
+
+Heap grows with the number of configured databases: each database gets its own OTel SDK pipeline, metric readers, OTLP exporters, schedulers, and in-memory caches (top-query delta baseline, query-sample deduplication). At steady state expect roughly 50–80 MB base plus ~15–30 MB per additional database. The dominant per-cycle allocation is the `MON_GET_PKG_CACHE_STMT` result set (all matching rows are loaded; `top_query_count` limits how many are emitted after sorting) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
 
 ## Metrics
 
