@@ -23,74 +23,57 @@ public class Db2Receiver {
     private final Db2ReceiverConfig config;
     private final Meter meter;
     private final Logger otelLogger;
-    private final Db2Connection db2Connection;
-    private Db2Connection topQueryConnection; // dedicated; never shared with metric callbacks
-    private ScheduledExecutorService scheduler;
+
+    // Each collector has its own connection so they never contend:
+    //   metricsConnection     — DatabaseQuery, BufferpoolQuery, TablespaceQuery (OTel SDK reader thread)
+    //   querySampleConnection — QuerySampleQuery (db2-query-sampler thread)
+    //   topQueryConnection    — TopQueryQuery (db2-top-query-collector thread)
+    private final Db2Connection metricsConnection;
+    private Db2Connection querySampleConnection;
+    private Db2Connection topQueryConnection;
+
+    private ScheduledExecutorService querySampleScheduler;
     private ScheduledExecutorService topQueryScheduler;
 
     public Db2Receiver(Db2ReceiverConfig config, Meter meter, Logger otelLogger) {
-        this.config        = config;
-        this.meter         = meter;
-        this.otelLogger    = otelLogger;
-        this.db2Connection = new Db2Connection(config);
+        this.config            = config;
+        this.meter             = meter;
+        this.otelLogger        = otelLogger;
+        this.metricsConnection = new Db2Connection(config);
     }
 
     // test constructor
-    public Db2Receiver(Db2ReceiverConfig config, Meter meter, Logger otelLogger, Db2Connection db2Connection) {
-        this.config        = config;
-        this.meter         = meter;
-        this.otelLogger    = otelLogger;
-        this.db2Connection = db2Connection;
+    public Db2Receiver(Db2ReceiverConfig config, Meter meter, Logger otelLogger, Db2Connection metricsConnection) {
+        this.config            = config;
+        this.meter             = meter;
+        this.otelLogger        = otelLogger;
+        this.metricsConnection = metricsConnection;
     }
 
     // backwards compat for tests that don't need logs
-    public Db2Receiver(Db2ReceiverConfig config, Meter meter, Db2Connection db2Connection) {
-        this(config, meter, null, db2Connection);
+    public Db2Receiver(Db2ReceiverConfig config, Meter meter, Db2Connection metricsConnection) {
+        this(config, meter, null, metricsConnection);
     }
 
     public void start() {
         log.info("Starting DB2 receiver for database '{}' at {}:{}",
             config.getDatabase(), config.getHost(), config.getPort());
 
-        Supplier<Connection> connSupplier = () -> {
+        Supplier<Connection> metricsConnSupplier = () -> {
             try {
-                return db2Connection.getOrConnect();
+                return metricsConnection.getOrConnect();
             } catch (SQLException e) {
-                throw new RuntimeException("DB2 connection failed: " + e.getMessage(), e);
+                throw new RuntimeException("DB2 metrics connection failed: " + e.getMessage(), e);
             }
         };
 
-        new DatabaseQuery(connSupplier, config.getDatabase(), meter);
-        new BufferpoolQuery(connSupplier, config.getDatabase(), meter);
-        new TablespaceQuery(connSupplier, config.getDatabase(), meter);
+        new DatabaseQuery(metricsConnSupplier, config.getDatabase(), meter);
+        new BufferpoolQuery(metricsConnSupplier, config.getDatabase(), meter);
+        new TablespaceQuery(metricsConnSupplier, config.getDatabase(), meter);
 
         if (otelLogger != null && config.isQuerySampleEnabled()) {
-            int db2Version = detectDb2Version(connSupplier);
-            QuerySampleQuery querySampleQuery = new QuerySampleQuery(
-                connSupplier,
-                config.getDatabase(),
-                otelLogger,
-                config.getMaxQuerySampleCount(),
-                config.isUseSnapshotMonitor(),
-                db2Version
-            );
-
-            scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "db2-query-sampler");
-                t.setDaemon(true);
-                return t;
-            });
-            long intervalSeconds = config.getQuerySampleIntervalDuration().getSeconds();
-            scheduler.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        querySampleQuery.collect();
-                    } catch (Exception e) {
-                        log.warn("Query sample collection error: {}", e.getMessage());
-                    }
-                },
-                0, intervalSeconds, TimeUnit.SECONDS
-            );
+            int db2Version = detectDb2Version(metricsConnSupplier);
+            startQuerySampleScheduler(db2Version);
         }
 
         if (otelLogger != null && config.isTopQueryEnabled()) {
@@ -99,6 +82,41 @@ public class Db2Receiver {
         }
 
         log.info("DB2 receiver started");
+    }
+
+    void startQuerySampleScheduler(int db2Version) {
+        querySampleConnection = new Db2Connection(config);
+        Supplier<Connection> querySampleConnSupplier = () -> {
+            try {
+                return querySampleConnection.getOrConnect();
+            } catch (SQLException e) {
+                throw new RuntimeException("DB2 query-sample connection failed: " + e.getMessage(), e);
+            }
+        };
+        QuerySampleQuery querySampleQuery = new QuerySampleQuery(
+            querySampleConnSupplier,
+            config.getDatabase(),
+            otelLogger,
+            config.getMaxQuerySampleCount(),
+            config.isUseSnapshotMonitor(),
+            db2Version
+        );
+        querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "db2-query-sampler");
+            t.setDaemon(true);
+            return t;
+        });
+        long intervalSeconds = config.getQuerySampleIntervalDuration().getSeconds();
+        querySampleScheduler.scheduleAtFixedRate(
+            () -> {
+                try {
+                    querySampleQuery.collect();
+                } catch (Exception e) {
+                    log.warn("Query sample collection error: {}", e.getMessage());
+                }
+            },
+            0, intervalSeconds, TimeUnit.SECONDS
+        );
     }
 
     // Package-private: allows integration tests to inject a short interval without violating the
@@ -125,8 +143,6 @@ public class Db2Receiver {
             t.setDaemon(true);
             return t;
         });
-        // scheduleWithFixedDelay: next execution starts after the previous one finishes,
-        // so a slow plan-cache scan never causes back-to-back overlapping executions.
         topQueryScheduler.scheduleWithFixedDelay(
             () -> {
                 try {
@@ -144,7 +160,6 @@ public class Db2Receiver {
             java.sql.DatabaseMetaData meta = connSupplier.get().getMetaData();
             int major = meta.getDatabaseMajorVersion();
             int minor = meta.getDatabaseMinorVersion();
-            // Encode as major * 1000 + minor so 10.5 → 10500, 9.7 → 9700, matching DB2_VERSION_10_5
             return major * 1000 + minor;
         } catch (Exception e) {
             log.warn("Could not detect Db2 version, defaulting to base SQL path: {}", e.getMessage());
@@ -158,13 +173,14 @@ public class Db2Receiver {
     }
 
     public void stopScheduler() {
-        if (scheduler != null) scheduler.shutdownNow();
-        if (topQueryScheduler != null) topQueryScheduler.shutdownNow();
+        if (querySampleScheduler != null) querySampleScheduler.shutdownNow();
+        if (topQueryScheduler    != null) topQueryScheduler.shutdownNow();
     }
 
     public void closeConnection() {
-        db2Connection.close();
-        if (topQueryConnection != null) topQueryConnection.close();
+        metricsConnection.close();
+        if (querySampleConnection != null) querySampleConnection.close();
+        if (topQueryConnection    != null) topQueryConnection.close();
         log.info("DB2 receiver stopped");
     }
 }
