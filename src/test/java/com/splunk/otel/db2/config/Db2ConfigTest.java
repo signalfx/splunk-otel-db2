@@ -36,15 +36,17 @@ class Db2ConfigTest {
     }
 
     @Test
-    void multiDatabaseListFormLoadsAllEntries() throws Exception {
+    void multiDatabaseComponentIdSyntaxLoadsAllEntries() throws Exception {
         Path f = writeConfig(tmp,
             "receivers:\n" +
-            "  - hostname: db1.example.com\n" +
+            "  db2/prod:\n" +
+            "    hostname: db1.example.com\n" +
             "    hostport: 50000\n" +
             "    username: user1\n" +
             "    password: pass1\n" +
             "    database: PROD\n" +
-            "  - hostname: db2.example.com\n" +
+            "  db2/analytics:\n" +
+            "    hostname: db2.example.com\n" +
             "    hostport: 50001\n" +
             "    username: user2\n" +
             "    password: pass2\n" +
@@ -55,10 +57,50 @@ class Db2ConfigTest {
         );
         Db2Config cfg = Db2Config.load(f.toString());
         assertThat(cfg.getReceivers()).hasSize(2);
+        // order guaranteed by LinkedHashMap (SnakeYAML preserves insertion order)
+        Db2ReceiverConfig prod = cfg.getReceivers().stream()
+            .filter(r -> r.getDatabase().equals("PROD")).findFirst().orElseThrow();
+        Db2ReceiverConfig analytics = cfg.getReceivers().stream()
+            .filter(r -> r.getDatabase().equals("ANALYTICS")).findFirst().orElseThrow();
+        assertThat(prod.getComponentName()).isEqualTo("prod");
+        assertThat(prod.getPort()).isEqualTo(50000);
+        assertThat(analytics.getComponentName()).isEqualTo("analytics");
+        assertThat(analytics.getPort()).isEqualTo(50001);
+    }
+
+    @Test
+    void legacyListFormStillLoads() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  - hostname: db1.example.com\n" +
+            "    hostport: 50000\n" +
+            "    username: user1\n" +
+            "    password: pass1\n" +
+            "    database: PROD\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers()).hasSize(1);
         assertThat(cfg.getReceivers().get(0).getDatabase()).isEqualTo("PROD");
-        assertThat(cfg.getReceivers().get(0).getPort()).isEqualTo(50000);
-        assertThat(cfg.getReceivers().get(1).getDatabase()).isEqualTo("ANALYTICS");
-        assertThat(cfg.getReceivers().get(1).getPort()).isEqualTo(50001);
+    }
+
+    @Test
+    void plainDb2KeyHasEmptyComponentName() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers().get(0).getComponentName()).isEmpty();
     }
 
     @Test

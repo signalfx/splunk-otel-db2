@@ -28,7 +28,8 @@ public class Db2Pipeline {
     private final String instanceId;
 
     public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig) {
-        this.instanceId = rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase();
+        String name = rc.getComponentName().isEmpty() ? "" : "[" + rc.getComponentName() + "] ";
+        this.instanceId = name + rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase();
         Resource resource = buildResource(rc);
 
         MetricReader reader = Db2Exporter.build(otlpConfig, rc.getCollectionIntervalDuration());

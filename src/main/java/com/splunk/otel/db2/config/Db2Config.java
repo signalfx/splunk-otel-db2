@@ -36,18 +36,21 @@ public class Db2Config {
             Db2Config cfg = new Db2Config();
 
             Object receiversNode = root.get("receivers");
-            if (receiversNode instanceof List) {
-                // Multi-database: receivers is a list of db2 entries
-                for (Object item : (List<?>) receiversNode) {
-                    Map<String, Object> db2 = (Map<String, Object>) item;
-                    cfg.getReceivers().add(parseDb2Config(db2));
-                }
-            } else if (receiversNode instanceof Map) {
-                // Single-database (legacy): receivers.db2 is a map
+            if (receiversNode instanceof Map) {
+                // Standard form: receivers is a map keyed by component ID (db2 or db2/<name>)
                 Map<String, Object> receiversMap = (Map<String, Object>) receiversNode;
-                Object db2Node = receiversMap.get("db2");
-                if (db2Node != null) {
-                    cfg.getReceivers().add(parseDb2Config((Map<String, Object>) db2Node));
+                for (Map.Entry<String, Object> entry : receiversMap.entrySet()) {
+                    String key = entry.getKey();
+                    if (!key.equals("db2") && !key.startsWith("db2/")) continue;
+                    String name = key.contains("/") ? key.substring(key.indexOf('/') + 1) : "";
+                    Db2ReceiverConfig rc = parseDb2Config((Map<String, Object>) entry.getValue());
+                    rc.setComponentName(name);
+                    cfg.getReceivers().add(rc);
+                }
+            } else if (receiversNode instanceof List) {
+                // Legacy list form — still supported for backwards compatibility
+                for (Object item : (List<?>) receiversNode) {
+                    cfg.getReceivers().add(parseDb2Config((Map<String, Object>) item));
                 }
             }
 

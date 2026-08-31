@@ -53,11 +53,12 @@ exporters:
 
 ### Multiple databases
 
-Pass `receivers` as a list. Each entry is an independent pipeline with its own JDBC connection, scheduler, and OTel SDK instance. All pipelines share the same OTLP exporter endpoint.
+Use the `receiver/name` component ID syntax — the same pattern used by the OTel Collector. Each key under `receivers` is an independent pipeline with its own JDBC connections, schedulers, and OTel SDK instance. All pipelines share the same OTLP exporter endpoint.
 
 ```yaml
 receivers:
-  - hostname: "db2-prod-1.example.com"
+  db2/prod:
+    hostname: "db2-prod-1.example.com"
     hostport: 50000
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
@@ -66,7 +67,9 @@ receivers:
     connect_timeout_seconds: 10
     tls:
       insecure: false
-  - hostname: "db2-prod-2.example.com"
+
+  db2/analytics:
+    hostname: "db2-prod-2.example.com"
     hostport: 50000
     username: "${env:DB2_USER2}"
     password: "${env:DB2_PASSWORD2}"

@@ -1,4 +1,4 @@
-# Single-database form (receivers.db2 as a map):
+# Single-database form:
 receivers:
   db2:
     hostname: "localhost"
@@ -7,28 +7,27 @@ receivers:
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"
     collection_interval: "30s"
-    connect_timeout_seconds: 10      # JDBC login + socket timeout (default: 10)
+    connect_timeout_seconds: 10
     top_query_count: 250
-    query_sample_enabled: false      # set true to enable query sampling (opt-in)
+    top_query_enabled: false
+    top_query_interval: "60s"
+    query_sample_enabled: false
     max_query_sample_count: 1000
     query_sample_interval: "10s"
-    top_query_interval: "60s"
     use_snapshot_monitor: false
     tls:
-      insecure: false  # set to true if your DB2 instance does not have TLS configured
+      insecure: false
 
 exporters:
   otlp:
     endpoint: "http://localhost:4317"
 
-# Note: pipeline wiring (metrics + logs → otlp) is handled by Db2Pipeline directly.
-# There is no OTel Collector service block — this receiver runs as a standalone process.
-
 # ---
-# Multi-database form (receivers as a list):
+# Multi-database form using receiver/name component ID syntax:
 #
 # receivers:
-#   - hostname: "db2-prod-1.example.com"
+#   db2/prod:
+#     hostname: "db2-prod-1.example.com"
 #     hostport: 50000
 #     username: "${env:DB2_USER}"
 #     password: "${env:DB2_PASSWORD}"
@@ -37,7 +36,8 @@ exporters:
 #     connect_timeout_seconds: 10
 #     tls:
 #       insecure: false
-#   - hostname: "db2-prod-2.example.com"
+#   db2/analytics:
+#     hostname: "db2-prod-2.example.com"
 #     hostport: 50000
 #     username: "${env:DB2_USER2}"
 #     password: "${env:DB2_PASSWORD2}"

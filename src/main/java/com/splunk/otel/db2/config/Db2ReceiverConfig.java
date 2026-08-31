@@ -3,6 +3,7 @@ package com.splunk.otel.db2.config;
 import java.time.Duration;
 
 public class Db2ReceiverConfig {
+    private String componentName = ""; // name after the slash in "db2/<name>"; empty for plain "db2"
     private String hostname = "localhost";
     private int hostport = 50000;
     private String username;
@@ -18,6 +19,9 @@ public class Db2ReceiverConfig {
     private String topQueryInterval = "60s";
     private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
+
+    public String getComponentName() { return componentName; }
+    public void setComponentName(String componentName) { this.componentName = componentName; }
 
     public String getHostname() { return resolveEnv(hostname); }
     public void setHostname(String hostname) { this.hostname = hostname; }
