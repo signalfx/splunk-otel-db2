@@ -16,6 +16,7 @@ public class Db2ReceiverConfig {
     private boolean useSnapshotMonitor = false;
     private String querySampleInterval = "10s";
     private String topQueryInterval = "60s";
+    private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
 
     public String getHostname() { return resolveEnv(hostname); }
@@ -83,6 +84,13 @@ public class Db2ReceiverConfig {
         return d;
     }
     public void setTopQueryInterval(String topQueryInterval) { this.topQueryInterval = topQueryInterval; }
+
+    public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
+    public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {
+        if (connectTimeoutSeconds <= 0)
+            throw new IllegalArgumentException("connect_timeout_seconds must be > 0, got " + connectTimeoutSeconds);
+        this.connectTimeoutSeconds = connectTimeoutSeconds;
+    }
 
     public TlsConfig getTls() { return tls; }
     public void setTls(TlsConfig tls) { this.tls = tls; }

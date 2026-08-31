@@ -7,24 +7,20 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 public class Db2Config {
 
-    private Receivers receivers = new Receivers();
+    private List<Db2ReceiverConfig> receivers = new ArrayList<>();
     private Exporters exporters = new Exporters();
 
-    public Receivers getReceivers() { return receivers; }
-    public void setReceivers(Receivers receivers) { this.receivers = receivers; }
+    public List<Db2ReceiverConfig> getReceivers() { return receivers; }
+    public void setReceivers(List<Db2ReceiverConfig> receivers) { this.receivers = receivers; }
 
     public Exporters getExporters() { return exporters; }
     public void setExporters(Exporters exporters) { this.exporters = exporters; }
-
-    public static class Receivers {
-        private Db2ReceiverConfig db2 = new Db2ReceiverConfig();
-        public Db2ReceiverConfig getDb2() { return db2; }
-        public void setDb2(Db2ReceiverConfig db2) { this.db2 = db2; }
-    }
 
     public static class Exporters {
         private OtlpExporterConfig otlp = new OtlpExporterConfig();
@@ -39,31 +35,24 @@ public class Db2Config {
             Map<String, Object> root = yaml.load(is);
             Db2Config cfg = new Db2Config();
 
-            Map<String, Object> receivers = (Map<String, Object>) root.get("receivers");
-            if (receivers != null) {
-                Map<String, Object> db2 = (Map<String, Object>) receivers.get("db2");
-                if (db2 != null) {
-                    Db2ReceiverConfig rc = cfg.getReceivers().getDb2();
-                    if (db2.get("hostname") != null) rc.setHostname(asString(db2, "hostname"));
-                    if (db2.get("hostport") != null) rc.setHostport(asInt(db2, "hostport"));
-                    if (db2.get("username") != null) rc.setUsername(asString(db2, "username"));
-                    if (db2.get("password") != null) rc.setPassword(asString(db2, "password"));
-                    if (db2.get("database") != null) rc.setDatabase(asString(db2, "database"));
-                    if (db2.get("collection_interval") != null) rc.setCollectionInterval(asString(db2, "collection_interval"));
-                    if (db2.get("top_query_count") != null) rc.setTopQueryCount(asInt(db2, "top_query_count"));
-                    if (db2.get("top_query_enabled") != null) rc.setTopQueryEnabled(asBool(db2, "top_query_enabled"));
-                    if (db2.get("max_query_sample_count") != null) rc.setMaxQuerySampleCount(asInt(db2, "max_query_sample_count"));
-                    if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
-                    if (db2.get("top_query_interval") != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
-                    if (db2.get("query_sample_enabled") != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
-                    if (db2.get("use_snapshot_monitor") != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
-                    if (db2.get("tls") != null) {
-                        Map<String, Object> tls = (Map<String, Object>) db2.get("tls");
-                        if (tls.get("insecure") != null) {
-                            rc.getTls().setInsecure(asBool(tls, "insecure"));
-                        }
-                    }
+            Object receiversNode = root.get("receivers");
+            if (receiversNode instanceof List) {
+                // Multi-database: receivers is a list of db2 entries
+                for (Object item : (List<?>) receiversNode) {
+                    Map<String, Object> db2 = (Map<String, Object>) item;
+                    cfg.getReceivers().add(parseDb2Config(db2));
                 }
+            } else if (receiversNode instanceof Map) {
+                // Single-database (legacy): receivers.db2 is a map
+                Map<String, Object> receiversMap = (Map<String, Object>) receiversNode;
+                Object db2Node = receiversMap.get("db2");
+                if (db2Node != null) {
+                    cfg.getReceivers().add(parseDb2Config((Map<String, Object>) db2Node));
+                }
+            }
+
+            if (cfg.getReceivers().isEmpty()) {
+                throw new IllegalStateException("No receivers.db2 entries found in config");
             }
 
             Map<String, Object> exporters = (Map<String, Object>) root.get("exporters");
@@ -74,9 +63,37 @@ public class Db2Config {
                 }
             }
 
-            validate(cfg);
+            for (Db2ReceiverConfig rc : cfg.getReceivers()) {
+                validate(rc, cfg.getExporters().getOtlp());
+            }
             return cfg;
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Db2ReceiverConfig parseDb2Config(Map<String, Object> db2) {
+        Db2ReceiverConfig rc = new Db2ReceiverConfig();
+        if (db2.get("hostname")              != null) rc.setHostname(asString(db2, "hostname"));
+        if (db2.get("hostport")              != null) rc.setHostport(asInt(db2, "hostport"));
+        if (db2.get("username")              != null) rc.setUsername(asString(db2, "username"));
+        if (db2.get("password")              != null) rc.setPassword(asString(db2, "password"));
+        if (db2.get("database")              != null) rc.setDatabase(asString(db2, "database"));
+        if (db2.get("collection_interval")   != null) rc.setCollectionInterval(asString(db2, "collection_interval"));
+        if (db2.get("top_query_count")       != null) rc.setTopQueryCount(asInt(db2, "top_query_count"));
+        if (db2.get("top_query_enabled")     != null) rc.setTopQueryEnabled(asBool(db2, "top_query_enabled"));
+        if (db2.get("max_query_sample_count")!= null) rc.setMaxQuerySampleCount(asInt(db2, "max_query_sample_count"));
+        if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
+        if (db2.get("top_query_interval")    != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
+        if (db2.get("query_sample_enabled")  != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
+        if (db2.get("use_snapshot_monitor")  != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
+        if (db2.get("connect_timeout_seconds")!= null) rc.setConnectTimeoutSeconds(asInt(db2, "connect_timeout_seconds"));
+        if (db2.get("tls") != null) {
+            Map<String, Object> tls = (Map<String, Object>) db2.get("tls");
+            if (tls.get("insecure") != null) {
+                rc.getTls().setInsecure(asBool(tls, "insecure"));
+            }
+        }
+        return rc;
     }
 
     private static String asString(Map<String, Object> map, String key) {
@@ -106,9 +123,7 @@ public class Db2Config {
         throw new IllegalStateException("Config field '" + key + "' must be a boolean (true/false), got: " + v.getClass().getSimpleName() + " (" + v + ")");
     }
 
-    private static void validate(Db2Config cfg) {
-        Db2ReceiverConfig rc = cfg.getReceivers().getDb2();
-        // Resolve env refs eagerly so missing variables fail at startup, not mid-collection.
+    private static void validate(Db2ReceiverConfig rc, OtlpExporterConfig otlp) {
         String username = rc.getUsername();
         String password = rc.getPassword();
         String database = rc.getDatabase();
@@ -124,13 +139,13 @@ public class Db2Config {
             throw new IllegalStateException("receivers.db2.hostname is required");
         if (rc.getPort() <= 0 || rc.getPort() > 65535)
             throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
-        rc.getCollectionIntervalDuration();    // triggers duration parse validation
-        rc.getQuerySampleIntervalDuration();   // triggers duration parse validation
+        rc.getCollectionIntervalDuration();
+        rc.getQuerySampleIntervalDuration();
         if (rc.isTopQueryEnabled()) {
-            rc.getTopQueryIntervalDuration();  // 60s minimum only enforced when feature is on
+            rc.getTopQueryIntervalDuration();
         }
 
-        String endpoint = cfg.getExporters().getOtlp().getEndpoint();
+        String endpoint = otlp.getEndpoint();
         if (endpoint == null || endpoint.isBlank())
             throw new IllegalStateException("exporters.otlp.endpoint is required");
     }

@@ -24,31 +24,72 @@ DB2_USER=db2inst1 DB2_PASSWORD=secret ./gradlew run --args="my-config.yaml"
 
 ## Configuration
 
+### Single database
+
 ```yaml
 receivers:
   db2:
-    hostname: "localhost"       # DB2 host
-    hostport: 50000             # DB2 port (default 50000)
-    username: "${env:DB2_USER}" # supports ${env:VAR} substitution
+    hostname: "localhost"              # DB2 host
+    hostport: 50000                    # DB2 port (default 50000)
+    username: "${env:DB2_USER}"        # supports ${env:VAR} substitution
     password: "${env:DB2_PASSWORD}"
-    database: "SAMPLE"          # database name (uppercase)
-    collection_interval: "30s"  # metrics collection interval
-    top_query_enabled: false         # set true to enable top query collection (opt-in)
-    top_query_count: 250             # top N queries to emit per interval (must be > 0)
-    top_query_interval: "60s"        # how often to collect top queries (minimum 60s)
-    query_sample_enabled: false      # set true to enable query sampling (opt-in)
-    max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
-    query_sample_interval: "10s"     # how often to sample active queries
-    use_snapshot_monitor: false      # set true to use SNAP_GET_STMT fallback path
+    database: "SAMPLE"                 # database name (uppercase)
+    collection_interval: "30s"         # metrics collection interval
+    connect_timeout_seconds: 10        # JDBC login + socket timeout (default: 10)
+    top_query_enabled: false           # set true to enable top query collection (opt-in)
+    top_query_count: 250               # top N queries to emit per interval (must be > 0)
+    top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
+    query_sample_enabled: false        # set true to enable query sampling (opt-in)
+    max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
+    query_sample_interval: "10s"       # how often to sample active queries
+    use_snapshot_monitor: false        # set true to use SNAP_GET_STMT fallback path
     tls:
-      insecure: true            # set false to enable TLS
+      insecure: true                   # set false to enable TLS
 
 exporters:
   otlp:
     endpoint: "http://localhost:4317"
 ```
 
+### Multiple databases
+
+Pass `receivers` as a list. Each entry is an independent pipeline with its own JDBC connection, scheduler, and OTel SDK instance. All pipelines share the same OTLP exporter endpoint.
+
+```yaml
+receivers:
+  - hostname: "db2-prod-1.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "PROD"
+    collection_interval: "30s"
+    connect_timeout_seconds: 10
+    tls:
+      insecure: false
+  - hostname: "db2-prod-2.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER2}"
+    password: "${env:DB2_PASSWORD2}"
+    database: "ANALYTICS"
+    collection_interval: "60s"
+    connect_timeout_seconds: 10
+    tls:
+      insecure: false
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+```
+
+Each pipeline is identified by the `service.instance.id` resource attribute (`host:port/database`), so metrics and logs from different databases are distinguishable in the backend.
+
 Credential values can be literals or `${env:VAR_NAME}` references.
+
+## Resource usage
+
+Each monitored database requires two JDBC connections (one for metric callbacks, one dedicated for top-query collection). There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure.
+
+Heap at steady state is approximately 50–80 MB per process, independent of the number of monitored databases (each database gets its own JVM process when managed by a supervisor). The dominant allocations per collection cycle are the `MON_GET_PKG_CACHE_STMT` result set (bounded by `top_query_count` after sort) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
 
 ## Metrics
 

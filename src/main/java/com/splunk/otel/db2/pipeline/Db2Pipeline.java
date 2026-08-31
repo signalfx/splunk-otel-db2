@@ -2,6 +2,7 @@ package com.splunk.otel.db2.pipeline;
 
 import com.splunk.otel.db2.config.Db2Config;
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.exporter.Db2Exporter;
 import com.splunk.otel.db2.processor.Db2Processor;
 import com.splunk.otel.db2.receiver.Db2Receiver;
@@ -24,34 +25,34 @@ public class Db2Pipeline {
     private final SdkMeterProvider meterProvider;
     private final SdkLoggerProvider loggerProvider;
     private final Db2Receiver receiver;
+    private final String instanceId;
 
-    public Db2Pipeline(Db2Config config) {
-        Resource resource = buildResource(config);
+    public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig) {
+        this.instanceId = rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase();
+        Resource resource = buildResource(rc);
 
-        MetricReader reader = Db2Exporter.build(
-            config.getExporters().getOtlp(),
-            config.getReceivers().getDb2().getCollectionIntervalDuration()
-        );
+        MetricReader reader = Db2Exporter.build(otlpConfig, rc.getCollectionIntervalDuration());
         this.meterProvider  = buildMeterProvider(reader, resource);
-        this.loggerProvider = buildLoggerProvider(config, resource);
+        this.loggerProvider = buildLoggerProvider(otlpConfig, resource);
 
         Meter  meter      = meterProvider.get("splunk-otel-db2");
         Logger otelLogger = loggerProvider.get("github.com/signalfx/splunk-otel-db2");
-        this.receiver = new Db2Receiver(config.getReceivers().getDb2(), meter, otelLogger);
+        this.receiver = new Db2Receiver(rc, meter, otelLogger);
     }
 
-    // test constructor
+    // test constructor — kept for integration tests that inject a custom MetricReader
     public Db2Pipeline(Db2Config config, MetricReader testReader) {
-        Resource resource   = buildResource(config);
+        Db2ReceiverConfig rc = config.getReceivers().get(0);
+        this.instanceId = rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase();
+        Resource resource   = buildResource(rc);
         this.meterProvider  = buildMeterProvider(testReader, resource);
         this.loggerProvider = null;
 
         Meter meter = meterProvider.get("splunk-otel-db2");
-        this.receiver = new Db2Receiver(config.getReceivers().getDb2(), meter, (Logger) null);
+        this.receiver = new Db2Receiver(rc, meter, (Logger) null);
     }
 
-    private Resource buildResource(Db2Config config) {
-        Db2ReceiverConfig rc = config.getReceivers().getDb2();
+    private Resource buildResource(Db2ReceiverConfig rc) {
         return Resource.getDefault().merge(Resource.create(Attributes.of(
             AttributeKey.stringKey("service.name"),        "splunk-otel-db2",
             AttributeKey.stringKey("service.instance.id"), rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase(),
@@ -70,9 +71,9 @@ public class Db2Pipeline {
         return builder.build();
     }
 
-    private SdkLoggerProvider buildLoggerProvider(Db2Config config, Resource resource) {
+    private SdkLoggerProvider buildLoggerProvider(OtlpExporterConfig otlpConfig, Resource resource) {
         OtlpGrpcLogRecordExporter logExporter = OtlpGrpcLogRecordExporter.builder()
-            .setEndpoint(config.getExporters().getOtlp().getEndpoint())
+            .setEndpoint(otlpConfig.getEndpoint())
             .build();
 
         return SdkLoggerProvider.builder()
@@ -83,16 +84,14 @@ public class Db2Pipeline {
 
     public void start() {
         receiver.start();
-        log.info("DB2 pipeline started — metrics + logs → {}", "OTel Collector");
+        log.info("DB2 pipeline started for {} → OTel Collector", instanceId);
     }
 
     public void stop() {
-        // Stop log scheduling first, then flush metrics (meterProvider.shutdown performs a final
-        // collection), and only then close the DB connection to avoid a dangling reconnect.
         receiver.stopScheduler();
         meterProvider.shutdown();
         if (loggerProvider != null) loggerProvider.shutdown();
         receiver.closeConnection();
-        log.info("DB2 pipeline stopped");
+        log.info("DB2 pipeline stopped for {}", instanceId);
     }
 }

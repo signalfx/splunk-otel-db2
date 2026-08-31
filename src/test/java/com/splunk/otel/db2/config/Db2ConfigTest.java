@@ -2,7 +2,6 @@ package com.splunk.otel.db2.config;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import com.splunk.otel.db2.config.Db2ReceiverConfig;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -31,8 +30,58 @@ class Db2ConfigTest {
             "    endpoint: http://collector:4317\n"
         );
         Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers().getDb2().getDatabase()).isEqualTo("SAMPLE");
+        assertThat(cfg.getReceivers()).hasSize(1);
+        assertThat(cfg.getReceivers().get(0).getDatabase()).isEqualTo("SAMPLE");
         assertThat(cfg.getExporters().getOtlp().getEndpoint()).isEqualTo("http://collector:4317");
+    }
+
+    @Test
+    void multiDatabaseListFormLoadsAllEntries() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  - hostname: db1.example.com\n" +
+            "    hostport: 50000\n" +
+            "    username: user1\n" +
+            "    password: pass1\n" +
+            "    database: PROD\n" +
+            "  - hostname: db2.example.com\n" +
+            "    hostport: 50001\n" +
+            "    username: user2\n" +
+            "    password: pass2\n" +
+            "    database: ANALYTICS\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers()).hasSize(2);
+        assertThat(cfg.getReceivers().get(0).getDatabase()).isEqualTo("PROD");
+        assertThat(cfg.getReceivers().get(0).getPort()).isEqualTo(50000);
+        assertThat(cfg.getReceivers().get(1).getDatabase()).isEqualTo("ANALYTICS");
+        assertThat(cfg.getReceivers().get(1).getPort()).isEqualTo(50001);
+    }
+
+    @Test
+    void connectTimeoutDefaultIsTen() {
+        assertThat(new Db2ReceiverConfig().getConnectTimeoutSeconds()).isEqualTo(10);
+    }
+
+    @Test
+    void connectTimeoutIsConfigurable() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    connect_timeout_seconds: 30\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers().get(0).getConnectTimeoutSeconds()).isEqualTo(30);
     }
 
     @Test
@@ -120,7 +169,7 @@ class Db2ConfigTest {
             "    endpoint: http://collector:4317\n"
         );
         Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers().getDb2().isQuerySampleEnabled()).isTrue();
+        assertThat(cfg.getReceivers().get(0).isQuerySampleEnabled()).isTrue();
     }
 
     @Test
