@@ -19,6 +19,9 @@ import io.opentelemetry.sdk.metrics.export.MetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import org.slf4j.LoggerFactory;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
 public class Db2Pipeline {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(Db2Pipeline.class);
 
@@ -29,7 +32,8 @@ public class Db2Pipeline {
 
     public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig) {
         String name = rc.getComponentName().isEmpty() ? "" : "[" + rc.getComponentName() + "] ";
-        this.instanceId = name + rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase();
+        String serverAddress = resolveServerAddress(rc.getHost());
+        this.instanceId = name + serverAddress + ":" + rc.getPort() + "/" + rc.getDatabase();
         Resource resource = buildResource(rc);
 
         MetricReader reader = Db2Exporter.build(otlpConfig, rc.getCollectionIntervalDuration());
@@ -54,14 +58,40 @@ public class Db2Pipeline {
     }
 
     private Resource buildResource(Db2ReceiverConfig rc) {
+        String serverAddress = resolveServerAddress(rc.getHost());
         return Resource.getDefault().merge(Resource.create(Attributes.of(
             AttributeKey.stringKey("service.name"),        "splunk-otel-db2",
-            AttributeKey.stringKey("service.instance.id"), rc.getHost() + ":" + rc.getPort() + "/" + rc.getDatabase(),
-            AttributeKey.stringKey("server.address"),      rc.getHost(),
+            AttributeKey.stringKey("service.instance.id"), serverAddress + ":" + rc.getPort() + "/" + rc.getDatabase(),
+            AttributeKey.stringKey("server.address"),      serverAddress,
             AttributeKey.longKey("server.port"),           (long) rc.getPort(),
             AttributeKey.stringKey("db.system.name"),      "ibm.db2",
             AttributeKey.stringKey("db.namespace"),        rc.getDatabase()
         )));
+    }
+
+    // Mirrors sqlserverreceiver resolveServerEndpoint (PR #49886): when the configured host is
+    // a loopback address or empty, substitute the local hostname so that co-located sidecars
+    // produce distinct service.instance.id values in the backend.
+    static String resolveServerAddress(String host) {
+        if (host == null || host.isEmpty() || isLoopback(host)) {
+            try {
+                return InetAddress.getLocalHost().getHostName();
+            } catch (UnknownHostException e) {
+                log.warn("Could not resolve local hostname for server.address, using configured value '{}': {}", host, e.getMessage());
+                return host != null ? host : "localhost";
+            }
+        }
+        return host;
+    }
+
+    private static boolean isLoopback(String host) {
+        if (host.equalsIgnoreCase("localhost")) return true;
+        try {
+            InetAddress addr = InetAddress.getByName(host);
+            return addr.isLoopbackAddress();
+        } catch (UnknownHostException e) {
+            return false;
+        }
     }
 
     private SdkMeterProvider buildMeterProvider(MetricReader reader, Resource resource) {
