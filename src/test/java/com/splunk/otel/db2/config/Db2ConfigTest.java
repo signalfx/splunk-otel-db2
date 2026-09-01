@@ -335,6 +335,56 @@ class Db2ConfigTest {
             .hasMessageContaining("db3");
     }
 
+    @Test
+    void loopbackAliasesDetectedAsDuplicate() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2/a:\n" +
+            "    hostname: localhost\n" +
+            "    hostport: 50000\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "  db2/b:\n" +
+            "    hostname: 127.0.0.1\n" +
+            "    hostport: 50000\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Duplicate");
+    }
+
+    @Test
+    void hostnameCasingDetectedAsDuplicate() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2/a:\n" +
+            "    hostname: MyDB.example.com\n" +
+            "    hostport: 50000\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "  db2/b:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    hostport: 50000\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Duplicate");
+    }
+
     private static Path writeConfig(Path dir, String content) throws IOException {
         Path f = dir.resolve("config.yaml");
         Files.writeString(f, content);

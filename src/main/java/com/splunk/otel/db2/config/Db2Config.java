@@ -1,5 +1,6 @@
 package com.splunk.otel.db2.config;
 
+import com.splunk.otel.db2.util.HostNormalizer;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
@@ -89,10 +90,14 @@ public class Db2Config {
                 throw new IllegalStateException("No receivers.db2 entries found in config");
             }
 
-            // A5: reject duplicate targets before any connection is attempted
+            // A5: reject duplicate targets before any connection is attempted.
+            // Normalize the host the same way Db2Pipeline does so that localhost/127.0.0.1/::1
+            // aliases and hostname casing differences are caught here rather than producing
+            // colliding service.instance.id values at runtime.
             Set<String> seen = new HashSet<>();
             for (Db2ReceiverConfig rc : cfg.getReceivers()) {
-                String target = rc.getHostname() + ":" + rc.getHostport() + "/" + rc.getDatabase();
+                String normalizedHost = HostNormalizer.resolveServerAddress(rc.getHostname()).toLowerCase();
+                String target = normalizedHost + ":" + rc.getHostport() + "/" + rc.getDatabase();
                 if (!seen.add(target)) {
                     throw new IllegalStateException(
                         "Duplicate receiver target '" + target + "': two receivers point at the same database");
