@@ -30,7 +30,9 @@ public class Db2Pipeline {
     private final Db2Receiver receiver;
     private final String instanceId;
 
-    public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig) {
+    // sharedLogExporter is built once in Main and passed to all pipelines (A6)
+    public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig,
+                       OtlpGrpcLogRecordExporter sharedLogExporter) {
         String name = rc.getComponentName().isEmpty() ? "" : "[" + rc.getComponentName() + "] ";
         String serverAddress = resolveServerAddress(rc.getHost());
         this.instanceId = name + serverAddress + ":" + rc.getPort() + "/" + rc.getDatabase();
@@ -38,7 +40,7 @@ public class Db2Pipeline {
 
         MetricReader reader = Db2Exporter.build(otlpConfig, rc.getCollectionIntervalDuration());
         this.meterProvider  = buildMeterProvider(reader, resource);
-        this.loggerProvider = buildLoggerProvider(otlpConfig, resource);
+        this.loggerProvider = buildLoggerProvider(sharedLogExporter, resource);
 
         Meter  meter      = meterProvider.get("splunk-otel-db2");
         Logger otelLogger = loggerProvider.get("github.com/signalfx/splunk-otel-db2");
@@ -102,14 +104,16 @@ public class Db2Pipeline {
         return builder.build();
     }
 
-    private SdkLoggerProvider buildLoggerProvider(OtlpExporterConfig otlpConfig, Resource resource) {
-        OtlpGrpcLogRecordExporter logExporter = OtlpGrpcLogRecordExporter.builder()
-            .setEndpoint(otlpConfig.getEndpoint())
-            .build();
-
+    private SdkLoggerProvider buildLoggerProvider(OtlpGrpcLogRecordExporter logExporter, Resource resource) {
         return SdkLoggerProvider.builder()
             .addLogRecordProcessor(BatchLogRecordProcessor.builder(logExporter).build())
             .setResource(resource)
+            .build();
+    }
+
+    public static OtlpGrpcLogRecordExporter buildSharedLogExporter(OtlpExporterConfig otlpConfig) {
+        return OtlpGrpcLogRecordExporter.builder()
+            .setEndpoint(otlpConfig.getEndpoint())
             .build();
     }
 

@@ -19,12 +19,18 @@ public class Db2Connection {
     private static final long[] BACKOFF_SECONDS = {2, 4, 8, 16, 30};
 
     private final Db2ReceiverConfig config;
+    private final String label; // e.g. "[prod/TESTDB]" — prepended to log messages (A3)
     private Connection connection;
     private int consecutiveFailures = 0;
     private long nextRetryAt = 0; // epoch ms; 0 = retry immediately
 
-    public Db2Connection(Db2ReceiverConfig config) {
+    public Db2Connection(Db2ReceiverConfig config, String label) {
         this.config = config;
+        this.label  = label.isEmpty() ? "" : "[" + label + "] ";
+    }
+
+    public Db2Connection(Db2ReceiverConfig config) {
+        this(config, "");
     }
 
     public synchronized Connection getOrConnect() throws SQLException {
@@ -35,7 +41,7 @@ public class Db2Connection {
                     return connection;
                 }
             } catch (SQLException e) {
-                log.warn("Db2Connection: validation threw, treating as broken: {}", e.getMessage());
+                log.warn("{}validation threw, treating as broken: {}", label, e.getMessage());
             }
             // isValid returned false or threw — discard the broken connection
             try { connection.close(); } catch (SQLException ignored) {}
@@ -44,8 +50,8 @@ public class Db2Connection {
         long now = System.currentTimeMillis();
         if (consecutiveFailures > 0 && now < nextRetryAt) {
             throw new SQLException(String.format(
-                "DB2 reconnect backing off; next attempt in %ds",
-                (nextRetryAt - now) / 1000));
+                "%sDB2 reconnect backing off; next attempt in %ds",
+                label, (nextRetryAt - now) / 1000));
         }
         try {
             connect();
@@ -55,8 +61,8 @@ public class Db2Connection {
             consecutiveFailures++;
             long waitSeconds = BACKOFF_SECONDS[Math.min(consecutiveFailures - 1, BACKOFF_SECONDS.length - 1)];
             nextRetryAt = System.currentTimeMillis() + waitSeconds * 1000L;
-            log.warn("Db2Connection: connect attempt {} failed; backing off {}s: {}",
-                consecutiveFailures, waitSeconds, e.getMessage());
+            log.warn("{}connect attempt {} failed; backing off {}s: {}",
+                label, consecutiveFailures, waitSeconds, e.getMessage());
             throw e;
         }
         return connection;
@@ -69,7 +75,7 @@ public class Db2Connection {
         }
         String url = String.format("jdbc:db2://%s:%d/%s",
             config.getHost(), config.getPort(), config.getDatabase());
-        log.info("Connecting to DB2 at {} (tls.insecure={})", url, config.getTls().isInsecure());
+        log.info("{}Connecting to DB2 at {} (tls.insecure={})", label, url, config.getTls().isInsecure());
         Properties props = new Properties();
         props.setProperty("user",              config.getUsername());
         props.setProperty("password",          config.getPassword());
@@ -85,9 +91,10 @@ public class Db2Connection {
         } catch (SQLException e) {
             try { connection.close(); } catch (SQLException ignored) {}
             connection = null;
+            log.warn("{}WLM_SET_CLIENT_INFO failed; self-filter may not work correctly: {}", label, e.getMessage());
             throw e;
         }
-        log.info("Connected to DB2 successfully");
+        log.info("{}Connected to DB2 successfully", label);
     }
 
     public void close() {

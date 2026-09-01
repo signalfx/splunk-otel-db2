@@ -266,6 +266,50 @@ class Db2MultiReceiverIntegrationTest {
         }
     }
 
+    @Test
+    void unreachableDatabaseDoesNotBlockHealthyOne() {
+        // A7: one receiver targeting an unroutable address must not prevent the other from collecting
+        InMemoryMetricExporter healthyExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider healthyProvider = buildMeterProvider(healthyExporter);
+
+        InMemoryMetricExporter deadExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider deadProvider = buildMeterProvider(deadExporter);
+
+        Db2ReceiverConfig healthyConfig = buildConfig();
+
+        Db2ReceiverConfig deadConfig = new Db2ReceiverConfig();
+        deadConfig.setHostname("10.255.255.1"); // unroutable — will time out
+        deadConfig.setHostport(50000);
+        deadConfig.setUsername("db2inst1");
+        deadConfig.setPassword("password");
+        deadConfig.setDatabase("NOPE");
+        deadConfig.setCollectionInterval("2s");
+        deadConfig.setConnectTimeoutSeconds(2);
+        deadConfig.getTls().setInsecure(true);
+
+        Db2Receiver healthyReceiver = new Db2Receiver(healthyConfig,
+            healthyProvider.get("splunk-otel-db2"), (io.opentelemetry.api.logs.Logger) null);
+        Db2Receiver deadReceiver = new Db2Receiver(deadConfig,
+            deadProvider.get("splunk-otel-db2"), (io.opentelemetry.api.logs.Logger) null);
+
+        deadReceiver.start();
+        healthyReceiver.start();
+
+        try {
+            // The healthy receiver must emit metrics within 20s regardless of the dead one cycling backoff
+            Awaitility.await()
+                .atMost(20, TimeUnit.SECONDS)
+                .until(() -> metricNames(healthyExporter).contains("db2.connection.count"));
+
+            assertThat(metricNames(healthyExporter)).contains("db2.connection.count");
+        } finally {
+            healthyReceiver.stop();
+            deadReceiver.stop();
+            healthyProvider.shutdown();
+            deadProvider.shutdown();
+        }
+    }
+
     private static List<String> metricNames(InMemoryMetricExporter exporter) {
         return exporter.getFinishedMetricItems().stream()
             .map(m -> m.getName())

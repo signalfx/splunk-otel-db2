@@ -69,7 +69,7 @@ class Db2ConfigTest {
     }
 
     @Test
-    void legacyListFormStillLoads() throws Exception {
+    void listFormIsRejected() throws Exception {
         Path f = writeConfig(tmp,
             "receivers:\n" +
             "  - hostname: db1.example.com\n" +
@@ -81,9 +81,34 @@ class Db2ConfigTest {
             "  otlp:\n" +
             "    endpoint: http://collector:4317\n"
         );
-        Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers()).hasSize(1);
-        assertThat(cfg.getReceivers().get(0).getDatabase()).isEqualTo("PROD");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("receivers");
+    }
+
+    @Test
+    void duplicateTargetFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2/a:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    hostport: 50000\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "  db2/b:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    hostport: 50000\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Duplicate");
     }
 
     @Test

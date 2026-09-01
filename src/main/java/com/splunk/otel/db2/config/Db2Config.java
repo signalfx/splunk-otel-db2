@@ -8,8 +8,10 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 public class Db2Config {
@@ -77,15 +79,24 @@ public class Db2Config {
                     rc.setComponentName(name);
                     cfg.getReceivers().add(rc);
                 }
-            } else if (receiversNode instanceof List) {
-                // Legacy list form — still supported for backwards compatibility
-                for (Object item : (List<?>) receiversNode) {
-                    cfg.getReceivers().add(parseDb2Config((Map<String, Object>) item));
-                }
+            } else if (receiversNode != null) {
+                throw new IllegalStateException(
+                    "'receivers' must be a map of component IDs (e.g. db2: or db2/name:), got: " +
+                    receiversNode.getClass().getSimpleName());
             }
 
             if (cfg.getReceivers().isEmpty()) {
                 throw new IllegalStateException("No receivers.db2 entries found in config");
+            }
+
+            // A5: reject duplicate targets before any connection is attempted
+            Set<String> seen = new HashSet<>();
+            for (Db2ReceiverConfig rc : cfg.getReceivers()) {
+                String target = rc.getHostname() + ":" + rc.getHostport() + "/" + rc.getDatabase();
+                if (!seen.add(target)) {
+                    throw new IllegalStateException(
+                        "Duplicate receiver target '" + target + "': two receivers point at the same database");
+                }
             }
 
             Map<String, Object> exporters = (Map<String, Object>) root.get("exporters");
@@ -172,6 +183,10 @@ public class Db2Config {
             throw new IllegalStateException("receivers.db2.hostname is required");
         if (rc.getPort() <= 0 || rc.getPort() > 65535)
             throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
+        if (rc.getTopQueryCount() <= 0)
+            throw new IllegalStateException("receivers.db2.top_query_count must be > 0");
+        if (rc.getMaxQuerySampleCount() <= 0)
+            throw new IllegalStateException("receivers.db2.max_query_sample_count must be > 0");
         rc.getCollectionIntervalDuration();
         rc.getQuerySampleIntervalDuration();
         if (rc.isTopQueryEnabled()) {
