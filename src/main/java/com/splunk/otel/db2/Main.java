@@ -10,6 +10,9 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
@@ -39,8 +42,24 @@ public class Main {
         CountDownLatch shutdown = new CountDownLatch(1);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("Shutdown signal received — stopping {} pipeline(s)", pipelines.size());
+            // Use a dedicated executor sized to the pipeline count so every stop() task
+            // starts immediately — the common fork-join pool is bounded and can queue tasks
+            // behind blocking scheduler timeouts when there are many databases.
+            ExecutorService stopExecutor = Executors.newFixedThreadPool(pipelines.size());
             for (Db2Pipeline p : pipelines) {
-                try { p.stop(); } catch (Exception e) { log.warn("Error stopping pipeline: {}", e.getMessage()); }
+                stopExecutor.submit(() -> {
+                    try { p.stop(); } catch (Exception e) { log.warn("Error stopping pipeline: {}", e.getMessage()); }
+                });
+            }
+            stopExecutor.shutdown();
+            try {
+                if (!stopExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    log.warn("Some pipelines did not finish shutdown within 30s — forcing stop");
+                    stopExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                stopExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
             }
             shutdown.countDown();
         }));

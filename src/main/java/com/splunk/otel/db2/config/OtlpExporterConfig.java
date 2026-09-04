@@ -25,12 +25,14 @@ public class OtlpExporterConfig {
 
     public static class TlsConfig {
         private boolean insecure = false;
+        private boolean insecureSet = false; // true only when explicitly provided in config
         private String caFile = "";
         private String certFile = "";
         private String keyFile = "";
 
         public boolean isInsecure() { return insecure; }
-        public void setInsecure(boolean insecure) { this.insecure = insecure; }
+        public void setInsecure(boolean insecure) { this.insecure = insecure; this.insecureSet = true; }
+        public boolean isTlsExplicitlySet() { return insecureSet; }
 
         public String getCaFile() { return caFile; }
         public void setCaFile(String caFile) { this.caFile = caFile != null ? caFile : ""; }

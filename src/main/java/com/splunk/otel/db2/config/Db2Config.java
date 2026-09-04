@@ -110,18 +110,36 @@ public class Db2Config {
                 if (otlp != null) {
                     if (otlp.get("endpoint") != null)
                         cfg.getExporters().getOtlp().setEndpoint(asString(otlp, "endpoint"));
-                    if (otlp.get("headers") instanceof Map) {
-                        Map<?, ?> rawHeaders = (Map<?, ?>) otlp.get("headers");
+                    Object headersNode = otlp.get("headers");
+                    if (headersNode != null) {
+                        if (!(headersNode instanceof Map))
+                            throw new IllegalStateException(
+                                "exporters.otlp.headers must be a map of key: value pairs, got: " +
+                                headersNode.getClass().getSimpleName());
+                        Map<?, ?> rawHeaders = (Map<?, ?>) headersNode;
                         Map<String, String> headers = new java.util.LinkedHashMap<>();
                         for (Map.Entry<?, ?> e : rawHeaders.entrySet()) {
-                            headers.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+                            headers.put(String.valueOf(e.getKey()), expandEnv(String.valueOf(e.getValue())));
                         }
                         cfg.getExporters().getOtlp().setHeaders(headers);
                     }
-                    if (otlp.get("compression") != null)
-                        cfg.getExporters().getOtlp().setCompression(asString(otlp, "compression"));
-                    if (otlp.get("tls") instanceof Map) {
-                        Map<String, Object> otlpTls = (Map<String, Object>) otlp.get("tls");
+                    if (otlp.get("compression") != null) {
+                        String compression = asString(otlp, "compression");
+                        if (!compression.equalsIgnoreCase("gzip") &&
+                            !compression.equalsIgnoreCase("none") &&
+                            !compression.isEmpty())
+                            throw new IllegalStateException(
+                                "exporters.otlp.compression: unsupported value '" + compression +
+                                "'; supported values: gzip, none");
+                        cfg.getExporters().getOtlp().setCompression(compression);
+                    }
+                    Object tlsNode = otlp.get("tls");
+                    if (tlsNode != null) {
+                        if (!(tlsNode instanceof Map))
+                            throw new IllegalStateException(
+                                "exporters.otlp.tls must be a map, got: " +
+                                tlsNode.getClass().getSimpleName());
+                        Map<String, Object> otlpTls = (Map<String, Object>) tlsNode;
                         OtlpExporterConfig.TlsConfig tlsCfg = new OtlpExporterConfig.TlsConfig();
                         if (otlpTls.get("insecure") != null) tlsCfg.setInsecure(asBool(otlpTls, "insecure"));
                         if (otlpTls.get("ca_file")   != null) tlsCfg.setCaFile(asString(otlpTls, "ca_file"));
@@ -156,6 +174,22 @@ public class Db2Config {
         if (db2.get("query_sample_enabled")  != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
         if (db2.get("use_snapshot_monitor")  != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
         if (db2.get("connect_timeout_seconds")!= null) rc.setConnectTimeoutSeconds(asInt(db2, "connect_timeout_seconds"));
+        if (db2.get("service_name")           != null) rc.setServiceName(asString(db2, "service_name"));
+        if (db2.get("service_namespace")      != null) rc.setServiceNamespace(asString(db2, "service_namespace"));
+        if (db2.get("service_instance_id")    != null) rc.setServiceInstanceId(asString(db2, "service_instance_id"));
+        Object raNode = db2.get("resource_attributes");
+        if (raNode != null) {
+            if (!(raNode instanceof Map))
+                throw new IllegalStateException(
+                    "receivers.db2.resource_attributes must be a map of key: value pairs, got: " +
+                    raNode.getClass().getSimpleName());
+            Map<?, ?> raw = (Map<?, ?>) raNode;
+            Map<String, String> attrs = new java.util.LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : raw.entrySet()) {
+                attrs.put(String.valueOf(e.getKey()), expandEnv(String.valueOf(e.getValue())));
+            }
+            rc.setResourceAttributes(attrs);
+        }
         if (db2.get("tls") != null) {
             Map<String, Object> tls = (Map<String, Object>) db2.get("tls");
             if (tls.get("insecure") != null) {
@@ -169,6 +203,20 @@ public class Db2Config {
         Object v = map.get(key);
         if (v instanceof String) return (String) v;
         throw new IllegalStateException("Config field '" + key + "' must be a string, got: " + v.getClass().getSimpleName() + " (" + v + ")");
+    }
+
+    /** Expand {@code ${env:VAR}} references in a string value; fail if the variable is missing. */
+    static String expandEnv(String value) {
+        if (value == null) return null;
+        if (value.startsWith("${env:") && value.endsWith("}")) {
+            String key = value.substring(6, value.length() - 1);
+            String env = System.getenv(key);
+            if (env == null) {
+                throw new IllegalStateException("Required environment variable '" + key + "' is not set");
+            }
+            return env;
+        }
+        return value;
     }
 
     private static int asInt(Map<String, Object> map, String key) {
@@ -205,7 +253,7 @@ public class Db2Config {
         if (database == null || database.isEmpty())
             throw new IllegalStateException("receivers.db2.database is required");
         if (hostname == null || hostname.isEmpty())
-            throw new IllegalStateException("receivers.db2.hostname is required");
+            rc.setHostname("localhost");
         if (rc.getPort() <= 0 || rc.getPort() > 65535)
             throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
         if (rc.getTopQueryCount() <= 0)
@@ -221,5 +269,37 @@ public class Db2Config {
         String endpoint = otlp.getEndpoint();
         if (endpoint == null || endpoint.isBlank())
             throw new IllegalStateException("exporters.otlp.endpoint is required");
+
+        OtlpExporterConfig.TlsConfig tls = otlp.getTls();
+        if (tls != null) {
+            boolean hasCert    = !tls.getCertFile().isEmpty();
+            boolean hasKey     = !tls.getKeyFile().isEmpty();
+            boolean hasCa      = !tls.getCaFile().isEmpty();
+            boolean isHttp     = endpoint.startsWith("http://");
+            boolean isHttps    = endpoint.startsWith("https://");
+
+            // cert_file and key_file are a pair — both or neither
+            if (hasCert != hasKey)
+                throw new IllegalStateException(
+                    "exporters.otlp.tls: cert_file and key_file must both be set or both be absent");
+
+            // insecure: true → must use http://, no certificates
+            if (tls.isInsecure()) {
+                if (!isHttp)
+                    throw new IllegalStateException(
+                        "exporters.otlp.tls: insecure: true requires an http:// endpoint, got: " + endpoint);
+                if (hasCa || hasCert)
+                    throw new IllegalStateException(
+                        "exporters.otlp.tls: insecure: true is incompatible with ca_file / cert_file");
+            }
+
+            // insecure: false (explicit) or any TLS file → must use https://
+            if (!tls.isInsecure() && (hasCa || hasCert) && !isHttps)
+                throw new IllegalStateException(
+                    "exporters.otlp.tls: ca_file / cert_file require an https:// endpoint, got: " + endpoint);
+            if (!tls.isInsecure() && tls.isTlsExplicitlySet() && isHttp)
+                throw new IllegalStateException(
+                    "exporters.otlp.tls: insecure: false requires an https:// endpoint, got: " + endpoint);
+        }
     }
 }

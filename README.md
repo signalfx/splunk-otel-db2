@@ -84,7 +84,57 @@ exporters:
     endpoint: "http://localhost:4317"
 ```
 
-Each pipeline is identified by the `service.instance.id` resource attribute (`host:port/database`), so metrics and logs from different databases are distinguishable in the backend.
+Each pipeline is identified by the `service.instance.id` resource attribute. For remote targets this is `host:port/database`. For loopback targets (`localhost`, `127.0.0.1`, `::1`, or blank) the configured hostname is replaced with the collector machine's own hostname, so co-located sidecars produce unique identities across the fleet.
+
+### Identity overrides
+
+Three fields give explicit control over the OTel resource identity, useful for multi-cluster deployments:
+
+| Field | Config key | Purpose |
+|---|---|---|
+| `service_name` | `service_name` | Override the default `service.name` (`splunk-otel-db2`) |
+| `service_namespace` | `service_namespace` | Set `service.namespace` (omitted when not configured) |
+| `service_instance_id` | `service_instance_id` | Full override of `service.instance.id`; bypasses the auto-generated `host:port/database` |
+
+All three support `${env:VAR}` substitution.
+
+```yaml
+receivers:
+  db2/prod:
+    hostname: "db2-prod-1.example.com"
+    database: "PROD"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    service_name: "payments-db2"
+    service_namespace: "payments"
+    service_instance_id: "payments-db2-prod-1"
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+```
+
+### Resource attribute overrides
+
+Use `resource_attributes` to override individual resource attributes or add custom ones. Values support `${env:VAR}` substitution. Overrides are applied after the identity fields above.
+
+```yaml
+receivers:
+  db2/prod:
+    hostname: "db2-prod-1.example.com"
+    database: "PROD"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    resource_attributes:
+      deployment.environment: "production"
+      team: "platform"
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+```
+
+Standard attributes (`service.name`, `service.instance.id`, `server.address`, `db.system.name`, `db.namespace`) can be overridden. `server.port` must be an integer value. All overrides are applied on top of the defaults — unspecified attributes keep their automatically derived values.
 
 Credential values can be literals or `${env:VAR_NAME}` references.
 
@@ -155,12 +205,14 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
+| `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
 | `db2.application_handle` | Application handle / agent ID |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |
-| `db2.cpu_time` | CPU time in seconds (default path only) |
+| `db2.cpu_time` | CPU time in seconds (default path only; omitted on snapshot path) |
+| `db2.wait_time` | Lock wait time in seconds (Db2 10.5+ default path only) |
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
@@ -182,7 +234,7 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 |---|---|
 | `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
-| `db.query.text` | Obfuscated SQL statement (also set as log body) |
+| `db.query.text` | Obfuscated SQL statement |
 | `db2.member` | Db2 member number |
 | `db2.executions` | Total executions added during this interval |
 | `db2.total_exec_time` | Interval execution elapsed time in seconds |
@@ -253,16 +305,18 @@ make clean               # clean build outputs
 
 ## Resource attributes
 
-The receiver sets the following OTel resource attributes on all telemetry:
+The receiver sets the following OTel resource attributes on all telemetry. Any attribute can be overridden or extended using `resource_attributes` in the receiver config (see [Resource attribute overrides](#resource-attribute-overrides)).
 
-| Attribute | Value |
+| Attribute | Default value |
 |---|---|
-| `service.name` | `splunk-otel-db2` |
+| `service.name` | `splunk-otel-db2` (override with `service_name`) |
+| `service.instance.id` | `host:port/database`; loopback hosts replaced with collector hostname (override with `service_instance_id`) |
+| `service.namespace` | not set (set with `service_namespace`) |
+| `server.address` | configured hostname; loopback resolved to collector hostname |
+| `host.name` | configured hostname (operator's typed value, preserved as-is) |
+| `server.port` | configured port (integer) |
 | `db.system.name` | `ibm.db2` |
 | `db.namespace` | configured database name |
-| `server.address` | configured hostname |
-| `server.port` | configured port |
-| `service.instance.id` | `host:port/database` |
 
 ## License
 

@@ -6,13 +6,15 @@ import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.exporter.Db2Exporter;
 import com.splunk.otel.db2.processor.Db2Processor;
 import com.splunk.otel.db2.receiver.Db2Receiver;
-import com.splunk.otel.db2.util.HostNormalizer;
+import com.splunk.otel.db2.util.ResourceIdentity;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributesBuilder;
+
+import java.util.Map;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
-import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
@@ -20,8 +22,6 @@ import io.opentelemetry.sdk.metrics.SdkMeterProviderBuilder;
 import io.opentelemetry.sdk.metrics.export.MetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import org.slf4j.LoggerFactory;
-
-import java.util.Map;
 
 public class Db2Pipeline {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(Db2Pipeline.class);
@@ -33,17 +33,20 @@ public class Db2Pipeline {
 
     public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig) {
         String name = rc.getComponentName().isEmpty() ? "" : "[" + rc.getComponentName() + "] ";
-        // Resolve once; reused for instanceId, resource, and server.address — avoids
-        // two blocking InetAddress lookups at startup on loopback-configured hosts.
-        String serverAddress = HostNormalizer.resolveServerAddress(rc.getHost());
-        this.instanceId = name + serverAddress + ":" + rc.getPort() + "/" + rc.getDatabase();
-        Resource resource = buildResource(rc, serverAddress);
+        // Resolve once: loopback → collector hostname so co-located sidecars have unique identities.
+        // Remote targets are returned unchanged. Never triggers DNS on the configured host.
+        String identityHost = ResourceIdentity.resolveIdentityHost(rc.getHost());
+        Resource resource = buildResource(rc, identityHost);
+        // instanceId mirrors service.instance.id so logs and backend agree
+        String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
+            identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
+        this.instanceId = name + effectiveInstanceId;
 
         MetricReader reader = Db2Exporter.build(otlpConfig, rc.getCollectionIntervalDuration());
         this.meterProvider  = buildMeterProvider(reader, resource);
         // Each pipeline owns its own exporter so that loggerProvider.shutdown() only drains
         // this pipeline's queue — stopping one pipeline cannot close another's export channel.
-        OtlpGrpcLogRecordExporter logExporter = buildLogExporter(otlpConfig);
+        OtlpGrpcLogRecordExporter logExporter = Db2Exporter.buildLogExporter(otlpConfig);
         this.loggerProvider = buildLoggerProvider(logExporter, resource);
 
         Meter  meter      = meterProvider.get("splunk-otel-db2");
@@ -54,9 +57,11 @@ public class Db2Pipeline {
     // test constructor — kept for integration tests that inject a custom MetricReader
     public Db2Pipeline(Db2Config config, MetricReader testReader) {
         Db2ReceiverConfig rc = config.getReceivers().get(0);
-        String serverAddress = HostNormalizer.resolveServerAddress(rc.getHost());
-        this.instanceId = serverAddress + ":" + rc.getPort() + "/" + rc.getDatabase();
-        Resource resource   = buildResource(rc, serverAddress);
+        String identityHost = ResourceIdentity.resolveIdentityHost(rc.getHost());
+        String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
+            identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
+        this.instanceId = effectiveInstanceId;
+        Resource resource   = buildResource(rc, identityHost);
         this.meterProvider  = buildMeterProvider(testReader, resource);
         this.loggerProvider = null;
 
@@ -64,15 +69,44 @@ public class Db2Pipeline {
         this.receiver = new Db2Receiver(rc, meter, (Logger) null);
     }
 
-    private static Resource buildResource(Db2ReceiverConfig rc, String serverAddress) {
-        return Resource.getDefault().merge(Resource.create(Attributes.of(
-            AttributeKey.stringKey("service.name"),        "splunk-otel-db2",
-            AttributeKey.stringKey("service.instance.id"), serverAddress + ":" + rc.getPort() + "/" + rc.getDatabase(),
-            AttributeKey.stringKey("server.address"),      serverAddress,
-            AttributeKey.longKey("server.port"),           (long) rc.getPort(),
-            AttributeKey.stringKey("db.system.name"),      "ibm.db2",
-            AttributeKey.stringKey("db.namespace"),        rc.getDatabase()
-        )));
+    private static Resource buildResource(Db2ReceiverConfig rc, String identityHost) {
+        // G1: explicit overrides take precedence over generated values
+        String serviceName       = firstNonBlank(rc.getServiceName(), "splunk-otel-db2");
+        String serviceInstanceId = firstNonBlank(rc.getServiceInstanceId(),
+            identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
+
+        AttributesBuilder attrs = Attributes.builder()
+            .put("service.name",        serviceName)
+            .put("service.instance.id", serviceInstanceId)
+            .put("server.address",      identityHost)       // resolved: unique per host
+            .put("host.name",           rc.getHost())       // operator's typed value preserved
+            .put(AttributeKey.longKey("server.port"), (long) rc.getPort())
+            .put("db.system.name",      "ibm.db2")
+            .put("db.namespace",        rc.getDatabase());
+
+        // service.namespace only when configured — avoids polluting the resource for single-cluster setups
+        String ns = rc.getServiceNamespace();
+        if (ns != null && !ns.isBlank()) attrs.put("service.namespace", ns);
+
+        // resource_attributes overrides win last — applied after G1 fields
+        // server.port must stay a long to match semconv type
+        for (Map.Entry<String, String> e : rc.getResourceAttributes().entrySet()) {
+            if (e.getKey().equals("server.port")) {
+                try {
+                    attrs.put(AttributeKey.longKey("server.port"), Long.parseLong(e.getValue()));
+                } catch (NumberFormatException ex) {
+                    throw new IllegalStateException(
+                        "resource_attributes.server.port must be an integer, got: " + e.getValue());
+                }
+            } else {
+                attrs.put(e.getKey(), e.getValue());
+            }
+        }
+        return Resource.getDefault().merge(Resource.create(attrs.build()));
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        return (first != null && !first.isBlank()) ? first : fallback;
     }
 
     private SdkMeterProvider buildMeterProvider(MetricReader reader, Resource resource) {
@@ -88,18 +122,6 @@ public class Db2Pipeline {
             .addLogRecordProcessor(BatchLogRecordProcessor.builder(logExporter).build())
             .setResource(resource)
             .build();
-    }
-
-    private static OtlpGrpcLogRecordExporter buildLogExporter(OtlpExporterConfig otlpConfig) {
-        OtlpGrpcLogRecordExporterBuilder builder = OtlpGrpcLogRecordExporter.builder()
-            .setEndpoint(otlpConfig.getEndpoint());
-        for (Map.Entry<String, String> h : otlpConfig.getHeaders().entrySet()) {
-            builder.addHeader(h.getKey(), h.getValue());
-        }
-        if ("gzip".equalsIgnoreCase(otlpConfig.getCompression())) {
-            builder.setCompression("gzip");
-        }
-        return builder.build();
     }
 
     public void start() {

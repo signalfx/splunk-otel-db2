@@ -385,6 +385,235 @@ class Db2ConfigTest {
             .hasMessageContaining("Duplicate");
     }
 
+    // ── Exporter config validation ───────────────────────────────────────────
+
+    @Test
+    void nonMapHeadersFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n" +
+            "    headers: \"Authorization: Bearer token\"\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("headers must be a map");
+    }
+
+    @Test
+    void unsupportedCompressionFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n" +
+            "    compression: zstd\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("zstd");
+    }
+
+    @Test
+    void nonMapTlsFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n" +
+            "    tls: true\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("tls must be a map");
+    }
+
+    @Test
+    void gzipCompressionIsAccepted() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n" +
+            "    compression: gzip\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getExporters().getOtlp().getCompression()).isEqualToIgnoringCase("gzip");
+    }
+
+    @Test
+    void noneCompressionIsAccepted() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n" +
+            "    compression: none\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getExporters().getOtlp().getCompression()).isEqualToIgnoringCase("none");
+    }
+
+    @Test
+    void nonMapResourceAttributesFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    resource_attributes: \"service.name=my-db2\"\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("resource_attributes must be a map");
+    }
+
+    @Test
+    void listResourceAttributesFailsAtLoad() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    resource_attributes:\n" +
+            "      - service.name: my-db2\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("resource_attributes must be a map");
+    }
+
+    // ── TLS validation ───────────────────────────────────────────────────────
+
+    @Test
+    void tlsInsecureTrueWithHttpEndpointIsValid() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("http://collector:4317") +
+            "    tls:\n" +
+            "      insecure: true\n");
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getExporters().getOtlp().getTls().isInsecure()).isTrue();
+    }
+
+    @Test
+    void tlsInsecureTrueWithHttpsEndpointFails() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("https://collector:4317") +
+            "    tls:\n" +
+            "      insecure: true\n");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("insecure: true requires an http://");
+    }
+
+    @Test
+    void tlsInsecureFalseWithHttpEndpointFails() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("http://collector:4317") +
+            "    tls:\n" +
+            "      insecure: false\n");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("insecure: false requires an https://");
+    }
+
+    @Test
+    void tlsCaFileWithHttpsEndpointIsValid() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("https://collector:4317") +
+            "    tls:\n" +
+            "      ca_file: /some/ca.pem\n");
+        // Db2Config.load() only validates the rules — file reading happens later in Db2Exporter
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getExporters().getOtlp().getTls().getCaFile()).isEqualTo("/some/ca.pem");
+    }
+
+    @Test
+    void tlsCaFileWithHttpEndpointFails() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("http://collector:4317") +
+            "    tls:\n" +
+            "      ca_file: /some/ca.pem\n");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("require an https://");
+    }
+
+    @Test
+    void tlsInsecureTrueWithCaFileFails() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("http://collector:4317") +
+            "    tls:\n" +
+            "      insecure: true\n" +
+            "      ca_file: /some/ca.pem\n");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("incompatible with ca_file");
+    }
+
+    @Test
+    void tlsCertWithoutKeyFails() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("https://collector:4317") +
+            "    tls:\n" +
+            "      cert_file: /some/cert.pem\n");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("cert_file and key_file must both be set");
+    }
+
+    @Test
+    void tlsKeyWithoutCertFails() throws Exception {
+        Path f = writeConfig(tmp, minimalConfig("https://collector:4317") +
+            "    tls:\n" +
+            "      key_file: /some/key.pem\n");
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("cert_file and key_file must both be set");
+    }
+
+    /** Returns a minimal valid config with the given OTLP endpoint, leaving room to append tls: under otlp: */
+    private static String minimalConfig(String endpoint) {
+        return "receivers:\n" +
+               "  db2:\n" +
+               "    hostname: mydb.example.com\n" +
+               "    username: db2inst1\n" +
+               "    password: secret\n" +
+               "    database: SAMPLE\n" +
+               "exporters:\n" +
+               "  otlp:\n" +
+               "    endpoint: \"" + endpoint + "\"\n";
+    }
+
     private static Path writeConfig(Path dir, String content) throws IOException {
         Path f = dir.resolve("config.yaml");
         Files.writeString(f, content);
