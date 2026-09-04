@@ -130,13 +130,12 @@ public class Db2Pipeline {
     }
 
     public void stop() {
-        // stopScheduler first so in-flight collection cycles finish before the meter shuts down.
-        // closeConnection is called last after the SDK pipelines have flushed.
-        // receiver.stop() is the single entry point — it enforces the AtomicBoolean idempotency guard.
-        receiver.stopScheduler();
+        // receiver.stop() is the single entry point: stopScheduler() drains in-flight collection
+        // cycles, then closeConnection() tears down JDBC. SDK pipelines flush after that —
+        // they hold collected metrics in memory and don't need the DB2 connection to export them.
+        receiver.stop();
         meterProvider.shutdown();
         if (loggerProvider != null) loggerProvider.shutdown();
-        receiver.stop();
         log.info("DB2 pipeline stopped for {}", instanceId);
     }
 }

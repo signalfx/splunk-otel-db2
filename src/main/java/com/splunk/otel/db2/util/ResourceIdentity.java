@@ -20,11 +20,16 @@ import java.util.regex.Pattern;
 public final class ResourceIdentity {
     private static final Logger log = LoggerFactory.getLogger(ResourceIdentity.class);
 
-    // Matches IPv4 literals (digits and dots) or IPv6 literals (hex + at least one colon, optional brackets).
-    // The IPv6 branch requires at least one colon so bare hex words like "db", "beef", or "dead" never
-    // match and are never passed to InetAddress.getByName — preserving the no-DNS guarantee.
-    private static final Pattern IP_LITERAL =
-        Pattern.compile("^(\\[?[0-9a-fA-F]*:[0-9a-fA-F:]*]?)$|^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$");
+    // Matches IP literals without triggering DNS:
+    //   branch 1 — IPv6 (hex + at least one colon, optional brackets): ::1, [::1], 2001:db8::1
+    //   branch 2 — IPv4-mapped IPv6 (::ffff:a.b.c.d): handles dual-stack loopback ::ffff:127.0.0.1
+    //   branch 3 — IPv4 (four dotted decimal octets): 127.0.0.1
+    // Branch 1 requires at least one colon so bare hex words ("db", "beef") never match.
+    private static final Pattern IP_LITERAL = Pattern.compile(
+        "^(\\[?[0-9a-fA-F]*:[0-9a-fA-F:]*]?)$" +
+        "|^::ffff:\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$" +
+        "|^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$",
+        Pattern.CASE_INSENSITIVE);
 
     private ResourceIdentity() {}
 

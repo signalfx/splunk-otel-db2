@@ -56,6 +56,15 @@ class Db2ResourceIdentityTest {
     }
 
     @Test
+    void ipv4MappedLoopbackResolved() throws UnknownHostException {
+        // ::ffff:127.0.0.1 is a valid dual-stack loopback; must be resolved like any other loopback
+        String resolved = ResourceIdentity.resolveIdentityHost("::ffff:127.0.0.1");
+        assertThat(resolved)
+            .isNotEqualTo("::ffff:127.0.0.1")
+            .isEqualTo(InetAddress.getLocalHost().getHostName());
+    }
+
+    @Test
     void hexOnlyHostnamesNeverParsedAsIpv6() {
         // Bare hex words match the old IPv6 regex branch (no colon required) and were
         // passed to InetAddress.getByName(), potentially triggering DNS. Verify that the

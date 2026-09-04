@@ -601,6 +601,74 @@ class Db2ConfigTest {
             .hasMessageContaining("cert_file and key_file must both be set");
     }
 
+    // ── G1 identity override fields ──────────────────────────────────────────
+
+    @Test
+    void identityOverrideFieldsAreParsedCorrectly() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    service_name: my-payments-db2\n" +
+            "    service_namespace: payments\n" +
+            "    service_instance_id: payments-prod-1\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2ReceiverConfig rc = Db2Config.load(f.toString()).getReceivers().get(0);
+        assertThat(rc.getServiceName()).isEqualTo("my-payments-db2");
+        assertThat(rc.getServiceNamespace()).isEqualTo("payments");
+        assertThat(rc.getServiceInstanceId()).isEqualTo("payments-prod-1");
+    }
+
+    @Test
+    void otlpHeadersAreParsedCorrectly() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n" +
+            "    headers:\n" +
+            "      X-Custom-Header: my-value\n" +
+            "      Authorization: Bearer token123\n"
+        );
+        java.util.Map<String, String> headers =
+            Db2Config.load(f.toString()).getExporters().getOtlp().getHeaders();
+        assertThat(headers).containsEntry("X-Custom-Header", "my-value")
+                           .containsEntry("Authorization", "Bearer token123");
+    }
+
+    @Test
+    void resourceAttributesAreParsedCorrectly() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    resource_attributes:\n" +
+            "      deployment.environment: production\n" +
+            "      team: platform\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        java.util.Map<String, String> attrs =
+            Db2Config.load(f.toString()).getReceivers().get(0).getResourceAttributes();
+        assertThat(attrs).containsEntry("deployment.environment", "production")
+                         .containsEntry("team", "platform");
+    }
+
     /** Returns a minimal valid config with the given OTLP endpoint, leaving room to append tls: under otlp: */
     private static String minimalConfig(String endpoint) {
         return "receivers:\n" +
