@@ -54,4 +54,18 @@ class Db2ResourceIdentityTest {
         assertThat(ResourceIdentity.resolveIdentityHost("localhost.corp"))
             .isEqualTo("localhost.corp");
     }
+
+    @Test
+    void hexOnlyHostnamesNeverParsedAsIpv6() {
+        // Bare hex words match the old IPv6 regex branch (no colon required) and were
+        // passed to InetAddress.getByName(), potentially triggering DNS. Verify that the
+        // fix (colon required) holds: parseIpLiteral must return null for all-hex words.
+        assertThat(ResourceIdentity.parseIpLiteral("db")).isNull();
+        assertThat(ResourceIdentity.parseIpLiteral("beef")).isNull();
+        assertThat(ResourceIdentity.parseIpLiteral("dead")).isNull();
+        assertThat(ResourceIdentity.parseIpLiteral("cafe")).isNull();
+        // And they must be returned unchanged by resolveIdentityHost (no DNS, no substitution)
+        assertThat(ResourceIdentity.isLoopback("db")).isFalse();
+        assertThat(ResourceIdentity.resolveIdentityHost("beef")).isEqualTo("beef");
+    }
 }

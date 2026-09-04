@@ -20,10 +20,11 @@ import java.util.regex.Pattern;
 public final class ResourceIdentity {
     private static final Logger log = LoggerFactory.getLogger(ResourceIdentity.class);
 
-    // Matches IPv4 literals (digits and dots) or IPv6 literals (hex and colons, optional brackets).
-    // Used as a fast gate before InetAddress.getByName so we never trigger DNS on a hostname.
+    // Matches IPv4 literals (digits and dots) or IPv6 literals (hex + at least one colon, optional brackets).
+    // The IPv6 branch requires at least one colon so bare hex words like "db", "beef", or "dead" never
+    // match and are never passed to InetAddress.getByName — preserving the no-DNS guarantee.
     private static final Pattern IP_LITERAL =
-        Pattern.compile("^(\\[?[0-9a-fA-F:]+]?)$|^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$");
+        Pattern.compile("^(\\[?[0-9a-fA-F]*:[0-9a-fA-F:]*]?)$|^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$");
 
     private ResourceIdentity() {}
 
