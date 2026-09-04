@@ -130,12 +130,16 @@ public class Db2Pipeline {
     }
 
     public void stop() {
-        // receiver.stop() is the single entry point: stopScheduler() drains in-flight collection
-        // cycles, then closeConnection() tears down JDBC. SDK pipelines flush after that —
-        // they hold collected metrics in memory and don't need the DB2 connection to export them.
-        receiver.stop();
+        // Step 1: drain schedulers so no new collection cycle starts.
+        receiver.stopScheduler();
+        // Step 2: shut down the OTel SDK. PeriodicMetricReader.shutdown() triggers a final
+        // doRun() collection; the JDBC connection must still be open at this point so that
+        // final scrape succeeds and is not abandoned or replaced with a leaked connection.
         meterProvider.shutdown();
         if (loggerProvider != null) loggerProvider.shutdown();
+        // Step 3: close JDBC only after the SDK has flushed. The AtomicBoolean guard in
+        // receiver.stop() ensures this is idempotent if called again from a shutdown hook.
+        receiver.stop();
         log.info("DB2 pipeline stopped for {}", instanceId);
     }
 }

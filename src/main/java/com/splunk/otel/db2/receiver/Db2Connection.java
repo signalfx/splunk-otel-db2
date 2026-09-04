@@ -98,7 +98,7 @@ public class Db2Connection {
         log.info("{}Connected to DB2 successfully", label);
     }
 
-    public void close() {
+    public synchronized void close() {
         if (connection != null) {
             try { connection.close(); } catch (SQLException ignored) {}
             connection = null;

@@ -22,7 +22,9 @@ public final class ResourceIdentity {
 
     // Matches IP literals without triggering DNS:
     //   branch 1 — IPv6 (hex + at least one colon, optional brackets): ::1, [::1], 2001:db8::1
-    //   branch 2 — IPv4-mapped IPv6 (::ffff:a.b.c.d): handles dual-stack loopback ::ffff:127.0.0.1
+    //              brackets are stripped by parseIpLiteral before this pattern is applied
+    //   branch 2 — IPv4-mapped IPv6 (::ffff:a.b.c.d, no brackets — stripped by caller):
+    //              handles dual-stack loopback ::ffff:127.0.0.1; [::ffff:127.0.0.1] → stripped → matches
     //   branch 3 — IPv4 (four dotted decimal octets): 127.0.0.1
     // Branch 1 requires at least one colon so bare hex words ("db", "beef") never match.
     private static final Pattern IP_LITERAL = Pattern.compile(

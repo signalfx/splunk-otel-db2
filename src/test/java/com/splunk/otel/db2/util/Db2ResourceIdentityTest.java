@@ -65,6 +65,14 @@ class Db2ResourceIdentityTest {
     }
 
     @Test
+    void ipv4MappedNonLoopbackNotResolved() {
+        // ::ffff:192.168.1.1 is IPv4-mapped but not a loopback address — must be returned unchanged
+        assertThat(ResourceIdentity.isLoopback("::ffff:192.168.1.1")).isFalse();
+        assertThat(ResourceIdentity.resolveIdentityHost("::ffff:192.168.1.1"))
+            .isEqualTo("::ffff:192.168.1.1");
+    }
+
+    @Test
     void hexOnlyHostnamesNeverParsedAsIpv6() {
         // Bare hex words match the old IPv6 regex branch (no colon required) and were
         // passed to InetAddress.getByName(), potentially triggering DNS. Verify that the

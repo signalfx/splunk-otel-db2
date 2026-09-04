@@ -186,6 +186,9 @@ public class Db2Receiver {
 
     public void stop() {
         if (!stopped.compareAndSet(false, true)) return; // B3: idempotent
+        // Db2Pipeline calls stopScheduler() and closeConnection() explicitly in the
+        // correct order around SDK shutdown. This path is for callers (tests, direct use)
+        // that want a single-call teardown.
         stopScheduler();
         closeConnection();
     }
