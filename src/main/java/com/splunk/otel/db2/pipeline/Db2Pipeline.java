@@ -12,6 +12,7 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
@@ -30,6 +31,7 @@ public class Db2Pipeline {
     private final SdkLoggerProvider loggerProvider;
     private final Db2Receiver receiver;
     private final String instanceId;
+    private final AtomicBoolean stopped = new AtomicBoolean(false);
 
     public Db2Pipeline(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig) {
         String name = rc.getComponentName().isEmpty() ? "" : "[" + rc.getComponentName() + "] ";
@@ -130,15 +132,18 @@ public class Db2Pipeline {
     }
 
     public void stop() {
+        // Pipeline-level guard: the entire three-step sequence must run as a unit.
+        // Without this, a second concurrent caller could reach receiver.stop() (closing
+        // JDBC) while the first is still inside meterProvider.shutdown()'s final collection.
+        if (!stopped.compareAndSet(false, true)) return;
         // Step 1: drain schedulers so no new collection cycle starts.
         receiver.stopScheduler();
         // Step 2: shut down the OTel SDK. PeriodicMetricReader.shutdown() triggers a final
-        // doRun() collection; the JDBC connection must still be open at this point so that
-        // final scrape succeeds and is not abandoned or replaced with a leaked connection.
+        // doRun() collection; JDBC must still be open so the scrape succeeds without leaking
+        // a replacement connection.
         meterProvider.shutdown();
         if (loggerProvider != null) loggerProvider.shutdown();
-        // Step 3: close JDBC only after the SDK has flushed. The AtomicBoolean guard in
-        // receiver.stop() ensures this is idempotent if called again from a shutdown hook.
+        // Step 3: close JDBC only after the SDK has flushed.
         receiver.stop();
         log.info("DB2 pipeline stopped for {}", instanceId);
     }
