@@ -4,7 +4,7 @@ import java.time.Duration;
 
 public class Db2ReceiverConfig {
     private String componentName = ""; // name after the slash in "db2/<name>"; empty for plain "db2"
-    private String hostname = "localhost";
+    private String hostname; // required — no default; validation fails if not set
     private int hostport = 50000;
     private String username;
     private String password;

@@ -107,8 +107,28 @@ public class Db2Config {
             Map<String, Object> exporters = (Map<String, Object>) root.get("exporters");
             if (exporters != null) {
                 Map<String, Object> otlp = (Map<String, Object>) exporters.get("otlp");
-                if (otlp != null && otlp.get("endpoint") != null) {
-                    cfg.getExporters().getOtlp().setEndpoint(asString(otlp, "endpoint"));
+                if (otlp != null) {
+                    if (otlp.get("endpoint") != null)
+                        cfg.getExporters().getOtlp().setEndpoint(asString(otlp, "endpoint"));
+                    if (otlp.get("headers") instanceof Map) {
+                        Map<?, ?> rawHeaders = (Map<?, ?>) otlp.get("headers");
+                        Map<String, String> headers = new java.util.LinkedHashMap<>();
+                        for (Map.Entry<?, ?> e : rawHeaders.entrySet()) {
+                            headers.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+                        }
+                        cfg.getExporters().getOtlp().setHeaders(headers);
+                    }
+                    if (otlp.get("compression") != null)
+                        cfg.getExporters().getOtlp().setCompression(asString(otlp, "compression"));
+                    if (otlp.get("tls") instanceof Map) {
+                        Map<String, Object> otlpTls = (Map<String, Object>) otlp.get("tls");
+                        OtlpExporterConfig.TlsConfig tlsCfg = new OtlpExporterConfig.TlsConfig();
+                        if (otlpTls.get("insecure") != null) tlsCfg.setInsecure(asBool(otlpTls, "insecure"));
+                        if (otlpTls.get("ca_file")   != null) tlsCfg.setCaFile(asString(otlpTls, "ca_file"));
+                        if (otlpTls.get("cert_file") != null) tlsCfg.setCertFile(asString(otlpTls, "cert_file"));
+                        if (otlpTls.get("key_file")  != null) tlsCfg.setKeyFile(asString(otlpTls, "key_file"));
+                        cfg.getExporters().getOtlp().setTls(tlsCfg);
+                    }
                 }
             }
 

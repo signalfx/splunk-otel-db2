@@ -36,7 +36,7 @@ public class Db2Connection {
     public synchronized Connection getOrConnect() throws SQLException {
         if (connection != null) {
             try {
-                if (connection.isValid(config.getConnectTimeoutSeconds())) {
+                if (connection.isValid(1)) { // 1-second probe — independent of full connect timeout
                     consecutiveFailures = 0;
                     return connection;
                 }
@@ -86,13 +86,14 @@ public class Db2Connection {
             props.setProperty("sslConnection", "true");
         }
         connection = DriverManager.getConnection(url, props);
+        // clientProgramName in the Properties already sets CLIENT_APPLNAME for self-filtering.
+        // WLM_SET_CLIENT_INFO additionally sets CLIENT_ACCTNG for richer WLM tracking.
+        // Not all DB2 installs grant EXECUTE on this procedure, so failure is non-fatal.
         try (Statement st = connection.createStatement()) {
             st.execute("CALL WLM_SET_CLIENT_INFO(NULL, NULL, 'splunk-otel-db2', NULL, NULL)");
         } catch (SQLException e) {
-            try { connection.close(); } catch (SQLException ignored) {}
-            connection = null;
-            log.warn("{}WLM_SET_CLIENT_INFO failed; self-filter may not work correctly: {}", label, e.getMessage());
-            throw e;
+            log.warn("{}WLM_SET_CLIENT_INFO failed (non-fatal); self-filter via CLIENT_APPLNAME still active: {}",
+                label, e.getMessage());
         }
         log.info("{}Connected to DB2 successfully", label);
     }
@@ -100,6 +101,7 @@ public class Db2Connection {
     public void close() {
         if (connection != null) {
             try { connection.close(); } catch (SQLException ignored) {}
+            connection = null;
         }
     }
 }

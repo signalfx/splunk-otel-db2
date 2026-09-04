@@ -14,6 +14,8 @@ import java.util.function.Supplier;
 public class TablespaceQuery {
     private static final Logger log = LoggerFactory.getLogger(TablespaceQuery.class);
 
+    private static final int QUERY_TIMEOUT_SECONDS = 30;
+
     // TBSP_PAGE_SIZE in bytes; *_TOTAL/USED/FREE_PAGES counts are in pages
     private static final String SQL =
         "SELECT MEMBER, TBSP_NAME, TBSP_TYPE, TBSP_STATE, TBSP_PAGE_SIZE, " +
@@ -43,32 +45,34 @@ public class TablespaceQuery {
     private void collect() {
         try {
             Connection conn = connSupplier.get();
-            try (Statement st = conn.createStatement();
-                 ResultSet rs = st.executeQuery(SQL)) {
-                while (rs.next()) {
-                    String tbspName  = rs.getString("TBSP_NAME");
-                    String tbspType  = rs.getString("TBSP_TYPE");
-                    String tbspState = rs.getString("TBSP_STATE");
-                    int    member    = rs.getInt("MEMBER");
-                    long   pageSize  = rs.getLong("TBSP_PAGE_SIZE");
+            try (Statement st = conn.createStatement()) {
+                st.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+                try (ResultSet rs = st.executeQuery(SQL)) {
+                    while (rs.next()) {
+                        String tbspName  = rs.getString("TBSP_NAME");
+                        String tbspType  = rs.getString("TBSP_TYPE");
+                        String tbspState = rs.getString("TBSP_STATE");
+                        int    member    = rs.getInt("MEMBER");
+                        long   pageSize  = rs.getLong("TBSP_PAGE_SIZE");
 
-                    long totalPages = rs.getLong("TBSP_TOTAL_PAGES");
-                    long usedPages  = rs.getLong("TBSP_USED_PAGES");
-                    long freePages  = rs.getLong("TBSP_FREE_PAGES");
+                        long totalPages = rs.getLong("TBSP_TOTAL_PAGES");
+                        long usedPages  = rs.getLong("TBSP_USED_PAGES");
+                        long freePages  = rs.getLong("TBSP_FREE_PAGES");
 
-                    Attributes base = Attributes.builder()
-                        .put("db2.member",           member)
-                        .put("db2.tablespace",       tbspName)
-                        .put("db2.tablespace.type",  tbspType)
-                        .put("db2.tablespace.state", tbspState)
-                        .build();
+                        Attributes base = Attributes.builder()
+                            .put("db2.member",           member)
+                            .put("db2.tablespace",       tbspName)
+                            .put("db2.tablespace.type",  tbspType)
+                            .put("db2.tablespace.state", tbspState)
+                            .build();
 
-                    tablespaceSize.record(totalPages * pageSize,
-                        Attributes.builder().putAll(base).put("db2.tablespace.usage", "capacity").build());
-                    tablespaceSize.record(usedPages * pageSize,
-                        Attributes.builder().putAll(base).put("db2.tablespace.usage", "used").build());
-                    tablespaceSize.record(freePages * pageSize,
-                        Attributes.builder().putAll(base).put("db2.tablespace.usage", "free").build());
+                        tablespaceSize.record(totalPages * pageSize,
+                            Attributes.builder().putAll(base).put("db2.tablespace.usage", "capacity").build());
+                        tablespaceSize.record(usedPages * pageSize,
+                            Attributes.builder().putAll(base).put("db2.tablespace.usage", "used").build());
+                        tablespaceSize.record(freePages * pageSize,
+                            Attributes.builder().putAll(base).put("db2.tablespace.usage", "free").build());
+                    }
                 }
             }
         } catch (Exception e) {

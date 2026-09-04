@@ -105,20 +105,22 @@ public class Db2Receiver {
                 throw new RuntimeException("[" + label + "] DB2 query-sample connection failed: " + e.getMessage(), e);
             }
         };
+        long intervalSeconds          = config.getQuerySampleIntervalDuration().getSeconds();
+        int  querySampleTimeoutSeconds = (int) Math.max(5L, intervalSeconds / 2);
         QuerySampleQuery querySampleQuery = new QuerySampleQuery(
             querySampleConnSupplier,
             config.getDatabase(),
             otelLogger,
             config.getMaxQuerySampleCount(),
             config.isUseSnapshotMonitor(),
-            db2Version
+            db2Version,
+            querySampleTimeoutSeconds
         );
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "db2-query-sampler");
+            Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
             t.setDaemon(true);
             return t;
         });
-        long intervalSeconds = config.getQuerySampleIntervalDuration().getSeconds();
         querySampleScheduler.scheduleAtFixedRate(
             () -> {
                 try {
@@ -151,7 +153,7 @@ public class Db2Receiver {
             intervalSeconds
         );
         topQueryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "db2-top-query-collector");
+            Thread t = new Thread(r, "db2-top-query-collector[" + label + "]");
             t.setDaemon(true);
             return t;
         });

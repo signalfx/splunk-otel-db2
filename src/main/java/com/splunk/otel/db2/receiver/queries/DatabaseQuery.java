@@ -15,6 +15,8 @@ import java.util.function.Supplier;
 public class DatabaseQuery {
     private static final Logger log = LoggerFactory.getLogger(DatabaseQuery.class);
 
+    private static final int QUERY_TIMEOUT_SECONDS = 30;
+
     // -2 = all active members (consistent with BufferpoolQuery / TablespaceQuery)
     private static final String SQL =
         "SELECT MEMBER, APPLS_CUR_CONS, APPLS_IN_DB2, CONNECTIONS_TOP, " +
@@ -112,23 +114,25 @@ public class DatabaseQuery {
     private void collect() {
         try {
             Connection conn = connSupplier.get();
-            try (Statement st = conn.createStatement();
-                 ResultSet rs = st.executeQuery(SQL)) {
-                while (rs.next()) {
-                    Attributes attrs = Attributes.builder()
-                        .put("db2.member", rs.getInt("MEMBER"))
-                        .build();
-                    currentConnections.record(rs.getLong("APPLS_CUR_CONS"),  attrs);
-                    activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);
-                    maxConnections    .record(rs.getLong("CONNECTIONS_TOP"),  attrs);
-                    lockWaits         .record(rs.getLong("LOCK_WAITS"),       attrs);
-                    lockWaitTime      .record(rs.getLong("LOCK_WAIT_TIME") / 1000.0, attrs);
-                    deadlocks         .record(rs.getLong("DEADLOCKS"),        attrs);
-                    lockTimeouts      .record(rs.getLong("LOCK_TIMEOUTS"),    attrs);
-                    lockEscalations   .record(rs.getLong("LOCK_ESCALS"),      attrs);
-                    lockListInUse     .record(rs.getLong("LOCK_LIST_IN_USE"), attrs);
-                    totalSorts        .record(rs.getLong("TOTAL_SORTS"),      attrs);
-                    sortOverflows     .record(rs.getLong("SORT_OVERFLOWS"),   attrs);
+            try (Statement st = conn.createStatement()) {
+                st.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+                try (ResultSet rs = st.executeQuery(SQL)) {
+                    while (rs.next()) {
+                        Attributes attrs = Attributes.builder()
+                            .put("db2.member", rs.getInt("MEMBER"))
+                            .build();
+                        currentConnections.record(rs.getLong("APPLS_CUR_CONS"),  attrs);
+                        activeConnections .record(rs.getLong("APPLS_IN_DB2"),    attrs);
+                        maxConnections    .record(rs.getLong("CONNECTIONS_TOP"),  attrs);
+                        lockWaits         .record(rs.getLong("LOCK_WAITS"),       attrs);
+                        lockWaitTime      .record(rs.getLong("LOCK_WAIT_TIME") / 1000.0, attrs);
+                        deadlocks         .record(rs.getLong("DEADLOCKS"),        attrs);
+                        lockTimeouts      .record(rs.getLong("LOCK_TIMEOUTS"),    attrs);
+                        lockEscalations   .record(rs.getLong("LOCK_ESCALS"),      attrs);
+                        lockListInUse     .record(rs.getLong("LOCK_LIST_IN_USE"), attrs);
+                        totalSorts        .record(rs.getLong("TOTAL_SORTS"),      attrs);
+                        sortOverflows     .record(rs.getLong("SORT_OVERFLOWS"),   attrs);
+                    }
                 }
             }
         } catch (Exception e) {
