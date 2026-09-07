@@ -16,11 +16,3 @@ sources:
 maintainers:
   - name: signalfx/splunk-otel-db2-maintainers
     url: https://github.com/signalfx/splunk-otel-db2
-
-dependencies:
-  # Optional: bundle an OTel Collector alongside the scraper.
-  # Enable with: --set opentelemetry-collector.enabled=true
-  - name: opentelemetry-collector
-    version: "0.113.*"
-    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
-    condition: opentelemetry-collector.enabled
