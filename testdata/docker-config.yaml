@@ -1,0 +1,18 @@
+# Config used by the receiver container in docker-compose.
+# DB2 hostname is the service name from docker-compose; credentials come from environment variables.
+receivers:
+  db2:
+    hostname: "db2"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "SAMPLE"
+    collection_interval: "30s"
+    tls:
+      insecure: true
+
+exporters:
+  otlp:
+    endpoint: "http://otel-collector:4317"
+    tls:
+      insecure: true

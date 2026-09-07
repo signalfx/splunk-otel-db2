@@ -1,0 +1,77 @@
+# Default values for splunk-otel-db2 Helm chart.
+
+image:
+  repository: ghcr.io/signalfx/splunk-otel-db2
+  pullPolicy: IfNotPresent
+  # Overrides the image tag. Defaults to the chart appVersion.
+  tag: ""
+
+# Number of receiver replicas. Each replica opens its own JDBC connection(s).
+# Use 1 unless you are sharding databases across multiple pods.
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ── Receiver configuration ───────────────────────────────────────────────────
+# Each entry under `receivers` maps to a db2/<name> pipeline.
+# `credentialsSecret` is the name of a pre-existing Kubernetes Secret with
+# keys DB2_USER and DB2_PASSWORD. If `createSecret` is true, the chart creates
+# the Secret from `username` / `password` (not recommended for production).
+receivers:
+  - name: default
+    hostname: "localhost"
+    port: 50000
+    database: "SAMPLE"
+    collectionInterval: "30s"
+    # Reference a pre-existing Secret containing DB2_USER and DB2_PASSWORD.
+    # If set, `username` and `password` below are ignored.
+    credentialsSecret: ""
+    # Used only when credentialsSecret is empty — creates a Secret from these values.
+    username: ""
+    password: ""
+    tls:
+      insecure: true
+    topQueryEnabled: false
+    querySampleEnabled: false
+
+# ── OTLP exporter ────────────────────────────────────────────────────────────
+otlp:
+  endpoint: "http://otel-collector:4317"
+  headers: {}
+  compression: ""
+  tls:
+    insecure: true
+
+# Extra environment variables injected into the pod (e.g. for ${env:VAR} config references)
+extraEnv: []
+# - name: MY_VAR
+#   value: "my-value"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

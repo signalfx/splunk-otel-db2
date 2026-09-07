@@ -1,0 +1,108 @@
+# Local development stack: DB2 + splunk-otel-db2 receiver + OTel Collector + Prometheus + Loki + Grafana
+#
+# Quick start:
+#   export DB2_USER=db2inst1
+#   export DB2_PASSWORD=password123
+#   docker compose up --build
+#
+# Grafana:    http://localhost:3000  (admin / admin)
+# Prometheus: http://localhost:9090
+# DB2:        localhost:50000 / database SAMPLE
+
+services:
+
+  db2:
+    image: icr.io/db2_community/db2:latest
+    platform: linux/amd64
+    container_name: splunk-db2
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INST1_PASSWORD: ${DB2_PASSWORD:-password123}
+      DBNAME: SAMPLE
+      DB2_WORKLOAD: OLTP
+      AUTOCONFIG: "false"
+    ports:
+      - "50000:50000"
+    volumes:
+      - db2-data:/database
+    shm_size: '2gb'
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 16384
+        hard: 16384
+    healthcheck:
+      test: ["CMD-SHELL", "su - db2inst1 -c 'db2 connect to SAMPLE && db2 connect reset' || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 20
+      start_period: 300s
+
+  receiver:
+    build:
+      context: .
+      dockerfile: packaging/docker/Dockerfile
+    container_name: splunk-otel-db2
+    environment:
+      DB2_USER: ${DB2_USER:-db2inst1}
+      DB2_PASSWORD: ${DB2_PASSWORD:-password123}
+    volumes:
+      - ./testdata/docker-config.yaml:/etc/splunk-otel-db2/config.yaml:ro
+    depends_on:
+      db2:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: splunk-otel-collector
+    volumes:
+      - ./packaging/docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # collector self-metrics
+    depends_on:
+      - prometheus
+      - loki
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: splunk-prometheus
+    volumes:
+      - ./packaging/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  loki:
+    image: grafana/loki:latest
+    container_name: splunk-loki
+    volumes:
+      - ./packaging/docker/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: splunk-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes:
+      - ./packaging/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  db2-data:
+  grafana-data:

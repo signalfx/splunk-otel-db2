@@ -1,0 +1,34 @@
+[Unit]
+Description=Splunk OpenTelemetry DB2 Receiver
+Documentation=https://github.com/signalfx/splunk-otel-db2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=splunk-otel-db2
+Group=splunk-otel-db2
+
+# Credentials are loaded from /etc/splunk-otel-db2/env (key=value format).
+# Create this file with DB2_USER and DB2_PASSWORD before starting the service.
+EnvironmentFile=-/etc/splunk-otel-db2/env
+
+ExecStart=/opt/splunk-otel-db2/jre/bin/java \
+    -jar /opt/splunk-otel-db2/splunk-otel-db2.jar \
+    /etc/splunk-otel-db2/config.yaml
+
+Restart=on-failure
+RestartSec=5s
+
+# Harden the service
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/splunk-otel-db2
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=splunk-otel-db2
+
+[Install]
+WantedBy=multi-user.target

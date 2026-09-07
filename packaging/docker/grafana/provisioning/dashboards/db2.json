@@ -1,0 +1,135 @@
+{
+  "title": "IBM DB2 — Metrics & Query Samples",
+  "uid": "db2-metrics",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Connections",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "db2_db_db2_connections", "legendFormat": "Connections", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 2,
+      "title": "Deadlocks",
+      "type": "stat",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "db2_db_db2_deadlocks", "legendFormat": "Deadlocks", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 3,
+      "title": "Lock Waits",
+      "type": "stat",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "db2_db_db2_lock_waits", "legendFormat": "Lock Waits", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 9,
+      "title": "Lock Timeouts",
+      "type": "stat",
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "db2_db_db2_lock_timeouts", "legendFormat": "Timeouts", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 10,
+      "title": "Lock Wait Time (ms)",
+      "type": "stat",
+      "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "db2_db_db2_lock_wait_time_milliseconds", "legendFormat": "ms", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 4,
+      "title": "Buffer Pool Hit Ratio %",
+      "type": "gauge",
+      "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "db2_db_db2_buffer_pool_hit_ratio_percent", "legendFormat": "{{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"min": 0, "max": 100, "unit": "percent"}}
+    },
+    {
+      "id": 5,
+      "title": "Active Connections Over Time",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 4, "w": 8, "h": 8},
+      "targets": [{"expr": "db2_db_db2_connections", "legendFormat": "Connections", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 6,
+      "title": "Buffer Pool Hit Ratio Over Time",
+      "type": "timeseries",
+      "gridPos": {"x": 8, "y": 4, "w": 8, "h": 8},
+      "targets": [{"expr": "db2_db_db2_buffer_pool_hit_ratio_percent", "legendFormat": "{{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}}
+    },
+    {
+      "id": 11,
+      "title": "Buffer Pool Data Reads Over Time",
+      "type": "timeseries",
+      "gridPos": {"x": 16, "y": 4, "w": 8, "h": 8},
+      "targets": [{"expr": "db2_db_db2_buffer_pool_data_reads", "legendFormat": "{{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 7,
+      "title": "Tablespace Usage (bytes)",
+      "type": "bargauge",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 6},
+      "targets": [
+        {"expr": "db2_db_db2_tablespace_used_bytes", "legendFormat": "Used — {{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}},
+        {"expr": "db2_db_db2_tablespace_free_bytes", "legendFormat": "Free — {{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "id": 8,
+      "title": "Lock Wait Time Over Time",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 6},
+      "targets": [{"expr": "db2_db_db2_lock_wait_time_milliseconds", "legendFormat": "Lock Wait Time", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 12,
+      "title": "Top Queries (by avg elapsed time)",
+      "type": "logs",
+      "gridPos": {"x": 0, "y": 18, "w": 24, "h": 10},
+      "targets": [
+        {
+          "expr": "{service_name=\"splunk-otel-db2\"} | json | event_name=\"db.server.top_query\"",
+          "legendFormat": "",
+          "datasource": {"type": "loki", "uid": "loki"}
+        }
+      ],
+      "datasource": {"type": "loki", "uid": "loki"},
+      "options": {"showLabels": true, "showTime": true, "wrapLogMessage": true}
+    },
+    {
+      "id": 13,
+      "title": "Query Samples (currently executing)",
+      "type": "logs",
+      "gridPos": {"x": 0, "y": 28, "w": 24, "h": 10},
+      "targets": [
+        {
+          "expr": "{service_name=\"splunk-otel-db2\"} | json | event_name=\"db.server.query_sample\"",
+          "legendFormat": "",
+          "datasource": {"type": "loki", "uid": "loki"}
+        }
+      ],
+      "datasource": {"type": "loki", "uid": "loki"},
+      "options": {"showLabels": true, "showTime": true, "wrapLogMessage": true}
+    }
+  ],
+  "time": {"from": "now-30m", "to": "now"},
+  "refresh": "30s"
+}
