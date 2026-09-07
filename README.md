@@ -298,10 +298,12 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
 ### systemd (Linux)
 
-The `packaging/systemd/` directory contains a hardened unit file. The receiver binary is expected at `/opt/splunk-otel-db2/splunk-otel-db2.jar` and the JRE at `/opt/jre` (matching the Docker image layout).
+The `packaging/systemd/` directory contains a hardened unit file. The receiver sends OTLP directly to whatever endpoint you put in `config.yaml` — no OTel Collector required, though you can point it at one if you have it.
+
+The receiver binary is expected at `/opt/splunk-otel-db2/splunk-otel-db2.jar` and the JRE at `/opt/jre`.
 
 ```bash
-# 1. Copy the fat jar and the custom JRE produced by the Docker build
+# 1. Copy the fat jar and the custom JRE
 sudo mkdir -p /opt/splunk-otel-db2 /opt/jre
 sudo cp build/libs/splunk-otel-db2-*.jar /opt/splunk-otel-db2/splunk-otel-db2.jar
 # Copy the custom JRE from the Docker image, or build it separately with:
@@ -313,9 +315,31 @@ sudo cp build/libs/splunk-otel-db2-*.jar /opt/splunk-otel-db2/splunk-otel-db2.ja
 # 2. Create the service user
 sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
 
-# 3. Install config and credentials
+# 3. Write config — set otlp.endpoint to your backend or local OTel Collector
 sudo mkdir -p /etc/splunk-otel-db2
-sudo cp my-config.yaml /etc/splunk-otel-db2/config.yaml
+sudo tee /etc/splunk-otel-db2/config.yaml > /dev/null <<'EOF'
+receivers:
+  db2:
+    hostname: "db2.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "SAMPLE"
+    collection_interval: "30s"
+    tls:
+      insecure: true
+
+exporters:
+  otlp:
+    # Standalone: point directly at your backend
+    endpoint: "https://ingest.us1.signalfx.com:4317"
+    # Or via a local OTel Collector:
+    # endpoint: "http://localhost:4317"
+    tls:
+      insecure: false
+EOF
+
+# 4. Store credentials (readable only by the service user)
 sudo tee /etc/splunk-otel-db2/env > /dev/null <<'EOF'
 DB2_USER=db2mon
 DB2_PASSWORD=<secret>
@@ -323,7 +347,7 @@ EOF
 sudo chmod 640 /etc/splunk-otel-db2/env
 sudo chown root:splunk-otel-db2 /etc/splunk-otel-db2/env
 
-# 4. Install and start the service
+# 5. Install and start the service
 sudo cp packaging/systemd/splunk-otel-db2.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now splunk-otel-db2
