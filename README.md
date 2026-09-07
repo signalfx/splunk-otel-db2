@@ -332,29 +332,52 @@ sudo journalctl -u splunk-otel-db2 -f
 
 ### Helm (Kubernetes)
 
+The receiver sends OTLP directly to whatever endpoint you configure. Set `otlp.endpoint` to your OTel Collector, Splunk Observability Cloud ingest, or any OTLP-compatible backend.
+
+**Standalone — send direct to your OTLP backend:**
+
 ```bash
-# Using a pre-existing credentials Secret
 helm install my-db2 packaging/helm \
   --set receivers[0].hostname=db2.example.com \
   --set receivers[0].database=PROD \
   --set receivers[0].credentialsSecret=my-db2-credentials \
-  --set otlp.endpoint=http://otel-collector:4317
+  --set otlp.endpoint=https://ingest.us1.signalfx.com:4317 \
+  --set otlp.tls.insecure=false
+```
 
-# Chart creates a Secret from inline values (not recommended for production)
+**With an OTel Collector in the same cluster:**
+
+```bash
 helm install my-db2 packaging/helm \
   --set receivers[0].hostname=db2.example.com \
   --set receivers[0].database=PROD \
-  --set receivers[0].username=db2mon \
-  --set receivers[0].password=secret \
-  --set otlp.endpoint=http://otel-collector:4317
+  --set receivers[0].credentialsSecret=my-db2-credentials \
+  --set otlp.endpoint=http://otel-collector.monitoring.svc:4317
+```
 
-# If pulling from a private GHCR registry, supply an imagePullSecret:
-helm install my-db2 packaging/helm \
-  --set imagePullSecrets[0].name=ghcr-credentials \
-  ...
+**Credentials options** — either reference a pre-existing Secret (recommended):
+
+```bash
+# Secret must have keys DB2_USER and DB2_PASSWORD
+--set receivers[0].credentialsSecret=my-db2-credentials
+```
+
+Or let the chart create one from inline values (not recommended for production):
+
+```bash
+--set receivers[0].username=db2mon \
+--set receivers[0].password=secret
+```
+
+**Pulling from a private GHCR registry:**
+
+```bash
+--set imagePullSecrets[0].name=ghcr-credentials
 ```
 
 ### Docker
+
+**Standalone — send direct to your OTLP backend:**
 
 ```bash
 docker run --rm \
@@ -364,11 +387,11 @@ docker run --rm \
   ghcr.io/signalfx/splunk-otel-db2:latest
 ```
 
+The config file controls everything — DB2 connection, OTLP endpoint, collection intervals. See the [Configuration](#configuration) section for the full schema.
+
 ### docker-compose (local dev)
 
-The repo ships a `docker-compose.yml` that builds and runs the receiver against your existing DB2 instance.
-
-**Send directly to your OTLP backend:**
+**Standalone — send direct to your OTLP backend:**
 
 ```bash
 export DB2_HOST=db2.example.com
@@ -378,13 +401,15 @@ export OTLP_ENDPOINT=http://your-backend:4317
 docker compose up --build
 ```
 
-**With a local OTel Collector** (prints telemetry to stdout — useful when you don't have a backend handy):
+**With a local OTel Collector** (useful when you don't have a backend — prints telemetry to stdout):
 
 ```bash
 export DB2_HOST=db2.example.com
 export DB2_USER=db2mon
 export DB2_PASSWORD=secret
 docker compose --profile collector up --build
+
+# Watch the metrics and log records arrive
 docker compose logs -f otel-collector
 ```
 
