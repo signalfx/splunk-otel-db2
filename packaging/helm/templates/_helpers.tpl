@@ -64,6 +64,7 @@ Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)
 {{- if .receiver.credentialsSecret }}
 {{- .receiver.credentialsSecret }}
 {{- else }}
-{{- printf "%s-credentials-%s" .releaseName .receiver.name | trunc 63 | trimSuffix "-" }}
+{{- $prefix := printf "%s-credentials" .releaseName | trunc 43 | trimSuffix "-" }}
+{{- printf "%s-%s" $prefix .receiver.name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}

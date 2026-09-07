@@ -298,19 +298,16 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
 ### systemd (Linux)
 
-The `packaging/systemd/` directory contains a hardened unit file. The receiver sends OTLP directly to whatever endpoint you put in `config.yaml` — no OTel Collector required, though you can point it at one if you have it.
+The `packaging/systemd/` directory contains a hardened unit file. Set `otlp.endpoint` in `config.yaml` to wherever your OTel Collector is — same host, remote server, or any OTLP-compatible endpoint.
 
-The receiver binary is expected at `/opt/splunk-otel-db2/splunk-otel-db2.jar` and the JRE at `/opt/jre`.
+The receiver requires Java 11+. Install a JRE from your distribution's package manager — the Docker image's custom JRE is built against glibc (Debian) and can also be reused on glibc hosts.
 
 ```bash
-# 1. Copy the fat jar and the custom JRE
-sudo mkdir -p /opt/splunk-otel-db2 /opt/jre
+# 1. Install a JRE (Java 11+) and copy the fat jar
+sudo apt-get install -y openjdk-17-jre-headless   # Debian/Ubuntu
+# sudo dnf install -y java-17-openjdk-headless     # RHEL/Fedora
+sudo mkdir -p /opt/splunk-otel-db2
 sudo cp build/libs/splunk-otel-db2-*.jar /opt/splunk-otel-db2/splunk-otel-db2.jar
-# Copy the custom JRE from the Docker image, or build it separately with:
-#   jlink --add-modules java.base,java.desktop,java.logging,java.management,\
-#     java.naming,java.rmi,java.security.jgss,java.sql,java.transaction.xa,\
-#     java.xml,jdk.crypto.ec,jdk.unsupported \
-#     --strip-debug --no-man-pages --no-header-files --compress=2 --output /opt/jre
 
 # 2. Create the service user
 sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
@@ -331,12 +328,10 @@ receivers:
 
 exporters:
   otlp:
-    # Standalone: point directly at your backend
-    endpoint: "https://ingest.us1.signalfx.com:4317"
-    # Or via a local OTel Collector:
-    # endpoint: "http://localhost:4317"
+    # Send to an OTel Collector running on this host or elsewhere:
+    endpoint: "http://localhost:4317"
     tls:
-      insecure: false
+      insecure: true
 EOF
 
 # 4. Store credentials (readable only by the service user)
@@ -356,52 +351,66 @@ sudo journalctl -u splunk-otel-db2 -f
 
 ### Helm (Kubernetes)
 
-The receiver sends OTLP directly to whatever endpoint you configure. Set `otlp.endpoint` to your OTel Collector, Splunk Observability Cloud ingest, or any OTLP-compatible backend.
+The receiver exports via OTLP/gRPC. `otlp.endpoint` can point at an OTel Collector running anywhere — in the same cluster, on another host, or as a sidecar. Use a values file to avoid shell glob issues with array syntax.
 
-**Standalone — send direct to your OTLP backend:**
+**Example `my-values.yaml`:**
 
-```bash
-helm install my-db2 packaging/helm \
-  --set receivers[0].hostname=db2.example.com \
-  --set receivers[0].database=PROD \
-  --set receivers[0].credentialsSecret=my-db2-credentials \
-  --set otlp.endpoint=https://ingest.us1.signalfx.com:4317 \
-  --set otlp.tls.insecure=false
+```yaml
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    credentialsSecret: "my-db2-credentials"   # pre-existing Secret with DB2_USER / DB2_PASSWORD
+    tls:
+      insecure: true
+    topQueryEnabled: false
+    querySampleEnabled: false
+
+otlp:
+  # OTel Collector running in the same cluster:
+  endpoint: "http://otel-collector.monitoring.svc:4317"
+  tls:
+    insecure: true
 ```
 
-**With an OTel Collector in the same cluster:**
-
 ```bash
-helm install my-db2 packaging/helm \
-  --set receivers[0].hostname=db2.example.com \
-  --set receivers[0].database=PROD \
-  --set receivers[0].credentialsSecret=my-db2-credentials \
-  --set otlp.endpoint=http://otel-collector.monitoring.svc:4317
+helm install my-db2 packaging/helm -f my-values.yaml
 ```
 
-**Credentials options** — either reference a pre-existing Secret (recommended):
+**OTel Collector running separately (outside the cluster):**
 
-```bash
-# Secret must have keys DB2_USER and DB2_PASSWORD
---set receivers[0].credentialsSecret=my-db2-credentials
+```yaml
+otlp:
+  endpoint: "http://collector.example.com:4317"
+  tls:
+    insecure: true
 ```
 
-Or let the chart create one from inline values (not recommended for production):
+**Credentials** — reference a pre-existing Secret (recommended for production):
 
-```bash
---set receivers[0].username=db2mon \
---set receivers[0].password=secret
+```yaml
+credentialsSecret: "my-db2-credentials"   # Secret must have keys DB2_USER and DB2_PASSWORD
+```
+
+Or let the chart create one (not recommended for production):
+
+```yaml
+username: "db2mon"
+password: "secret"
 ```
 
 **Pulling from a private GHCR registry:**
 
-```bash
---set imagePullSecrets[0].name=ghcr-credentials
+```yaml
+imagePullSecrets:
+  - name: ghcr-credentials
 ```
 
 ### Docker
 
-**Standalone — send direct to your OTLP backend:**
+Mount a config file and run. `otlp.endpoint` in the config points at wherever your OTel Collector is — same host, remote, or a sidecar container.
 
 ```bash
 docker run --rm \

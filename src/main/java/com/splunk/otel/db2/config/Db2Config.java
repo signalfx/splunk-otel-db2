@@ -223,7 +223,8 @@ public class Db2Config {
         Object v = map.get(key);
         if (v instanceof Integer) return (Integer) v;
         if (v instanceof String) {
-            try { return Integer.parseInt((String) v); }
+            String expanded = expandEnv((String) v);
+            try { return Integer.parseInt(expanded); }
             catch (NumberFormatException e) { /* fall through */ }
         }
         throw new IllegalStateException("Config field '" + key + "' must be an integer, got: " + v.getClass().getSimpleName() + " (" + v + ")");

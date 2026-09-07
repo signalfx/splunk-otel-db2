@@ -13,7 +13,7 @@ Group=splunk-otel-db2
 # Create this file with DB2_USER and DB2_PASSWORD before starting the service.
 EnvironmentFile=-/etc/splunk-otel-db2/env
 
-ExecStart=/opt/jre/bin/java \
+ExecStart=/usr/bin/java \
     -Djava.io.tmpdir=/tmp \
     -jar /opt/splunk-otel-db2/splunk-otel-db2.jar \
     /etc/splunk-otel-db2/config.yaml
