@@ -64,7 +64,12 @@ Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)
 {{- if .receiver.credentialsSecret }}
 {{- .receiver.credentialsSecret }}
 {{- else }}
-{{- $prefix := printf "%s-credentials" .releaseName | trunc 43 | trimSuffix "-" }}
-{{- printf "%s-%s" $prefix .receiver.name | trunc 63 | trimSuffix "-" }}
+{{- $full := printf "%s-credentials-%s" .releaseName .receiver.name }}
+{{- if le (len $full) 63 }}
+{{- $full }}
+{{- else }}
+{{- $hash := $full | sha256sum | trunc 6 }}
+{{- printf "%s-credentials-%s" .releaseName .receiver.name | trunc 55 | trimSuffix "-" }}-{{ $hash }}
+{{- end }}
 {{- end }}
 {{- end }}

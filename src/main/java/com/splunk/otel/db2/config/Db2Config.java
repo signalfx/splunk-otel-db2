@@ -109,7 +109,7 @@ public class Db2Config {
                 Map<String, Object> otlp = (Map<String, Object>) exporters.get("otlp");
                 if (otlp != null) {
                     if (otlp.get("endpoint") != null)
-                        cfg.getExporters().getOtlp().setEndpoint(asString(otlp, "endpoint"));
+                        cfg.getExporters().getOtlp().setEndpoint(expandEnv(asString(otlp, "endpoint")));
                     Object headersNode = otlp.get("headers");
                     if (headersNode != null) {
                         if (!(headersNode instanceof Map))
