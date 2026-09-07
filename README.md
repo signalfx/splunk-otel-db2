@@ -366,11 +366,12 @@ docker run --rm \
 
 ### docker-compose (local dev)
 
-The repo ships a `docker-compose.yml` that spins up DB2 + the receiver + an OTel Collector. The collector prints all received telemetry to stdout via the `debug` exporter — useful for verifying the receiver is working without any external infrastructure.
+The repo ships a `docker-compose.yml` that runs the receiver alongside an OTel Collector. Point it at your existing DB2 instance — DB2 itself is not included. The collector prints all received telemetry to stdout via the `debug` exporter.
 
 ```bash
-export DB2_USER=db2inst1
-export DB2_PASSWORD=password123
+export DB2_HOST=db2.example.com
+export DB2_USER=db2mon
+export DB2_PASSWORD=secret
 docker compose up --build
 
 # Tail collector output to see metrics and log records

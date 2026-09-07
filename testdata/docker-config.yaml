@@ -1,9 +1,7 @@
-# Config used by the receiver container in docker-compose.
-# DB2 hostname is the service name from docker-compose; credentials come from environment variables.
 receivers:
   db2:
-    hostname: "db2"
-    hostport: 50000
+    hostname: "${env:DB2_HOST}"
+    hostport: "${env:DB2_PORT}"
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"

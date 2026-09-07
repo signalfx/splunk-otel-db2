@@ -1,44 +1,16 @@
-# Local development stack: DB2 + splunk-otel-db2 receiver + OTel Collector
+# Local development stack: splunk-otel-db2 receiver + OTel Collector
 #
-# Quick start:
-#   export DB2_USER=db2inst1
-#   export DB2_PASSWORD=password123
+# Requires an existing DB2 instance. Set DB2_HOST (and optionally DB2_PORT)
+# to point at it, then supply credentials:
+#
+#   export DB2_HOST=db2.example.com
+#   export DB2_USER=db2mon
+#   export DB2_PASSWORD=secret
 #   docker compose up --build
 #
 # OTel Collector metrics: http://localhost:8888/metrics
-# DB2:                    localhost:50000 / database SAMPLE
 
 services:
-
-  db2:
-    image: icr.io/db2_community/db2:latest
-    platform: linux/amd64
-    container_name: splunk-db2
-    privileged: true
-    environment:
-      LICENSE: accept
-      DB2INST1_PASSWORD: ${DB2_PASSWORD:-password123}
-      DBNAME: SAMPLE
-      DB2_WORKLOAD: OLTP
-      AUTOCONFIG: "false"
-    ports:
-      - "50000:50000"
-    volumes:
-      - db2-data:/database
-    shm_size: '2gb'
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-      nproc:
-        soft: 16384
-        hard: 16384
-    healthcheck:
-      test: ["CMD-SHELL", "su - db2inst1 -c 'db2 connect to SAMPLE && db2 connect reset' || exit 1"]
-      interval: 30s
-      timeout: 30s
-      retries: 20
-      start_period: 300s
 
   receiver:
     build:
@@ -46,13 +18,13 @@ services:
       dockerfile: packaging/docker/Dockerfile
     container_name: splunk-otel-db2
     environment:
-      DB2_USER: ${DB2_USER:-db2inst1}
-      DB2_PASSWORD: ${DB2_PASSWORD:-password123}
+      DB2_HOST: ${DB2_HOST:?DB2_HOST is required}
+      DB2_PORT: ${DB2_PORT:-50000}
+      DB2_USER: ${DB2_USER:?DB2_USER is required}
+      DB2_PASSWORD: ${DB2_PASSWORD:?DB2_PASSWORD is required}
     volumes:
       - ./testdata/docker-config.yaml:/etc/splunk-otel-db2/config.yaml:ro
     depends_on:
-      db2:
-        condition: service_healthy
       otel-collector:
         condition: service_started
 
@@ -66,6 +38,3 @@ services:
       - "4317:4317"   # OTLP gRPC
       - "4318:4318"   # OTLP HTTP
       - "8888:8888"   # collector self-metrics
-
-volumes:
-  db2-data:
