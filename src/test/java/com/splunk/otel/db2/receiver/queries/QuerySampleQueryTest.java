@@ -59,6 +59,7 @@ class QuerySampleQueryTest {
                          String appHandle, long member, long cpuUs, long lockWaitMs) throws Exception {
         when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
         when(rs.getString("ACTIVITY_STATE")).thenReturn(state);
+        when(rs.getString("OPERATION_NAME")).thenReturn("READ");
         when(rs.getString("LOCAL_START_TIME")).thenReturn(startTime);
         when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(elapsedSec);
         when(rs.getString("CLIENT_USERID")).thenReturn(authId);

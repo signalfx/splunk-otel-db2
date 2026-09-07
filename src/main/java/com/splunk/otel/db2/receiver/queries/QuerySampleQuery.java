@@ -47,6 +47,7 @@ public class QuerySampleQuery {
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
         "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
+        "       S.ACTIVITY_TYPE AS OPERATION_NAME, " +
         "       CHAR(CURRENT TIMESTAMP - S.ELAPSED_TIME_SEC SECONDS) AS LOCAL_START_TIME, " +
         "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
         "       COALESCE(NULLIF(C.CLIENT_USERID, ''), S.SESSION_AUTH_ID) AS CLIENT_USERID, " +
@@ -72,6 +73,7 @@ public class QuerySampleQuery {
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
         "       CONCAT(CONCAT(S.ACTIVITY_STATE, ' '), S.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
+        "       S.ACTIVITY_TYPE AS OPERATION_NAME, " +
         "       CHAR(CURRENT TIMESTAMP - S.ELAPSED_TIME_SEC SECONDS) AS LOCAL_START_TIME, " +
         "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
         "       COALESCE(NULLIF(C.CLIENT_USERID, ''), S.SESSION_AUTH_ID) AS CLIENT_USERID, " +
@@ -105,6 +107,7 @@ public class QuerySampleQuery {
         "              THEN CAST(SS.STMT_OPERATION AS VARCHAR(22)) " +
         "              ELSE CAST(SA.APPL_STATUS AS VARCHAR(22)) " +
         "         END ) AS ACTIVITY_STATE, " +
+        "       CAST(NULL AS VARCHAR(22)) AS OPERATION_NAME, " +
         "       CHAR(SS.STMT_START) AS LOCAL_START_TIME, " +
         "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) AS WALL_ELAPSED_SEC, " +
         "       COALESCE(NULLIF(SA.EXECUTION_ID, ''), SA.PRIMARY_AUTH_ID) AS CLIENT_USERID, " +
@@ -135,6 +138,7 @@ public class QuerySampleQuery {
     private final int maxQuerySampleCount;
     private final boolean useSnapshotMonitor;
     private final int db2Version;
+    private final int queryTimeoutSeconds;
 
     public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
                             Logger otelLogger, int maxQuerySampleCount,
@@ -145,15 +149,23 @@ public class QuerySampleQuery {
     public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
                             Logger otelLogger, int maxQuerySampleCount,
                             boolean useSnapshotMonitor, int db2Version) {
-        this.connSupplier        = connSupplier;
-        this.dbName              = dbName;
-        this.otelLogger          = otelLogger;
-        this.maxQuerySampleCount = maxQuerySampleCount;
-        this.useSnapshotMonitor  = useSnapshotMonitor;
-        this.db2Version          = db2Version;
-        log.info("QuerySampleQuery: using {} path{}",
+        this(connSupplier, dbName, otelLogger, maxQuerySampleCount, useSnapshotMonitor, db2Version, 30);
+    }
+
+    public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
+                            Logger otelLogger, int maxQuerySampleCount,
+                            boolean useSnapshotMonitor, int db2Version, int queryTimeoutSeconds) {
+        this.connSupplier         = connSupplier;
+        this.dbName               = dbName;
+        this.otelLogger           = otelLogger;
+        this.maxQuerySampleCount  = maxQuerySampleCount;
+        this.useSnapshotMonitor   = useSnapshotMonitor;
+        this.db2Version           = db2Version;
+        this.queryTimeoutSeconds  = queryTimeoutSeconds;
+        log.info("QuerySampleQuery: using {} path{}, timeout={}s",
             useSnapshotMonitor ? "SNAP_GET_*" : "MON_CURRENT_SQL",
-            (!useSnapshotMonitor && db2Version >= DB2_VERSION_10_5) ? " with MON_GET_ACTIVITY (10.5+)" : "");
+            (!useSnapshotMonitor && db2Version >= DB2_VERSION_10_5) ? " with MON_GET_ACTIVITY (10.5+)" : "",
+            queryTimeoutSeconds);
     }
 
     public void collect() {
@@ -169,42 +181,45 @@ public class QuerySampleQuery {
 
         try {
             Connection conn = connSupplier.get();
-            try (Statement st = conn.createStatement();
-                 ResultSet rs = st.executeQuery(sql)) {
+            try (Statement st = conn.createStatement()) {
+                st.setQueryTimeout(queryTimeoutSeconds);
+                try (ResultSet rs = st.executeQuery(sql)) {
+                    Instant now = Instant.now();
+                    int count = 0;
+                    while (rs.next()) {
+                        String rawSql = rs.getString("STMT_TEXT");
+                        if (rawSql == null || rawSql.isBlank()) continue;
 
-                Instant now = Instant.now();
-                int count = 0;
-                while (rs.next()) {
-                    String rawSql = rs.getString("STMT_TEXT");
-                    if (rawSql == null || rawSql.isBlank()) continue;
+                        String appHandle  = rs.getString("APPLICATION_HANDLE");
+                        String obfuscated = SqlObfuscator.obfuscate(rawSql.trim());
+                        if (SqlObfuscator.OBFUSCATION_FAILED.equals(obfuscated)) {
+                            log.warn("QuerySampleQuery: obfuscation failed for application_handle={} — record dropped", appHandle);
+                            continue;
+                        }
+                        String state      = rs.getString("ACTIVITY_STATE");
+                        String opName     = rs.getString("OPERATION_NAME");
+                        String startTime  = rs.getString("LOCAL_START_TIME");
+                        double elapsedSec = rs.getLong("WALL_ELAPSED_SEC");
+                        String authId     = rs.getString("CLIENT_USERID");
+                        String clientHost = rs.getString("CLIENT_WRKSTNNAME");
+                        long member       = rs.getLong("MEMBER");
+                        long cpuUs        = rs.getLong("CPU_US");
+                        long waitMs       = useSnapshotMonitor ? -1L : rs.getLong("LOCK_WAIT_TIME_MS");
 
-                    String appHandle  = rs.getString("APPLICATION_HANDLE");
-                    String obfuscated = SqlObfuscator.obfuscate(rawSql.trim());
-                    if (SqlObfuscator.OBFUSCATION_FAILED.equals(obfuscated)) {
-                        log.warn("QuerySampleQuery: obfuscation failed for application_handle={} — record dropped", appHandle);
-                        continue;
+                        QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
+                            .appHandle(appHandle)
+                            .activityState(state)
+                            .operationName(opName)
+                            .queryStart(startTime)
+                            .userName(authId)
+                            .clientAddress(clientHost)
+                            .cpuTimeMicros(cpuUs)
+                            .waitTimeMillis(waitMs)
+                            .emit(otelLogger, now);
+                        count++;
                     }
-                    String state      = rs.getString("ACTIVITY_STATE");
-                    String startTime  = rs.getString("LOCAL_START_TIME");
-                    double elapsedSec = rs.getLong("WALL_ELAPSED_SEC");
-                    String authId     = rs.getString("CLIENT_USERID");
-                    String clientHost = rs.getString("CLIENT_WRKSTNNAME");
-                    long member       = rs.getLong("MEMBER");
-                    long cpuUs        = rs.getLong("CPU_US");
-                    long waitMs       = useSnapshotMonitor ? -1L : rs.getLong("LOCK_WAIT_TIME_MS");
-
-                    QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
-                        .appHandle(appHandle)
-                        .activityState(state)
-                        .queryStart(startTime)
-                        .userName(authId)
-                        .clientAddress(clientHost)
-                        .cpuTimeMicros(cpuUs)
-                        .waitTimeMillis(waitMs)
-                        .emit(otelLogger, now);
-                    count++;
+                    log.debug("QuerySampleQuery: emitted {} samples", count);
                 }
-                log.debug("QuerySampleQuery: emitted {} samples", count);
             }
         } catch (Exception e) {
             log.warn("QuerySampleQuery collection failed: {}", e.getMessage());

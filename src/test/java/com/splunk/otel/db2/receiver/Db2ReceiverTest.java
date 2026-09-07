@@ -45,6 +45,7 @@ class Db2ReceiverTest {
             .build();
 
         config = new Db2ReceiverConfig();
+        config.setHostname("db2-test.example.com");
         config.setDatabase("TESTDB");
         config.setUsername("db2inst1");
         config.setPassword("password");

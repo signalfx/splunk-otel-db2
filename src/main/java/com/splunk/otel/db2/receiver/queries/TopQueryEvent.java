@@ -106,7 +106,6 @@ public final class TopQueryEvent {
             .setSeverity(Severity.INFO)
             .setSeverityText("INFO")
             .setTimestamp(timestamp.toEpochMilli(), TimeUnit.MILLISECONDS)
-            .setBody(queryText)
             .setAllAttributes(b.build())
             .emit();
     }

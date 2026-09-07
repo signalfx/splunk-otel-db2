@@ -24,31 +24,135 @@ DB2_USER=db2inst1 DB2_PASSWORD=secret ./gradlew run --args="my-config.yaml"
 
 ## Configuration
 
+### Single database
+
 ```yaml
 receivers:
   db2:
-    hostname: "localhost"       # DB2 host
-    hostport: 50000             # DB2 port (default 50000)
-    username: "${env:DB2_USER}" # supports ${env:VAR} substitution
+    hostname: "localhost"              # DB2 host
+    hostport: 50000                    # DB2 port (default 50000)
+    username: "${env:DB2_USER}"        # supports ${env:VAR} substitution
     password: "${env:DB2_PASSWORD}"
-    database: "SAMPLE"          # database name (uppercase)
-    collection_interval: "30s"  # metrics collection interval
-    top_query_enabled: false         # set true to enable top query collection (opt-in)
-    top_query_count: 250             # top N queries to emit per interval (must be > 0)
-    top_query_interval: "60s"        # how often to collect top queries (minimum 60s)
-    query_sample_enabled: false      # set true to enable query sampling (opt-in)
-    max_query_sample_count: 1000     # max active statements sampled per cycle (must be > 0)
-    query_sample_interval: "10s"     # how often to sample active queries
-    use_snapshot_monitor: false      # set true to use SNAP_GET_STMT fallback path
+    database: "SAMPLE"                 # database name (uppercase)
+    collection_interval: "30s"         # metrics collection interval
+    connect_timeout_seconds: 10        # JDBC login + socket timeout (default: 10)
+    top_query_enabled: false           # set true to enable top query collection (opt-in)
+    top_query_count: 250               # top N queries to emit per interval (must be > 0)
+    top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
+    query_sample_enabled: false        # set true to enable query sampling (opt-in)
+    max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
+    query_sample_interval: "10s"       # how often to sample active queries
+    use_snapshot_monitor: false        # set true to use SNAP_GET_STMT fallback path
     tls:
-      insecure: true            # set false to enable TLS
+      insecure: true                   # set false to enable TLS
 
 exporters:
   otlp:
     endpoint: "http://localhost:4317"
 ```
 
+### Multiple databases
+
+Use the `receiver/name` component ID syntax — the same pattern used by the OTel Collector. Each key under `receivers` is an independent pipeline with its own JDBC connections, schedulers, and OTel SDK instance. All pipelines share the same OTLP exporter endpoint.
+
+```yaml
+receivers:
+  db2/prod:
+    hostname: "db2-prod-1.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "PROD"
+    collection_interval: "30s"
+    connect_timeout_seconds: 10
+    tls:
+      insecure: false
+
+  db2/analytics:
+    hostname: "db2-prod-2.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER2}"
+    password: "${env:DB2_PASSWORD2}"
+    database: "ANALYTICS"
+    collection_interval: "60s"
+    connect_timeout_seconds: 10
+    tls:
+      insecure: false
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+```
+
+Each pipeline is identified by the `service.instance.id` resource attribute. For remote targets this is `host:port/database`. For loopback targets (`localhost`, `127.0.0.1`, `::1`, or blank) the configured hostname is replaced with the collector machine's own hostname, so co-located sidecars produce unique identities across the fleet.
+
+### Identity overrides
+
+Three fields give explicit control over the OTel resource identity, useful for multi-cluster deployments:
+
+| Field | Config key | Purpose |
+|---|---|---|
+| `service_name` | `service_name` | Override the default `service.name` (`splunk-otel-db2`) |
+| `service_namespace` | `service_namespace` | Set `service.namespace` (omitted when not configured) |
+| `service_instance_id` | `service_instance_id` | Full override of `service.instance.id`; bypasses the auto-generated `host:port/database` |
+
+All three support `${env:VAR}` substitution.
+
+```yaml
+receivers:
+  db2/prod:
+    hostname: "db2-prod-1.example.com"
+    database: "PROD"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    service_name: "payments-db2"
+    service_namespace: "payments"
+    service_instance_id: "payments-db2-prod-1"
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+```
+
+### Resource attribute overrides
+
+Use `resource_attributes` to override individual resource attributes or add custom ones. Values support `${env:VAR}` substitution. Overrides are applied after the identity fields above.
+
+```yaml
+receivers:
+  db2/prod:
+    hostname: "db2-prod-1.example.com"
+    database: "PROD"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    resource_attributes:
+      deployment.environment: "production"
+      team: "platform"
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+```
+
+Standard attributes (`service.name`, `service.instance.id`, `server.address`, `db.system.name`, `db.namespace`) can be overridden. `server.port` must be an integer value. All overrides are applied on top of the defaults — unspecified attributes keep their automatically derived values.
+
 Credential values can be literals or `${env:VAR_NAME}` references.
+
+## Resource usage
+
+Each monitored database uses 1–3 JDBC connections depending on which collectors are enabled:
+
+| Collector | Connection | Always open? |
+|---|---|---|
+| Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
+| Query sample (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
+| Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+
+There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
+
+Heap grows with the number of configured databases: each database gets its own OTel SDK pipeline, metric readers, OTLP exporters, schedulers, and in-memory caches (top-query delta baseline, query-sample deduplication). At steady state expect roughly 50–80 MB base plus ~15–30 MB per additional database. The dominant per-cycle allocation is the `MON_GET_PKG_CACHE_STMT` result set (all matching rows are loaded; `top_query_count` limits how many are emitted after sorting) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
+
+There is no hard limit on the number of databases in a single process. Beyond ~20–30 databases, heap pressure becomes the practical ceiling — raise `-Xmx` or split databases across multiple processes as needed.
 
 ## Metrics
 
@@ -101,12 +205,14 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
+| `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
 | `db2.application_handle` | Application handle / agent ID |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |
-| `db2.cpu_time` | CPU time in seconds (default path only) |
+| `db2.cpu_time` | CPU time in seconds (default path only; omitted on snapshot path) |
+| `db2.wait_time` | Lock wait time in seconds (Db2 10.5+ default path only) |
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
@@ -128,7 +234,7 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 |---|---|
 | `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
-| `db.query.text` | Obfuscated SQL statement (also set as log body) |
+| `db.query.text` | Obfuscated SQL statement |
 | `db2.member` | Db2 member number |
 | `db2.executions` | Total executions added during this interval |
 | `db2.total_exec_time` | Interval execution elapsed time in seconds |
@@ -199,16 +305,18 @@ make clean               # clean build outputs
 
 ## Resource attributes
 
-The receiver sets the following OTel resource attributes on all telemetry:
+The receiver sets the following OTel resource attributes on all telemetry. Any attribute can be overridden or extended using `resource_attributes` in the receiver config (see [Resource attribute overrides](#resource-attribute-overrides)).
 
-| Attribute | Value |
+| Attribute | Default value |
 |---|---|
-| `service.name` | `splunk-otel-db2` |
+| `service.name` | `splunk-otel-db2` (override with `service_name`) |
+| `service.instance.id` | `host:port/database`; loopback hosts replaced with collector hostname (override with `service_instance_id`) |
+| `service.namespace` | not set (set with `service_namespace`) |
+| `server.address` | configured hostname; loopback resolved to collector hostname |
+| `host.name` | configured hostname (operator's typed value, preserved as-is) |
+| `server.port` | configured port (integer) |
 | `db.system.name` | `ibm.db2` |
 | `db.namespace` | configured database name |
-| `server.address` | configured hostname |
-| `server.port` | configured port |
-| `service.instance.id` | `host:port/database` |
 
 ## License
 

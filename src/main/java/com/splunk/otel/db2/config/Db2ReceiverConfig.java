@@ -1,8 +1,11 @@
 package com.splunk.otel.db2.config;
 
 import java.time.Duration;
+import java.util.Collections;
+import java.util.Map;
 
 public class Db2ReceiverConfig {
+    private String componentName = ""; // name after the slash in "db2/<name>"; empty for plain "db2"
     private String hostname = "localhost";
     private int hostport = 50000;
     private String username;
@@ -16,7 +19,16 @@ public class Db2ReceiverConfig {
     private boolean useSnapshotMonitor = false;
     private String querySampleInterval = "10s";
     private String topQueryInterval = "60s";
+    private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
+    private Map<String, String> resourceAttributes = Collections.emptyMap();
+    // G1: explicit identity overrides — null means use the auto-generated value
+    private String serviceName;        // overrides default "splunk-otel-db2"
+    private String serviceNamespace;   // emitted only when set; useful in multi-cluster deployments
+    private String serviceInstanceId;  // full override; bypasses host:port/db composition
+
+    public String getComponentName() { return componentName; }
+    public void setComponentName(String componentName) { this.componentName = componentName; }
 
     public String getHostname() { return resolveEnv(hostname); }
     public void setHostname(String hostname) { this.hostname = hostname; }
@@ -84,8 +96,29 @@ public class Db2ReceiverConfig {
     }
     public void setTopQueryInterval(String topQueryInterval) { this.topQueryInterval = topQueryInterval; }
 
+    public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
+    public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {
+        if (connectTimeoutSeconds <= 0)
+            throw new IllegalArgumentException("connect_timeout_seconds must be > 0, got " + connectTimeoutSeconds);
+        this.connectTimeoutSeconds = connectTimeoutSeconds;
+    }
+
     public TlsConfig getTls() { return tls; }
     public void setTls(TlsConfig tls) { this.tls = tls; }
+
+    public Map<String, String> getResourceAttributes() { return resourceAttributes; }
+    public void setResourceAttributes(Map<String, String> resourceAttributes) {
+        this.resourceAttributes = resourceAttributes != null ? resourceAttributes : Collections.emptyMap();
+    }
+
+    public String getServiceName() { return resolveEnv(serviceName); }
+    public void setServiceName(String serviceName) { this.serviceName = serviceName; }
+
+    public String getServiceNamespace() { return resolveEnv(serviceNamespace); }
+    public void setServiceNamespace(String serviceNamespace) { this.serviceNamespace = serviceNamespace; }
+
+    public String getServiceInstanceId() { return resolveEnv(serviceInstanceId); }
+    public void setServiceInstanceId(String serviceInstanceId) { this.serviceInstanceId = serviceInstanceId; }
 
     // Convenience accessors for JDBC URL construction
     public String getHost() { return getHostname(); }
