@@ -12,14 +12,19 @@ spec:
   template:
     metadata:
       annotations:
-        # Force pod restart when config changes
+        # Force pod restart when config or credentials change
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
         {{- include "splunk-otel-db2.selectorLabels" . | nindent 8 }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ include "splunk-otel-db2.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -36,12 +41,12 @@ spec:
             - name: DB2_USER_{{ .name | upper | replace "-" "_" }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "splunk-otel-db2.credentialsSecretName" . }}
+                  name: {{ include "splunk-otel-db2.credentialsSecretName" (dict "receiver" . "releaseName" $.Release.Name) }}
                   key: DB2_USER
             - name: DB2_PASSWORD_{{ .name | upper | replace "-" "_" }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "splunk-otel-db2.credentialsSecretName" . }}
+                  name: {{ include "splunk-otel-db2.credentialsSecretName" (dict "receiver" . "releaseName" $.Release.Name) }}
                   key: DB2_PASSWORD
             {{- end }}
             {{- with .Values.extraEnv }}
@@ -51,12 +56,16 @@ spec:
             - name: config
               mountPath: /etc/splunk-otel-db2
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "splunk-otel-db2.fullname" . }}-config
+        - name: tmp
+          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

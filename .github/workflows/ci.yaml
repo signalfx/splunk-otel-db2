@@ -10,6 +10,9 @@ on:
     branches:
       - main
       - v[0-9]+.[0-9]+.x
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+
+      - v[0-9]+.[0-9]+.[0-9]+-*
   pull_request:
 
 permissions:
@@ -133,9 +136,13 @@ jobs:
           path: build/reports/tests/integrationTestSnapshot/
 
   publish-image:
-    # Publish to ghcr.io on merges to main or version branches only
-    if: github.event_name != 'pull_request'
-    needs: [build, docker-build, helm-lint]
+    # Publish to ghcr.io on merges to main/version branches and semver tags only
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+       startsWith(github.ref, 'refs/heads/v') ||
+       startsWith(github.ref, 'refs/tags/v'))
+    needs: [build, docker-build, helm-lint, integration-test, integration-test-snapshot]
     runs-on: ubuntu-24.04
     permissions:
       contents: read

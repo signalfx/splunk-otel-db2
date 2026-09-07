@@ -6,6 +6,12 @@ image:
   # Overrides the image tag. Defaults to the chart appVersion.
   tag: ""
 
+# imagePullSecrets is required when pulling from a private GHCR registry.
+# Example:
+#   imagePullSecrets:
+#     - name: ghcr-credentials
+imagePullSecrets: []
+
 # Number of receiver replicas. Each replica opens its own JDBC connection(s).
 # Use 1 unless you are sharding databases across multiple pods.
 replicaCount: 1

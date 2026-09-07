@@ -8,7 +8,7 @@
       "title": "Active Connections",
       "type": "stat",
       "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
-      "targets": [{"expr": "db2_db_db2_connections", "legendFormat": "Connections", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "db2_db2_connection_count", "legendFormat": "Connections", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
     },
     {
@@ -16,7 +16,7 @@
       "title": "Deadlocks",
       "type": "stat",
       "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
-      "targets": [{"expr": "db2_db_db2_deadlocks", "legendFormat": "Deadlocks", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "increase(db2_db2_deadlock_count_total[5m])", "legendFormat": "Deadlocks", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
     },
     {
@@ -24,7 +24,7 @@
       "title": "Lock Waits",
       "type": "stat",
       "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
-      "targets": [{"expr": "db2_db_db2_lock_waits", "legendFormat": "Lock Waits", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "increase(db2_db2_lock_wait_count_total[5m])", "legendFormat": "Lock Waits", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
     },
     {
@@ -32,24 +32,28 @@
       "title": "Lock Timeouts",
       "type": "stat",
       "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
-      "targets": [{"expr": "db2_db_db2_lock_timeouts", "legendFormat": "Timeouts", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "increase(db2_db2_lock_timeout_count_total[5m])", "legendFormat": "Timeouts", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
     },
     {
       "id": 10,
-      "title": "Lock Wait Time (ms)",
+      "title": "Lock Wait Time (s)",
       "type": "stat",
       "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
-      "targets": [{"expr": "db2_db_db2_lock_wait_time_milliseconds", "legendFormat": "ms", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "rate(db2_db2_lock_wait_time_total[5m])", "legendFormat": "s/s", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "ms"}}
+      "fieldConfig": {"defaults": {"unit": "s"}}
     },
     {
       "id": 4,
       "title": "Buffer Pool Hit Ratio %",
       "type": "gauge",
       "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
-      "targets": [{"expr": "db2_db_db2_buffer_pool_hit_ratio_percent", "legendFormat": "{{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{
+        "expr": "100 * (1 - sum by (db_namespace) (rate(db2_db2_buffer_pool_physical_reads_total[5m])) / sum by (db_namespace) (rate(db2_db2_buffer_pool_logical_reads_total[5m])))",
+        "legendFormat": "{{db_namespace}}",
+        "datasource": {"type": "prometheus", "uid": "prometheus"}
+      }],
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"min": 0, "max": 100, "unit": "percent"}}
     },
@@ -58,7 +62,7 @@
       "title": "Active Connections Over Time",
       "type": "timeseries",
       "gridPos": {"x": 0, "y": 4, "w": 8, "h": 8},
-      "targets": [{"expr": "db2_db_db2_connections", "legendFormat": "Connections", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "db2_db2_connection_count", "legendFormat": "{{db_namespace}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
     },
     {
@@ -66,16 +70,20 @@
       "title": "Buffer Pool Hit Ratio Over Time",
       "type": "timeseries",
       "gridPos": {"x": 8, "y": 4, "w": 8, "h": 8},
-      "targets": [{"expr": "db2_db_db2_buffer_pool_hit_ratio_percent", "legendFormat": "{{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{
+        "expr": "100 * (1 - sum by (db_namespace) (rate(db2_db2_buffer_pool_physical_reads_total[5m])) / sum by (db_namespace) (rate(db2_db2_buffer_pool_logical_reads_total[5m])))",
+        "legendFormat": "{{db_namespace}}",
+        "datasource": {"type": "prometheus", "uid": "prometheus"}
+      }],
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "percent"}}
     },
     {
       "id": 11,
-      "title": "Buffer Pool Data Reads Over Time",
+      "title": "Buffer Pool Physical Reads Over Time",
       "type": "timeseries",
       "gridPos": {"x": 16, "y": 4, "w": 8, "h": 8},
-      "targets": [{"expr": "db2_db_db2_buffer_pool_data_reads", "legendFormat": "{{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "rate(db2_db2_buffer_pool_physical_reads_total[5m])", "legendFormat": "{{db_namespace}} — {{db2_bufferpool}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
     },
     {
@@ -84,8 +92,8 @@
       "type": "bargauge",
       "gridPos": {"x": 0, "y": 12, "w": 12, "h": 6},
       "targets": [
-        {"expr": "db2_db_db2_tablespace_used_bytes", "legendFormat": "Used — {{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}},
-        {"expr": "db2_db_db2_tablespace_free_bytes", "legendFormat": "Free — {{db_name}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}
+        {"expr": "db2_db2_tablespace_size{db2_tablespace_usage=\"used\"}", "legendFormat": "Used — {{db2_tablespace}}", "datasource": {"type": "prometheus", "uid": "prometheus"}},
+        {"expr": "db2_db2_tablespace_size{db2_tablespace_usage=\"free\"}", "legendFormat": "Free — {{db2_tablespace}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}
       ],
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "bytes"}}
@@ -95,9 +103,9 @@
       "title": "Lock Wait Time Over Time",
       "type": "timeseries",
       "gridPos": {"x": 12, "y": 12, "w": 12, "h": 6},
-      "targets": [{"expr": "db2_db_db2_lock_wait_time_milliseconds", "legendFormat": "Lock Wait Time", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
+      "targets": [{"expr": "rate(db2_db2_lock_wait_time_total[5m])", "legendFormat": "{{db_namespace}}", "datasource": {"type": "prometheus", "uid": "prometheus"}}],
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "ms"}}
+      "fieldConfig": {"defaults": {"unit": "s"}}
     },
     {
       "id": 12,

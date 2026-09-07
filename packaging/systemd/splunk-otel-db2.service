@@ -13,7 +13,8 @@ Group=splunk-otel-db2
 # Create this file with DB2_USER and DB2_PASSWORD before starting the service.
 EnvironmentFile=-/etc/splunk-otel-db2/env
 
-ExecStart=/opt/splunk-otel-db2/jre/bin/java \
+ExecStart=/opt/jre/bin/java \
+    -Djava.io.tmpdir=/tmp \
     -jar /opt/splunk-otel-db2/splunk-otel-db2.jar \
     /etc/splunk-otel-db2/config.yaml
 
@@ -24,7 +25,8 @@ RestartSec=5s
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/splunk-otel-db2
+# Logs go to journald (StandardOutput=journal); no log directory is needed.
+LogsDirectory=splunk-otel-db2
 
 StandardOutput=journal
 StandardError=journal

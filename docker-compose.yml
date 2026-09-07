@@ -58,7 +58,7 @@ services:
         condition: service_started
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.127.0
     container_name: splunk-otel-collector
     volumes:
       - ./packaging/docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
@@ -72,7 +72,7 @@ services:
       - loki
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.4.1
     container_name: splunk-prometheus
     volumes:
       - ./packaging/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -80,7 +80,7 @@ services:
       - "9090:9090"
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.5.1
     container_name: splunk-loki
     volumes:
       - ./packaging/docker/loki-config.yaml:/etc/loki/local-config.yaml:ro
@@ -89,7 +89,7 @@ services:
       - "3100:3100"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.0.2
     container_name: splunk-grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin

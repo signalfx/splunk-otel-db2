@@ -13,7 +13,7 @@ Create a default fully qualified app name.
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
 {{- $name := default .Chart.Name .Values.nameOverride }}
-{{- printf "%s" $name | trunc 63 | trimSuffix "-" }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
 
@@ -56,11 +56,14 @@ Image tag — falls back to chart appVersion
 Name of the credentials secret for a receiver entry.
 Uses credentialsSecret if set, otherwise the chart-created secret name.
 */}}
+{{/*
+Name of the credentials secret for a receiver entry.
+Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)
+*/}}
 {{- define "splunk-otel-db2.credentialsSecretName" -}}
-{{- $receiver := . -}}
-{{- if $receiver.credentialsSecret }}
-{{- $receiver.credentialsSecret }}
+{{- if .receiver.credentialsSecret }}
+{{- .receiver.credentialsSecret }}
 {{- else }}
-{{- printf "splunk-otel-db2-credentials-%s" $receiver.name }}
+{{- printf "%s-credentials-%s" .releaseName .receiver.name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}

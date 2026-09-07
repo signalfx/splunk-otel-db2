@@ -294,6 +294,76 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
 > **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
 
+## Installation
+
+### systemd (Linux)
+
+The `packaging/systemd/` directory contains a hardened unit file. The receiver binary is expected at `/opt/splunk-otel-db2/splunk-otel-db2.jar` and the JRE at `/opt/jre` (matching the Docker image layout).
+
+```bash
+# 1. Copy the fat jar and the custom JRE produced by the Docker build
+sudo mkdir -p /opt/splunk-otel-db2 /opt/jre
+sudo cp build/libs/splunk-otel-db2-*.jar /opt/splunk-otel-db2/splunk-otel-db2.jar
+# Copy the custom JRE from the Docker image, or build it separately with:
+#   jlink --add-modules java.base,java.desktop,java.logging,java.management,\
+#     java.naming,java.rmi,java.security.jgss,java.sql,java.transaction.xa,\
+#     java.xml,jdk.crypto.ec,jdk.unsupported \
+#     --strip-debug --no-man-pages --no-header-files --compress=2 --output /opt/jre
+
+# 2. Create the service user
+sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
+
+# 3. Install config and credentials
+sudo mkdir -p /etc/splunk-otel-db2
+sudo cp my-config.yaml /etc/splunk-otel-db2/config.yaml
+sudo tee /etc/splunk-otel-db2/env > /dev/null <<'EOF'
+DB2_USER=db2mon
+DB2_PASSWORD=<secret>
+EOF
+sudo chmod 640 /etc/splunk-otel-db2/env
+sudo chown root:splunk-otel-db2 /etc/splunk-otel-db2/env
+
+# 4. Install and start the service
+sudo cp packaging/systemd/splunk-otel-db2.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now splunk-otel-db2
+sudo journalctl -u splunk-otel-db2 -f
+```
+
+### Helm (Kubernetes)
+
+```bash
+# Using a pre-existing credentials Secret
+helm install my-db2 packaging/helm \
+  --set receivers[0].hostname=db2.example.com \
+  --set receivers[0].database=PROD \
+  --set receivers[0].credentialsSecret=my-db2-credentials \
+  --set otlp.endpoint=http://otel-collector:4317
+
+# Chart creates a Secret from inline values (not recommended for production)
+helm install my-db2 packaging/helm \
+  --set receivers[0].hostname=db2.example.com \
+  --set receivers[0].database=PROD \
+  --set receivers[0].username=db2mon \
+  --set receivers[0].password=secret \
+  --set otlp.endpoint=http://otel-collector:4317
+
+# If pulling from a private GHCR registry, supply an imagePullSecret:
+helm install my-db2 packaging/helm \
+  --set imagePullSecrets[0].name=ghcr-credentials \
+  ...
+```
+
+### Docker
+
+```bash
+docker run --rm \
+  -e DB2_USER=db2mon \
+  -e DB2_PASSWORD=secret \
+  -v /path/to/config.yaml:/etc/splunk-otel-db2/config.yaml:ro \
+  ghcr.io/signalfx/splunk-otel-db2:latest
+```
+
 ## Development
 
 ```bash
