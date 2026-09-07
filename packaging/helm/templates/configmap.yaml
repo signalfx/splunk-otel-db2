@@ -23,7 +23,11 @@ data:
 
     exporters:
       otlp:
+        {{- if index .Values "opentelemetry-collector" "enabled" }}
+        endpoint: "http://{{ include "splunk-otel-db2.fullname" . }}-opentelemetry-collector:4317"
+        {{- else }}
         endpoint: {{ .Values.otlp.endpoint | quote }}
+        {{- end }}
         {{- if .Values.otlp.compression }}
         compression: {{ .Values.otlp.compression | quote }}
         {{- end }}

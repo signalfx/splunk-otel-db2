@@ -5,3 +5,4 @@ build/
 out/
 buildSrc/.gradle/
 buildSrc/build/
+packaging/helm/charts/

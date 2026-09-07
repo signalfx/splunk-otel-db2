@@ -81,3 +81,37 @@ extraEnv: []
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ── Bundled OTel Collector (optional) ────────────────────────────────────────
+# Set enabled: true to deploy an OTel Collector alongside the scraper.
+# The scraper's otlp.endpoint is automatically pointed at the collector service.
+# Configure the collector's exporters under config.exporters to forward to
+# your backend (Splunk Observability Cloud, Splunk Enterprise, etc.).
+opentelemetry-collector:
+  enabled: false
+  mode: deployment
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      memory_limiter:
+        check_interval: 2s
+        limit_mib: 500
+      batch:
+        timeout: 10s
+    exporters:
+      debug:
+        verbosity: normal
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
