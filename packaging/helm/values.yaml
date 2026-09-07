@@ -45,9 +45,14 @@ resources:
 
 # ── Receiver configuration ───────────────────────────────────────────────────
 # Each entry under `receivers` maps to a db2/<name> pipeline.
+# `name` must be lowercase DNS-compatible: lowercase letters, digits, and hyphens only,
+# starting with a letter (e.g. "prod-eu", "default"). Uppercase letters and underscores
+# are not allowed because each name is uppercased and turned into an env-var key
+# (DB2_USER_<NAME>, DB2_PASSWORD_<NAME>); ambiguous names like "foo-bar" vs "foo_bar"
+# would silently share the same variables. The chart rejects invalid or colliding names.
 # `credentialsSecret` is the name of a pre-existing Kubernetes Secret with
-# keys DB2_USER and DB2_PASSWORD. If `createSecret` is true, the chart creates
-# the Secret from `username` / `password` (not recommended for production).
+# keys DB2_USER and DB2_PASSWORD. If omitted, the chart creates the Secret
+# from `username` / `password` (not recommended for production).
 receivers:
   - name: default
     hostname: "localhost"

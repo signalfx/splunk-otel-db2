@@ -391,14 +391,30 @@ otlp:
 **Credentials** — reference a pre-existing Secret (recommended for production):
 
 ```yaml
-credentialsSecret: "my-db2-credentials"   # Secret must have keys DB2_USER and DB2_PASSWORD
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    credentialsSecret: "my-db2-credentials"   # Secret must have keys DB2_USER and DB2_PASSWORD
+    tls:
+      insecure: true
 ```
 
 Or let the chart create one (not recommended for production):
 
 ```yaml
-username: "db2mon"
-password: "secret"
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    username: "db2mon"
+    password: "secret"
+    tls:
+      insecure: true
 ```
 
 **Pulling from a private GHCR registry:**

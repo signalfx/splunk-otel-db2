@@ -53,9 +53,28 @@ Image tag — falls back to chart appVersion
 {{- end }}
 
 {{/*
-Name of the credentials secret for a receiver entry.
-Uses credentialsSecret if set, otherwise the chart-created secret name.
+Validate every receiver name.
+  - Must match ^[a-z][a-z0-9-]*$ (lowercase DNS-compatible: letters, digits, hyphens; starts with letter).
+  - Underscores and uppercase are rejected so that names like PROD_EU or foo_bar cannot
+    be used. Both foo-bar and foo_bar normalise to FOO_BAR in env-var names, which would
+    silently wire two receivers to the same Secret values.
+  - After normalisation (upper + replace "-" "_") duplicates are caught explicitly.
+Call via: {{ include "splunk-otel-db2.validateReceiverNames" . }}
 */}}
+{{- define "splunk-otel-db2.validateReceiverNames" -}}
+{{- $seen := dict -}}
+{{- range .Values.receivers -}}
+  {{- if not (mustRegexMatch "^[a-z][a-z0-9-]*$" .name) -}}
+    {{- fail (printf "receivers[%s]: name must be lowercase DNS-compatible (a-z, 0-9, hyphens only, must start with a letter; no uppercase or underscores)" .name) -}}
+  {{- end -}}
+  {{- $envKey := .name | upper | replace "-" "_" -}}
+  {{- if hasKey $seen $envKey -}}
+    {{- fail (printf "receivers[%s]: normalised env-var key %s collides with receiver '%s'" .name $envKey (index $seen $envKey)) -}}
+  {{- end -}}
+  {{- $_ := set $seen $envKey .name -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Name of the credentials secret for a receiver entry.
 Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)

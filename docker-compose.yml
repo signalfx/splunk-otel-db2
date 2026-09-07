@@ -36,12 +36,21 @@ services:
     image: otel/opentelemetry-collector-contrib:0.127.0
     container_name: splunk-otel-collector
     environment:
-      # Required only when using --profile collector
+      # Both are required when running with --profile collector.
+      # The entrypoint below enforces this at container start so the Collector
+      # fails fast rather than starting with an empty realm / token and failing
+      # only when the first export is attempted.
       SPLUNK_REALM: ${SPLUNK_REALM:-}
       SPLUNK_TOKEN: ${SPLUNK_TOKEN:-}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        : ${SPLUNK_REALM:?SPLUNK_REALM is required when running with --profile collector}
+        : ${SPLUNK_TOKEN:?SPLUNK_TOKEN is required when running with --profile collector}
+        exec /otelcol-contrib --config=/etc/otel/config.yaml
     volumes:
       - ./packaging/docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
-    command: ["--config=/etc/otel/config.yaml"]
     ports:
       - "4317:4317"   # OTLP gRPC
       - "4318:4318"   # OTLP HTTP
