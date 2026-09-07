@@ -366,19 +366,14 @@ docker run --rm \
 
 ### docker-compose (local dev)
 
-The repo ships a `docker-compose.yml` that runs the receiver alongside an OTel Collector. Point it at your existing DB2 instance — DB2 itself is not included. The collector prints all received telemetry to stdout via the `debug` exporter.
+The repo ships a `docker-compose.yml` that builds and runs the receiver against your existing DB2 instance. Point `OTLP_ENDPOINT` at any OTLP-capable backend — an OTel Collector, Splunk Observability Cloud, or any other.
 
 ```bash
 export DB2_HOST=db2.example.com
 export DB2_USER=db2mon
 export DB2_PASSWORD=secret
+export OTLP_ENDPOINT=http://your-collector:4317
 docker compose up --build
-
-# Tail collector output to see metrics and log records
-docker compose logs -f otel-collector
-
-# Collector self-metrics
-curl http://localhost:8888/metrics
 ```
 
 ## Development

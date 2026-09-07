@@ -1,14 +1,10 @@
-# Local development stack: splunk-otel-db2 receiver + OTel Collector
-#
-# Requires an existing DB2 instance. Set DB2_HOST (and optionally DB2_PORT)
-# to point at it, then supply credentials:
+# Run the splunk-otel-db2 receiver against an existing DB2 instance.
 #
 #   export DB2_HOST=db2.example.com
 #   export DB2_USER=db2mon
 #   export DB2_PASSWORD=secret
+#   export OTLP_ENDPOINT=http://your-collector:4317
 #   docker compose up --build
-#
-# OTel Collector metrics: http://localhost:8888/metrics
 
 services:
 
@@ -22,19 +18,6 @@ services:
       DB2_PORT: ${DB2_PORT:-50000}
       DB2_USER: ${DB2_USER:?DB2_USER is required}
       DB2_PASSWORD: ${DB2_PASSWORD:?DB2_PASSWORD is required}
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:?OTLP_ENDPOINT is required}
     volumes:
       - ./testdata/docker-config.yaml:/etc/splunk-otel-db2/config.yaml:ro
-    depends_on:
-      otel-collector:
-        condition: service_started
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.127.0
-    container_name: splunk-otel-collector
-    volumes:
-      - ./packaging/docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
-    command: ["--config=/etc/otel/config.yaml"]
-    ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "8888:8888"   # collector self-metrics

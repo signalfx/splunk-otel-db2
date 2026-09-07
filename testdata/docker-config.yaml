@@ -11,6 +11,6 @@ receivers:
 
 exporters:
   otlp:
-    endpoint: "http://otel-collector:4317"
+    endpoint: "${env:OTLP_ENDPOINT}"
     tls:
       insecure: true
