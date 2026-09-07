@@ -364,6 +364,22 @@ docker run --rm \
   ghcr.io/signalfx/splunk-otel-db2:latest
 ```
 
+### docker-compose (local dev)
+
+The repo ships a `docker-compose.yml` that spins up DB2 + the receiver + an OTel Collector. The collector prints all received telemetry to stdout via the `debug` exporter — useful for verifying the receiver is working without any external infrastructure.
+
+```bash
+export DB2_USER=db2inst1
+export DB2_PASSWORD=password123
+docker compose up --build
+
+# Tail collector output to see metrics and log records
+docker compose logs -f otel-collector
+
+# Collector self-metrics
+curl http://localhost:8888/metrics
+```
+
 ## Development
 
 ```bash
