@@ -1,12 +1,12 @@
 # Stage 1 — build the fat jar
-FROM --platform=linux/amd64 eclipse-temurin:17-jdk-alpine AS builder
+FROM --platform=$BUILDPLATFORM eclipse-temurin:17-jdk-alpine AS builder
 WORKDIR /build
 COPY . .
 RUN ./gradlew shadowJar --no-daemon -q
 
 # Stage 2 — carve a minimal custom JRE with jlink
 # Modules determined via: jdeps --list-deps --ignore-missing-deps splunk-otel-db2-*.jar
-FROM --platform=linux/amd64 eclipse-temurin:17-jdk-alpine AS jlink
+FROM --platform=$BUILDPLATFORM eclipse-temurin:17-jdk-alpine AS jlink
 RUN $JAVA_HOME/bin/jlink \
       --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.rmi,java.security.jgss,java.sql,java.transaction.xa,java.xml,jdk.crypto.ec,jdk.unsupported \
       --strip-debug \
