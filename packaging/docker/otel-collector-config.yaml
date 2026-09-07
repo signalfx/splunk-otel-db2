@@ -11,16 +11,24 @@ processors:
     timeout: 10s
 
 exporters:
+  # Forward metrics + logs to Splunk Observability Cloud via OTLP/HTTP.
+  # Set SPLUNK_REALM and SPLUNK_TOKEN environment variables.
+  otlphttp/splunk:
+    endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com"
+    headers:
+      X-SF-Token: "${env:SPLUNK_TOKEN}"
+
+  # Optional: print all received telemetry to stdout for debugging.
   debug:
-    verbosity: detailed
+    verbosity: normal
 
 service:
   pipelines:
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [otlphttp/splunk, debug]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [otlphttp/splunk, debug]

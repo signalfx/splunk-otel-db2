@@ -422,29 +422,58 @@ docker run --rm \
 
 The config file controls everything — DB2 connection, OTLP endpoint, collection intervals. See the [Configuration](#configuration) section for the full schema.
 
-### docker-compose (local dev)
+### docker-compose
 
-**Standalone — send direct to your OTLP backend:**
+Two deployment modes depending on whether you run the OTel Collector yourself or want it bundled.
 
-```bash
-export DB2_HOST=db2.example.com
-export DB2_USER=db2mon
-export DB2_PASSWORD=secret
-export OTLP_ENDPOINT=http://your-backend:4317
-docker compose up --build
-```
+---
 
-**With a local OTel Collector** (useful when you don't have a backend — prints telemetry to stdout):
+**Option A — Scraper only** (you already have an OTel Collector running elsewhere):
 
 ```bash
-export DB2_HOST=db2.example.com
+# 1. Clone the repo
+git clone https://github.com/signalfx/splunk-otel-db2.git
+cd splunk-otel-db2
+
+# 2. Set required environment variables
+export DB2_HOST=db2.example.com        # your DB2 hostname or IP
+export DB2_PORT=50000                  # default 50000
 export DB2_USER=db2mon
 export DB2_PASSWORD=secret
-docker compose --profile collector up --build
+export OTLP_ENDPOINT=http://your-collector:4317
 
-# Watch the metrics and log records arrive
-docker compose logs -f otel-collector
+# 3. Start the scraper
+docker compose up --build -d
+
+# 4. Check logs
+docker compose logs -f receiver
 ```
+
+---
+
+**Option B — Scraper + OTel Collector** (collector runs alongside the scraper, forwards to Splunk Observability Cloud):
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/signalfx/splunk-otel-db2.git
+cd splunk-otel-db2
+
+# 2. Set required environment variables
+export DB2_HOST=db2.example.com        # your DB2 hostname or IP
+export DB2_PORT=50000                  # default 50000
+export DB2_USER=db2mon
+export DB2_PASSWORD=secret
+export SPLUNK_REALM=us1                # your Splunk Observability Cloud realm
+export SPLUNK_TOKEN=<your-ingest-token>
+
+# 3. Start both the scraper and the collector
+docker compose --profile collector up --build -d
+
+# 4. Check logs
+docker compose logs -f receiver otel-collector
+```
+
+> **Finding your realm and token**: in Splunk Observability Cloud go to **Settings → Access Tokens** for the ingest token, and **Settings → General** for the realm (e.g. `us1`, `eu0`).
 
 ## Development
 

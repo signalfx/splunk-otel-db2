@@ -1,16 +1,18 @@
 # Run the splunk-otel-db2 receiver against an existing DB2 instance.
 #
-# Without a collector (send directly to your OTLP backend):
+# Scraper only (you run your own OTel Collector elsewhere):
 #   export DB2_HOST=db2.example.com
 #   export DB2_USER=db2mon
 #   export DB2_PASSWORD=secret
-#   export OTLP_ENDPOINT=http://your-backend:4317
+#   export OTLP_ENDPOINT=http://your-collector:4317
 #   docker compose up --build
 #
-# With the bundled OTel Collector (prints telemetry to stdout):
+# Scraper + OTel Collector forwarding to Splunk Observability Cloud:
 #   export DB2_HOST=db2.example.com
 #   export DB2_USER=db2mon
 #   export DB2_PASSWORD=secret
+#   export SPLUNK_REALM=us1
+#   export SPLUNK_TOKEN=<your-ingest-token>
 #   docker compose --profile collector up --build
 
 services:
@@ -33,6 +35,9 @@ services:
     profiles: [collector]
     image: otel/opentelemetry-collector-contrib:0.127.0
     container_name: splunk-otel-collector
+    environment:
+      SPLUNK_REALM: ${SPLUNK_REALM:?SPLUNK_REALM is required when using --profile collector}
+      SPLUNK_TOKEN: ${SPLUNK_TOKEN:?SPLUNK_TOKEN is required when using --profile collector}
     volumes:
       - ./packaging/docker/otel-collector-config.yaml:/etc/otel/config.yaml:ro
     command: ["--config=/etc/otel/config.yaml"]
