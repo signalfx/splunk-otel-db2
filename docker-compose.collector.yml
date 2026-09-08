@@ -1,0 +1,19 @@
+# Collector override — include this file when running with --profile collector:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.collector.yml \
+#     --profile collector up --build
+#
+# Compose interpolates ${VAR:?error} at parse time, so these ":?" expressions
+# must NOT live in docker-compose.yml (they would be evaluated even in
+# scraper-only mode). Placing them here means they are only evaluated when
+# this file is explicitly passed with -f.
+#
+# The official Collector image is distroless (no /bin/sh), so the validation
+# cannot run as an entrypoint inside the collector container itself.
+
+services:
+
+  otel-collector:
+    environment:
+      SPLUNK_REALM: ${SPLUNK_REALM:?SPLUNK_REALM is required when running with --profile collector}
+      SPLUNK_TOKEN: ${SPLUNK_TOKEN:?SPLUNK_TOKEN is required when running with --profile collector}

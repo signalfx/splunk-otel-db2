@@ -54,7 +54,10 @@ Image tag — falls back to chart appVersion
 
 {{/*
 Validate every receiver name.
-  - Must match ^[a-z][a-z0-9-]*$ (lowercase DNS-compatible: letters, digits, hyphens; starts with letter).
+  - Must match ^[a-z]([a-z0-9-]*[a-z0-9])?$ (lowercase DNS-compatible: letters, digits,
+    interior hyphens; must start and end with an alphanumeric character).
+  - Trailing hyphens are rejected: "prod-" would produce a Kubernetes Secret whose name
+    ends in "-", which the Kubernetes API rejects.
   - Underscores and uppercase are rejected so that names like PROD_EU or foo_bar cannot
     be used. Both foo-bar and foo_bar normalise to FOO_BAR in env-var names, which would
     silently wire two receivers to the same Secret values.
@@ -64,8 +67,8 @@ Call via: {{ include "splunk-otel-db2.validateReceiverNames" . }}
 {{- define "splunk-otel-db2.validateReceiverNames" -}}
 {{- $seen := dict -}}
 {{- range .Values.receivers -}}
-  {{- if not (mustRegexMatch "^[a-z][a-z0-9-]*$" .name) -}}
-    {{- fail (printf "receivers[%s]: name must be lowercase DNS-compatible (a-z, 0-9, hyphens only, must start with a letter; no uppercase or underscores)" .name) -}}
+  {{- if not (mustRegexMatch "^[a-z]([a-z0-9-]*[a-z0-9])?$" .name) -}}
+    {{- fail (printf "receivers[%s]: name must be lowercase DNS-compatible (a-z, 0-9, interior hyphens only; must start and end with an alphanumeric character)" .name) -}}
   {{- end -}}
   {{- $envKey := .name | upper | replace "-" "_" -}}
   {{- if hasKey $seen $envKey -}}

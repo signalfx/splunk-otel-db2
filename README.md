@@ -485,10 +485,10 @@ export SPLUNK_REALM=us1                # your Splunk Observability Cloud realm
 export SPLUNK_TOKEN=<your-ingest-token>
 
 # 3. Start both the scraper and the collector
-docker compose --profile collector up --build -d
+docker compose -f docker-compose.yml -f docker-compose.collector.yml --profile collector up --build -d
 
 # 4. Check logs
-docker compose logs -f receiver otel-collector
+docker compose -f docker-compose.yml -f docker-compose.collector.yml logs -f receiver otel-collector
 ```
 
 > **Finding your realm and token**: in Splunk Observability Cloud go to **Settings → Access Tokens** for the ingest token, and **Settings → General** for the realm (e.g. `us1`, `eu0`).
