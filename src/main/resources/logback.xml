@@ -8,4 +8,7 @@
         <appender-ref ref="STDOUT"/>
     </root>
     <logger name="com.splunk.otel.db2" level="DEBUG"/>
+    <!-- Surface gRPC channel state changes and OTLP export failures -->
+    <logger name="io.grpc" level="WARN"/>
+    <logger name="io.opentelemetry.exporter" level="WARN"/>
 </configuration>
