@@ -369,8 +369,9 @@ receivers:
     querySampleEnabled: false
 
 otlp:
-  # OTel Collector running in the same cluster:
-  endpoint: "http://otel-collector.monitoring.svc:4317"
+  # OTel Collector in the same cluster — format is:
+  # http://<helm-release-name>-opentelemetry-collector.<namespace>.svc.cluster.local:4317
+  endpoint: "http://my-otelcol-opentelemetry-collector.monitoring.svc.cluster.local:4317"
   tls:
     insecure: true
 ```
@@ -379,7 +380,7 @@ otlp:
 helm install my-db2 packaging/helm -f my-values.yaml
 ```
 
-**OTel Collector running separately (outside the cluster):**
+**OTel Collector running outside the cluster:**
 
 ```yaml
 otlp:
