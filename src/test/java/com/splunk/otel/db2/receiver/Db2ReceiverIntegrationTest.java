@@ -336,7 +336,7 @@ class Db2ReceiverIntegrationTest {
         assertThat(queryText).doesNotContain("'");
         assertThat(queryText).doesNotMatch(".*(?<![\\p{L}\\p{N}_$#@])\\d{4,}(?![\\p{L}\\p{N}_$#@]).*");
 
-        assertThat(record.getAttributes().get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("db2");
         assertThat(record.getAttributes().get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo(config.getDatabase());
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
@@ -428,7 +428,7 @@ class Db2ReceiverIntegrationTest {
             assertThat(record.getSeverity())
                 .isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
             assertThat(record.getAttributes().get(TopQueryEvent.DB_SYSTEM))
-                .isEqualTo("ibm.db2");
+                .isEqualTo("db2");
             assertThat(record.getAttributes().get(TopQueryEvent.DB_NAMESPACE))
                 .isEqualTo(config.getDatabase());
 

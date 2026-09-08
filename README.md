@@ -202,7 +202,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 | Attribute | Description |
 |---|---|
-| `db.system.name` | Always `ibm.db2` |
+| `db.system.name` | Always `db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
@@ -232,7 +232,7 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 
 | Attribute | Description |
 |---|---|
-| `db.system.name` | Always `ibm.db2` |
+| `db.system.name` | Always `db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db2.member` | Db2 member number |
@@ -531,7 +531,7 @@ The receiver sets the following OTel resource attributes on all telemetry. Any a
 | `server.address` | configured hostname; loopback resolved to collector hostname |
 | `host.name` | configured hostname (operator's typed value, preserved as-is) |
 | `server.port` | configured port (integer) |
-| `db.system.name` | `ibm.db2` |
+| `db.system.name` | `db2` |
 | `db.namespace` | configured database name |
 
 ## License
