@@ -136,7 +136,7 @@ public class Db2Receiver {
     // Package-private: allows integration tests to inject a short interval without violating the
     // production minimum. Production code always calls start() which enforces the 60s minimum
     // via getTopQueryIntervalDuration().
-    void startTopQueryScheduler(long intervalSeconds) {
+    public void startTopQueryScheduler(long intervalSeconds) {
         topQueryConnection = new Db2Connection(config, label);
         Supplier<Connection> topQueryConnSupplier = () -> {
             try {

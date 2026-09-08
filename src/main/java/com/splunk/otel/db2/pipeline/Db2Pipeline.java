@@ -83,7 +83,7 @@ public class Db2Pipeline {
             .put("server.address",      identityHost)       // resolved: unique per host
             .put("host.name",           rc.getHost())       // operator's typed value preserved
             .put(AttributeKey.longKey("server.port"), (long) rc.getPort())
-            .put("db.system.name",      "ibm.db2")
+            .put("db.system.name",      "db2")
             .put("db.namespace",        rc.getDatabase());
 
         // service.namespace only when configured — avoids polluting the resource for single-cluster setups
@@ -129,6 +129,11 @@ public class Db2Pipeline {
     public void start() {
         receiver.start();
         log.info("DB2 pipeline started for {} → OTel Collector", instanceId);
+    }
+
+    /** For tests: bypass the 60s minimum and schedule top-query at the given interval. */
+    public void startTopQueryScheduler(long intervalSeconds) {
+        receiver.startTopQueryScheduler(intervalSeconds);
     }
 
     public void stop() {
