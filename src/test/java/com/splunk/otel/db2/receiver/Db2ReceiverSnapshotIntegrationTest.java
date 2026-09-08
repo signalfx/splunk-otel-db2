@@ -209,7 +209,7 @@ class Db2ReceiverSnapshotIntegrationTest {
 
         String queryText = record.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
         assertThat(queryText).doesNotContain("'");
-        assertThat(record.getAttributes().get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("db2");
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(record.getAttributes().get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo(config.getDatabase());
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();

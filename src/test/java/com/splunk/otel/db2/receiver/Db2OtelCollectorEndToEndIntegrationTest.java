@@ -151,7 +151,7 @@ class Db2OtelCollectorEndToEndIntegrationTest {
                 .until(() -> {
                     String logs = collector.getLogs();
                     return logs.contains("db.server.query_sample")
-                        && logs.contains("Str(db2)");
+                        && logs.contains("Str(ibm.db2)");
                 });
 
             // ── 5. Wait for top_query to appear in collector logs ───────────────────
@@ -173,8 +173,8 @@ class Db2OtelCollectorEndToEndIntegrationTest {
                 .contains("db.server.top_query");
 
             assertThat(logs)
-                .as("db.system.name must be 'db2' (not 'ibm.db2')")
-                .contains("Str(db2)");
+                .as("db.system.name must be 'ibm.db2' per OTel semantic conventions")
+                .contains("Str(ibm.db2)");
 
             // db.namespace = database name (TESTDB)
             assertThat(logs)

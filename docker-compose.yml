@@ -35,6 +35,7 @@ services:
     profiles: [collector]
     image: otel/opentelemetry-collector-contrib:0.127.0
     container_name: splunk-otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
     environment:
       SPLUNK_REALM: ${SPLUNK_REALM:-}
       SPLUNK_TOKEN: ${SPLUNK_TOKEN:-}

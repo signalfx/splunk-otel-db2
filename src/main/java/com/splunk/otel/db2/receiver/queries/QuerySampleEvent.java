@@ -81,7 +81,7 @@ public final class QuerySampleEvent {
 
     public void emit(Logger logger, Instant timestamp) {
         AttributesBuilder b = Attributes.builder()
-            .put(DB_SYSTEM,    "db2")
+            .put(DB_SYSTEM,    "ibm.db2")
             .put(DB_NAMESPACE, dbNamespace)
             .put(DB_QUERY_TEXT, queryText)
             .put(DB2_DURATION,  sessionDurationSec)

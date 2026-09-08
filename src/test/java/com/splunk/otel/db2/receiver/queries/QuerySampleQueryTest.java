@@ -88,7 +88,7 @@ class QuerySampleQueryTest {
         assertThat(attrs.get(QuerySampleEvent.DB_QUERY_TEXT))
             .isEqualTo("SELECT * FROM T WHERE ID = ?");
         verify(logBuilder).setEventName("db.server.query_sample");
-        assertThat(attrs.get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("db2");
+        assertThat(attrs.get(QuerySampleEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(attrs.get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo("TESTDB");
         assertThat(attrs.get(QuerySampleEvent.DB2_ACTIVITY)).isEqualTo("EXECUTING SELECT");
         assertThat(attrs.get(QuerySampleEvent.DB2_QUERY_START))
