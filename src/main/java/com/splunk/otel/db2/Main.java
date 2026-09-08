@@ -6,6 +6,7 @@ import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.pipeline.Db2Pipeline;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.bridge.SLF4JBridgeHandler;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +19,11 @@ public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
+        // Route java.util.logging (used by gRPC and OTel exporters) through SLF4J/Logback
+        // so that logback.xml controls their log levels.
+        SLF4JBridgeHandler.removeHandlersForRootLogger();
+        SLF4JBridgeHandler.install();
+
         if (args.length == 0) {
             System.err.println("Usage: splunk-otel-db2 <config-file>");
             System.err.println("Example: splunk-otel-db2 /etc/splunk-otel-db2/config.yaml");

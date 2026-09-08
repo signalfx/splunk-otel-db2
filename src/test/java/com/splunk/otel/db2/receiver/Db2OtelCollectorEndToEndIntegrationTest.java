@@ -124,11 +124,17 @@ class Db2OtelCollectorEndToEndIntegrationTest {
         // ── 3. Start the pipeline — it will connect to real DB2 and real Collector ──
         Db2Pipeline pipeline = new Db2Pipeline(rc, otlp);
         pipeline.start();
-        // Seed the top-query baseline (cycle 1) before running the workload
+        // Cycle 1 (baseline): scheduleWithFixedDelay fires immediately with initialDelay=0
+        // but the scrape runs asynchronously. Wait one full cycle (6s > 5s interval) so the
+        // seed collection finishes before the workload runs. If the workload executes inside
+        // the first scrape window it becomes part of the baseline and produces a zero delta
+        // on cycle 2, causing an intermittent 90-second timeout.
         pipeline.startTopQueryScheduler(5L); // 5s cycle — bypass the 60s minimum
+        Thread.sleep(6000); // wait for seed scrape to complete
 
-        // Also run a workload query that will appear in top_query:
-        // Cross-join on SYSCAT.COLUMNS produces non-zero STMT_EXEC_TIME reliably.
+        // Cycle 2+ workload: this query now appears after the baseline and will be emitted
+        // as a delta on the next collection. Cross-join on SYSCAT.COLUMNS is guaranteed to
+        // produce non-zero STMT_EXEC_TIME even on minimal containers.
         try (Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
              Statement st = workConn.createStatement()) {
             for (int i = 0; i < 3; i++) {
@@ -143,7 +149,7 @@ class Db2OtelCollectorEndToEndIntegrationTest {
             // ── 4. Wait for query_sample to appear in collector logs ────────────────
             // verbosity:detailed prints every attribute on its own line:
             //   -> "db.server.query_sample"
-            //   -> db.system.name: Str(db2)
+            //   -> db.system.name: Str(ibm.db2)
             Awaitility.await()
                 .atMost(60, TimeUnit.SECONDS)
                 .pollInterval(3, TimeUnit.SECONDS)
@@ -151,7 +157,7 @@ class Db2OtelCollectorEndToEndIntegrationTest {
                 .until(() -> {
                     String logs = collector.getLogs();
                     return logs.contains("db.server.query_sample")
-                        && logs.contains("Str(db2)");
+                        && logs.contains("Str(ibm.db2)");
                 });
 
             // ── 5. Wait for top_query to appear in collector logs ───────────────────
@@ -173,8 +179,8 @@ class Db2OtelCollectorEndToEndIntegrationTest {
                 .contains("db.server.top_query");
 
             assertThat(logs)
-                .as("db.system.name must be 'db2'")
-                .contains("Str(db2)");
+                .as("db.system.name must be 'ibm.db2' per OTel semantic conventions")
+                .contains("Str(ibm.db2)");
 
             // db.namespace = database name (TESTDB)
             assertThat(logs)

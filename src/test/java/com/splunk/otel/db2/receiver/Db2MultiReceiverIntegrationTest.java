@@ -239,7 +239,7 @@ class Db2MultiReceiverIntegrationTest {
 
             assertThat(record.getAttributes().get(
                 com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB_SYSTEM))
-                .isEqualTo("db2");
+                .isEqualTo("ibm.db2");
             assertThat(record.getAttributes().get(
                 com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB2_MEMBER))
                 .isNotNull();
