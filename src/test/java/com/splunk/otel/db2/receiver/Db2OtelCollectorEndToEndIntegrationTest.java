@@ -125,29 +125,30 @@ class Db2OtelCollectorEndToEndIntegrationTest {
         // ── 3. Start the pipeline — it will connect to real DB2 and real Collector ──
         Db2Pipeline pipeline = new Db2Pipeline(rc, otlp);
         pipeline.start();
-        // Cycle 1 (baseline): use a latch so we wait exactly until the seed scrape
-        // finishes — no fixed sleep. If the workload ran inside the seed window it would
-        // become the new baseline and produce a zero delta on cycle 2, causing a timeout.
+        // Cycle 1 (baseline): use a latch that counts down only after a *successful* seed
+        // scrape. A failed scrape leaves no baseline, so the latch stays open and the next
+        // attempt must succeed. Timeout budget: connection (~10s) + JDBC query timeout (30s)
+        // + 5s interval + safety margin = 60s.
         CountDownLatch seedDone = new CountDownLatch(1);
         pipeline.startTopQueryScheduler(5L, seedDone); // 5s cycle — bypass the 60s minimum
-        if (!seedDone.await(30, TimeUnit.SECONDS)) {
-            throw new AssertionError("Top-query seed scrape did not complete within 30s");
-        }
-
-        // Cycle 2+ workload: this query now appears after the baseline and will be emitted
-        // as a delta on the next collection. Cross-join on SYSCAT.COLUMNS is guaranteed to
-        // produce non-zero STMT_EXEC_TIME even on minimal containers.
-        try (Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
-             Statement st = workConn.createStatement()) {
-            for (int i = 0; i < 3; i++) {
-                st.executeQuery(
-                    "SELECT COUNT(*) AS E2E_TOPQ_PROBE " +
-                    "FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B " +
-                    "WHERE A.TABSCHEMA = B.TABSCHEMA").close();
-            }
-        }
 
         try {
+            if (!seedDone.await(60, TimeUnit.SECONDS)) {
+                throw new AssertionError("Top-query seed scrape did not complete within 60s");
+            }
+
+            // Cycle 2+ workload: this query now appears after the baseline and will be emitted
+            // as a delta on the next collection. Cross-join on SYSCAT.COLUMNS is guaranteed to
+            // produce non-zero STMT_EXEC_TIME even on minimal containers.
+            try (Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+                 Statement st = workConn.createStatement()) {
+                for (int i = 0; i < 3; i++) {
+                    st.executeQuery(
+                        "SELECT COUNT(*) AS E2E_TOPQ_PROBE " +
+                        "FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B " +
+                        "WHERE A.TABSCHEMA = B.TABSCHEMA").close();
+                }
+            }
             // ── 4. Wait for query_sample to appear in collector logs ────────────────
             // verbosity:detailed prints every attribute on its own line:
             //   -> "db.server.query_sample"

@@ -169,15 +169,17 @@ public class Db2Receiver {
         final boolean[] firstRun = {true};
         topQueryScheduler.scheduleWithFixedDelay(
             () -> {
+                boolean succeeded = false;
                 try {
-                    topQueryQuery.collect();
+                    succeeded = topQueryQuery.collect();
                 } catch (Exception e) {
                     log.warn("[{}] Top query collection error: {}", label, e.getMessage());
-                } finally {
-                    if (firstRun[0] && seedDone != null) {
-                        firstRun[0] = false;
-                        seedDone.countDown();
-                    }
+                }
+                // Count down only after a successful seed — a failed scrape leaves no baseline,
+                // so the workload would be captured by the next scrape and emitted as a zero delta.
+                if (firstRun[0] && succeeded && seedDone != null) {
+                    firstRun[0] = false;
+                    seedDone.countDown();
                 }
             },
             0, intervalSeconds, TimeUnit.SECONDS
