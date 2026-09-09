@@ -11,7 +11,7 @@ resource_attributes:
     type: string
     enabled: true
   db.system.name:
-    description: The database management system. Always ibm.db2 for this receiver.
+    description: The database management system. Always db2 for this receiver.
     type: string
     enabled: true
   server.address:

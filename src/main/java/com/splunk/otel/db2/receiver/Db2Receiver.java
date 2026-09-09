@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -137,6 +138,14 @@ public class Db2Receiver {
     // production minimum. Production code always calls start() which enforces the 60s minimum
     // via getTopQueryIntervalDuration().
     public void startTopQueryScheduler(long intervalSeconds) {
+        startTopQueryScheduler(intervalSeconds, null);
+    }
+
+    /**
+     * Test-only overload: {@code seedDone} is counted down once the first (seed) collection
+     * completes, giving callers a deterministic signal instead of a blind {@code Thread.sleep}.
+     */
+    public void startTopQueryScheduler(long intervalSeconds, CountDownLatch seedDone) {
         topQueryConnection = new Db2Connection(config, label);
         Supplier<Connection> topQueryConnSupplier = () -> {
             try {
@@ -157,12 +166,18 @@ public class Db2Receiver {
             t.setDaemon(true);
             return t;
         });
+        final boolean[] firstRun = {true};
         topQueryScheduler.scheduleWithFixedDelay(
             () -> {
                 try {
                     topQueryQuery.collect();
                 } catch (Exception e) {
                     log.warn("[{}] Top query collection error: {}", label, e.getMessage());
+                } finally {
+                    if (firstRun[0] && seedDone != null) {
+                        firstRun[0] = false;
+                        seedDone.countDown();
+                    }
                 }
             },
             0, intervalSeconds, TimeUnit.SECONDS

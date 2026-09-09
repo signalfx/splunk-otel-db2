@@ -19,6 +19,7 @@ import java.sql.DriverManager;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -124,13 +125,14 @@ class Db2OtelCollectorEndToEndIntegrationTest {
         // ── 3. Start the pipeline — it will connect to real DB2 and real Collector ──
         Db2Pipeline pipeline = new Db2Pipeline(rc, otlp);
         pipeline.start();
-        // Cycle 1 (baseline): scheduleWithFixedDelay fires immediately with initialDelay=0
-        // but the scrape runs asynchronously. Wait one full cycle (6s > 5s interval) so the
-        // seed collection finishes before the workload runs. If the workload executes inside
-        // the first scrape window it becomes part of the baseline and produces a zero delta
-        // on cycle 2, causing an intermittent 90-second timeout.
-        pipeline.startTopQueryScheduler(5L); // 5s cycle — bypass the 60s minimum
-        Thread.sleep(6000); // wait for seed scrape to complete
+        // Cycle 1 (baseline): use a latch so we wait exactly until the seed scrape
+        // finishes — no fixed sleep. If the workload ran inside the seed window it would
+        // become the new baseline and produce a zero delta on cycle 2, causing a timeout.
+        CountDownLatch seedDone = new CountDownLatch(1);
+        pipeline.startTopQueryScheduler(5L, seedDone); // 5s cycle — bypass the 60s minimum
+        if (!seedDone.await(30, TimeUnit.SECONDS)) {
+            throw new AssertionError("Top-query seed scrape did not complete within 30s");
+        }
 
         // Cycle 2+ workload: this query now appears after the baseline and will be emitted
         // as a delta on the next collection. Cross-join on SYSCAT.COLUMNS is guaranteed to
