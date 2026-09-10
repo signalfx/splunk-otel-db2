@@ -1,0 +1,42 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 10s
+
+exporters:
+  # Splunk Observability Cloud — metrics via OTLP/HTTP (/v2/datapoint/otlp).
+  otlphttp/splunk:
+    metrics_endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/datapoint/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_TOKEN}"
+
+  # Splunk Observability Cloud — DBMon log events (query samples, top queries,
+  # blocking sessions) via OTLP/HTTP to /v3/event with the dbmon routing header.
+  # This is distinct from the metrics endpoint and must be configured separately.
+  otlphttp/dbmon:
+    logs_endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com/v3/event"
+    headers:
+      X-SF-Token: "${env:SPLUNK_TOKEN}"
+      X-Splunk-Instrumentation-Library: "dbmon"
+
+  # Optional: keep debug exporter for local troubleshooting.
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/splunk]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/dbmon]

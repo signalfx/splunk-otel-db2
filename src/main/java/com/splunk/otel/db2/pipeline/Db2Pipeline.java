@@ -12,6 +12,7 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
 
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
@@ -129,6 +130,16 @@ public class Db2Pipeline {
     public void start() {
         receiver.start();
         log.info("DB2 pipeline started for {} → OTel Collector", instanceId);
+    }
+
+    /** For tests: bypass the 60s minimum and schedule top-query at the given interval. */
+    public void startTopQueryScheduler(long intervalSeconds) {
+        receiver.startTopQueryScheduler(intervalSeconds);
+    }
+
+    /** For tests: same as above but counts down {@code seedDone} when the seed scrape finishes. */
+    public void startTopQueryScheduler(long intervalSeconds, CountDownLatch seedDone) {
+        receiver.startTopQueryScheduler(intervalSeconds, seedDone);
     }
 
     public void stop() {

@@ -1,0 +1,36 @@
+{{- include "splunk-otel-db2.validateReceiverNames" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "splunk-otel-db2.fullname" . }}-config
+  labels:
+    {{- include "splunk-otel-db2.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+    {{- range .Values.receivers }}
+      db2/{{ .name }}:
+        hostname: {{ .hostname | quote }}
+        hostport: {{ .port }}
+        username: "${env:DB2_USER_{{ .name | upper | replace "-" "_" }}}"
+        password: "${env:DB2_PASSWORD_{{ .name | upper | replace "-" "_" }}}"
+        database: {{ .database | quote }}
+        collection_interval: {{ .collectionInterval | quote }}
+        tls:
+          insecure: {{ .tls.insecure }}
+        top_query_enabled: {{ .topQueryEnabled }}
+        query_sample_enabled: {{ .querySampleEnabled }}
+    {{- end }}
+
+    exporters:
+      otlp:
+        endpoint: {{ .Values.otlp.endpoint | quote }}
+        {{- if .Values.otlp.compression }}
+        compression: {{ .Values.otlp.compression | quote }}
+        {{- end }}
+        {{- if .Values.otlp.headers }}
+        headers:
+          {{- toYaml .Values.otlp.headers | nindent 10 }}
+        {{- end }}
+        tls:
+          insecure: {{ .Values.otlp.tls.insecure }}

@@ -5,6 +5,7 @@ import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporterBuilder;
 import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
 import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporterBuilder;
+import io.opentelemetry.sdk.common.export.RetryPolicy;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
 import io.opentelemetry.sdk.metrics.export.MetricReader;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
@@ -20,11 +21,25 @@ import java.util.Map;
 public class Db2Exporter {
     private static final Logger log = LoggerFactory.getLogger(Db2Exporter.class);
 
+    // Retry policy that covers transient gRPC transport errors (e.g. "http2: client
+    // connection lost" when the collector pod restarts). The exporter retries up to 5
+    // times with exponential backoff; the custom predicate extends the default
+    // UNAVAILABLE / RESOURCE_EXHAUSTED status-code handling to also retry on any
+    // IOException so that a broken channel reconnects without operator intervention.
+    private static final RetryPolicy RETRY_POLICY = RetryPolicy.builder()
+        .setMaxAttempts(5)
+        .setInitialBackoff(Duration.ofSeconds(1))
+        .setMaxBackoff(Duration.ofSeconds(30))
+        .setBackoffMultiplier(2.0)
+        .setRetryExceptionPredicate(e -> e instanceof IOException)
+        .build();
+
     public static MetricReader build(OtlpExporterConfig config, Duration interval) {
         log.info("Exporting metrics via OTLP to {}", config.getEndpoint());
 
         OtlpGrpcMetricExporterBuilder builder = OtlpGrpcMetricExporter.builder()
-            .setEndpoint(config.getEndpoint());
+            .setEndpoint(config.getEndpoint())
+            .setRetryPolicy(RETRY_POLICY);
         for (Map.Entry<String, String> h : config.getHeaders().entrySet()) {
             builder.addHeader(h.getKey(), h.getValue());
         }
@@ -41,7 +56,8 @@ public class Db2Exporter {
 
     public static OtlpGrpcLogRecordExporter buildLogExporter(OtlpExporterConfig config) {
         OtlpGrpcLogRecordExporterBuilder builder = OtlpGrpcLogRecordExporter.builder()
-            .setEndpoint(config.getEndpoint());
+            .setEndpoint(config.getEndpoint())
+            .setRetryPolicy(RETRY_POLICY);
         for (Map.Entry<String, String> h : config.getHeaders().entrySet()) {
             builder.addHeader(h.getKey(), h.getValue());
         }

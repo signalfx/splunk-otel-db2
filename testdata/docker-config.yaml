@@ -1,0 +1,16 @@
+receivers:
+  db2:
+    hostname: "${env:DB2_HOST}"
+    hostport: "${env:DB2_PORT}"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "SAMPLE"
+    collection_interval: "30s"
+    tls:
+      insecure: true
+
+exporters:
+  otlp:
+    endpoint: "${env:OTLP_ENDPOINT}"
+    tls:
+      insecure: true

@@ -162,7 +162,8 @@ public class TopQueryQuery {
             topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds);
     }
 
-    public void collect() {
+    /** Returns {@code true} when the scrape completed (baseline seeded or deltas emitted), {@code false} on failure. */
+    public boolean collect() {
         Map<String, long[]>        curr              = new HashMap<>();
         List<String[]>             texts             = new ArrayList<>(); // [rawSql, secType, key, member]
         List<long[]>               counters          = new ArrayList<>();
@@ -209,7 +210,7 @@ public class TopQueryQuery {
             }
         } catch (Exception e) {
             log.warn("TopQueryQuery collection failed: {}", e.getMessage());
-            return; // lastServerScrapeInstant not updated — next cycle re-classifies misses correctly
+            return false; // lastServerScrapeInstant not updated — next cycle re-classifies misses correctly
         }
         if (curr.size() > 5000) {
             log.warn("TopQueryQuery: plan cache returned {} rows — consider tuning LAST_METRICS_UPDATE lookback", curr.size());
@@ -259,7 +260,7 @@ public class TopQueryQuery {
 
         if (isFirstCollection) {
             log.debug("TopQueryQuery: first collection, seeding delta baseline ({} rows)", curr.size());
-            return;
+            return true;
         }
 
         // Compute interval deltas.
@@ -346,5 +347,6 @@ public class TopQueryQuery {
             emitCount++;
         }
         log.debug("TopQueryQuery: emitted {} top queries (cache size={})", emitCount, baselineCache.size());
+        return true;
     }
 }

@@ -294,6 +294,205 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
 > **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
 
+## Installation
+
+### systemd (Linux)
+
+The `packaging/systemd/` directory contains a hardened unit file. Set `otlp.endpoint` in `config.yaml` to wherever your OTel Collector is — same host, remote server, or any OTLP-compatible endpoint.
+
+The receiver requires Java 11+. Install a JRE from your distribution's package manager — the Docker image's custom JRE is built against glibc (Debian) and can also be reused on glibc hosts.
+
+```bash
+# 1. Install a JRE (Java 11+) and copy the fat jar
+sudo apt-get install -y openjdk-17-jre-headless   # Debian/Ubuntu
+# sudo dnf install -y java-17-openjdk-headless     # RHEL/Fedora
+sudo mkdir -p /opt/splunk-otel-db2
+sudo cp build/libs/splunk-otel-db2-*.jar /opt/splunk-otel-db2/splunk-otel-db2.jar
+
+# 2. Create the service user
+sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
+
+# 3. Write config — set otlp.endpoint to your backend or local OTel Collector
+sudo mkdir -p /etc/splunk-otel-db2
+sudo tee /etc/splunk-otel-db2/config.yaml > /dev/null <<'EOF'
+receivers:
+  db2:
+    hostname: "db2.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "SAMPLE"
+    collection_interval: "30s"
+    tls:
+      insecure: true
+
+exporters:
+  otlp:
+    # Send to an OTel Collector running on this host or elsewhere:
+    endpoint: "http://localhost:4317"
+    tls:
+      insecure: true
+EOF
+
+# 4. Store credentials (readable only by the service user)
+sudo tee /etc/splunk-otel-db2/env > /dev/null <<'EOF'
+DB2_USER=db2mon
+DB2_PASSWORD=<secret>
+EOF
+sudo chmod 640 /etc/splunk-otel-db2/env
+sudo chown root:splunk-otel-db2 /etc/splunk-otel-db2/env
+
+# 5. Install and start the service
+sudo cp packaging/systemd/splunk-otel-db2.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now splunk-otel-db2
+sudo journalctl -u splunk-otel-db2 -f
+```
+
+### Helm (Kubernetes)
+
+The receiver exports via OTLP/gRPC. `otlp.endpoint` can point at an OTel Collector running anywhere — in the same cluster, on another host, or as a sidecar. Use a values file to avoid shell glob issues with array syntax.
+
+**Example `my-values.yaml`:**
+
+```yaml
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    credentialsSecret: "my-db2-credentials"   # pre-existing Secret with DB2_USER / DB2_PASSWORD
+    tls:
+      insecure: true
+    topQueryEnabled: false
+    querySampleEnabled: false
+
+otlp:
+  # OTel Collector in the same cluster:
+  # http://<helm-release-name>-opentelemetry-collector.<namespace>.svc.cluster.local:4317
+  endpoint: "http://my-otelcol-opentelemetry-collector.monitoring.svc.cluster.local:4317"
+  tls:
+    insecure: true
+```
+
+```bash
+helm install my-db2 packaging/helm -f my-values.yaml
+```
+
+**OTel Collector outside the cluster** (external host or IP):
+
+```yaml
+otlp:
+  # External OTel Collector reachable by hostname or IP:
+  endpoint: "http://collector.example.com:4317"
+  tls:
+    insecure: true
+```
+
+**Credentials** — reference a pre-existing Secret (recommended for production):
+
+```yaml
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    credentialsSecret: "my-db2-credentials"   # Secret must have keys DB2_USER and DB2_PASSWORD
+    tls:
+      insecure: true
+```
+
+Or let the chart create one (not recommended for production):
+
+```yaml
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    username: "db2mon"
+    password: "secret"
+    tls:
+      insecure: true
+```
+
+**Pulling from a private GHCR registry:**
+
+```yaml
+imagePullSecrets:
+  - name: ghcr-credentials
+```
+
+### Docker
+
+Mount a config file and run. `otlp.endpoint` in the config points at wherever your OTel Collector is — same host, remote, or a sidecar container.
+
+```bash
+docker run --rm \
+  -e DB2_USER=db2mon \
+  -e DB2_PASSWORD=secret \
+  -v /path/to/config.yaml:/etc/splunk-otel-db2/config.yaml:ro \
+  ghcr.io/signalfx/splunk-otel-db2:latest
+```
+
+The config file controls everything — DB2 connection, OTLP endpoint, collection intervals. See the [Configuration](#configuration) section for the full schema.
+
+### docker-compose
+
+Two deployment modes depending on whether you run the OTel Collector yourself or want it bundled.
+
+---
+
+**Option A — Scraper only** (you already have an OTel Collector running elsewhere):
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/signalfx/splunk-otel-db2.git
+cd splunk-otel-db2
+
+# 2. Set required environment variables
+export DB2_HOST=db2.example.com        # your DB2 hostname or IP
+export DB2_PORT=50000                  # default 50000
+export DB2_USER=db2mon
+export DB2_PASSWORD=secret
+export OTLP_ENDPOINT=http://your-collector:4317
+
+# 3. Start the scraper
+docker compose up --build -d
+
+# 4. Check logs
+docker compose logs -f receiver
+```
+
+---
+
+**Option B — Scraper + OTel Collector** (collector runs alongside the scraper, forwards to Splunk Observability Cloud):
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/signalfx/splunk-otel-db2.git
+cd splunk-otel-db2
+
+# 2. Set required environment variables
+export DB2_HOST=db2.example.com        # your DB2 hostname or IP
+export DB2_PORT=50000                  # default 50000
+export DB2_USER=db2mon
+export DB2_PASSWORD=secret
+export SPLUNK_REALM=us1                # your Splunk Observability Cloud realm
+export SPLUNK_TOKEN=<your-ingest-token>
+
+# 3. Start both the scraper and the collector
+docker compose -f docker-compose.yml -f docker-compose.collector.yml --profile collector up --build -d
+
+# 4. Check logs
+docker compose -f docker-compose.yml -f docker-compose.collector.yml logs -f receiver otel-collector
+```
+
+> **Finding your realm and token**: in Splunk Observability Cloud go to **Settings → Access Tokens** for the ingest token, and **Settings → General** for the realm (e.g. `us1`, `eu0`).
+
 ## Development
 
 ```bash
@@ -302,6 +501,23 @@ make integration-test    # live DB2 via Testcontainers (requires Docker)
 make jar                 # build fat jar → build/libs/splunk-otel-db2-*.jar
 make clean               # clean build outputs
 ```
+
+### Test suites
+
+| Gradle task | Description | Requires Docker |
+|---|---|---|
+| `./gradlew test` | Fast unit tests — mocked OTel SDK, no DB2 | No |
+| `./gradlew integrationTest` | Live DB2 (Testcontainers) + in-process scraper with `InMemoryLogRecordExporter` | Yes |
+| `./gradlew integrationTestSnapshot` | Snapshot monitor path; requires `DFT_MON_STMT ON` on the container | Yes |
+
+**End-to-end OTel Collector test** (`Db2OtelCollectorEndToEndIntegrationTest`) is included in `integrationTest` and validates the full pipeline:
+
+1. Starts a real IBM DB2 11.5 container via Testcontainers.
+2. Starts an `otel/opentelemetry-collector-contrib` container with `verbosity: detailed` debug exporter.
+3. Starts a `Db2Pipeline` connected to both — scraper exports via OTLP gRPC to the collector.
+4. Creates a lock-wait workload (`INSERT` held uncommitted + `SELECT … WITH RR` blocks) so `MON_CURRENT_SQL` has an active query to capture.
+5. Runs a cross-join probe query (`E2E_TOPQ_PROBE`) that appears in the top-query plan cache.
+6. Asserts that the collector container logs contain both `db.server.query_sample` and `db.server.top_query` events with `db.system.name = ibm.db2` and the correct `db.namespace`.
 
 ## Resource attributes
 
