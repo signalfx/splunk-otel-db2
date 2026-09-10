@@ -101,6 +101,51 @@ attributes:
       Statement type from the package cache. D = dynamic SQL, S = static (package) SQL.
     type: string
 
+  # --- blocking session event attributes ---
+  db2.blocking.blocker.application_handle:
+    description: Application handle of the session holding the lock (blocker).
+    type: string
+  db2.blocking.blocker.user:
+    description: Authenticated user ID of the blocker.
+    type: string
+  db2.blocking.blocker.client_address:
+    description: Client workstation name of the blocker.
+    type: string
+  db2.blocking.blocker.query_text:
+    description: >
+      Obfuscated SQL text of the blocker's active statement (from MON_CURRENT_SQL).
+      For idle blockers, the last statement from MON_GET_PKG_CACHE_STMT is used.
+      Omitted if unavailable or if obfuscation fails.
+    type: string
+  db2.blocking.blocker.is_idle:
+    description: >
+      True when the blocker has no active statement in MON_CURRENT_SQL —
+      i.e. it is holding an open transaction but not currently executing.
+    type: bool
+  db2.blocking.lock.object_type:
+    description: >
+      DB2 lock object type (ROW, TABLE, PLAN, INTERNAL, TABLESPACE, etc.)
+      from MON_LOCKWAITS.LOCK_OBJECT_TYPE.
+    type: string
+  db2.blocking.lock.mode:
+    description: >
+      DB2 lock mode (S, X, IX, IS, SIX, Z, U, NS, NX, etc.)
+      from MON_LOCKWAITS.LOCK_MODE.
+    type: string
+  db2.blocking.lock.object_name:
+    description: Name of the locked table or object from MON_LOCKWAITS.TABNAME.
+    type: string
+  db2.blocking.lock.schema:
+    description: Schema of the locked object from MON_LOCKWAITS.TABSCHEMA.
+    type: string
+  db2.blocking.start_time:
+    description: >
+      Timestamp when the lock wait began (MON_LOCKWAITS.LOCK_WAIT_START_TIME).
+    type: string
+  db2.blocking.wait_duration:
+    description: Elapsed time since the lock wait began, in seconds.
+    type: double
+
   # --- query sample event attributes ---
   db.query.text:
     description: Obfuscated SQL statement text. Literal values replaced with ?.
@@ -325,6 +370,36 @@ metrics:
     unit: "By"
 
 events:
+  db.server.blocking_session:
+    enabled: false
+    description: >
+      A blocked→blocker lock pair from SYSIBMADM.MON_LOCKWAITS. Each record represents
+      one session waiting on a lock held by another. SQL text for both sides is obfuscated
+      before emission — literal values are replaced with ?. For idle blockers (holding an
+      open transaction but not actively executing), the blocker's last statement is looked
+      up from MON_GET_PKG_CACHE_STMT. Emitted at blocking_session_interval as OTel log
+      records with severity WARN.
+    attributes:
+      - db.system.name
+      - db.namespace
+      - db2.member
+      - db.query.text                          # blocked session SQL
+      - db2.application_handle                 # blocked session handle
+      - db2.activity_state                     # blocked session state+type
+      - user.name                              # blocked session user
+      - client.address                         # blocked session host
+      - db2.blocking.blocker.application_handle
+      - db2.blocking.blocker.user
+      - db2.blocking.blocker.client_address
+      - db2.blocking.blocker.query_text        # omitted if unavailable
+      - db2.blocking.blocker.is_idle
+      - db2.blocking.lock.object_type
+      - db2.blocking.lock.mode
+      - db2.blocking.lock.object_name
+      - db2.blocking.lock.schema
+      - db2.blocking.start_time
+      - db2.blocking.wait_duration
+
   db.server.query_sample:
     enabled: false
     description: >

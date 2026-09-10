@@ -1,6 +1,7 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import com.splunk.otel.db2.receiver.queries.BlockingSessionQuery;
 import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
 import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
@@ -35,8 +36,11 @@ public class Db2Receiver {
     private Db2Connection querySampleConnection;
     private Db2Connection topQueryConnection;
 
+    private Db2Connection blockingSessionConnection;
+
     private ScheduledExecutorService querySampleScheduler;
     private ScheduledExecutorService topQueryScheduler;
+    private ScheduledExecutorService blockingSessionScheduler;
 
     private final AtomicBoolean stopped = new AtomicBoolean(false); // B3: idempotent stop
 
@@ -92,6 +96,11 @@ public class Db2Receiver {
         if (otelLogger != null && config.isTopQueryEnabled()) {
             long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
             startTopQueryScheduler(topQueryIntervalSeconds);
+        }
+
+        if (otelLogger != null && config.isBlockingSessionEnabled()) {
+            long blockingIntervalSeconds = config.getBlockingSessionIntervalDuration().getSeconds();
+            startBlockingSessionScheduler(blockingIntervalSeconds);
         }
 
         log.info("[{}] DB2 receiver started", label);
@@ -186,6 +195,38 @@ public class Db2Receiver {
         );
     }
 
+    void startBlockingSessionScheduler(long intervalSeconds) {
+        blockingSessionConnection = new Db2Connection(config, label);
+        Supplier<Connection> blockingConnSupplier = () -> {
+            try {
+                return blockingSessionConnection.getOrConnect();
+            } catch (SQLException e) {
+                throw new RuntimeException("[" + label + "] DB2 blocking-session connection failed: " + e.getMessage(), e);
+            }
+        };
+        BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
+            blockingConnSupplier,
+            config.getDatabase(),
+            otelLogger,
+            intervalSeconds
+        );
+        blockingSessionScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "db2-blocking-session-collector[" + label + "]");
+            t.setDaemon(true);
+            return t;
+        });
+        blockingSessionScheduler.scheduleAtFixedRate(
+            () -> {
+                try {
+                    blockingSessionQuery.collect();
+                } catch (Exception e) {
+                    log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
+                }
+            },
+            0, intervalSeconds, TimeUnit.SECONDS
+        );
+    }
+
     private int detectDb2Version(Supplier<Connection> connSupplier) {
         try {
             java.sql.DatabaseMetaData meta = connSupplier.get().getMetaData();
@@ -212,8 +253,9 @@ public class Db2Receiver {
 
     public void stopScheduler() {
         // B4: graceful drain — let the current collection cycle finish, then force-stop
-        shutdownGracefully(querySampleScheduler, "db2-query-sampler");
-        shutdownGracefully(topQueryScheduler,    "db2-top-query-collector");
+        shutdownGracefully(querySampleScheduler,       "db2-query-sampler");
+        shutdownGracefully(topQueryScheduler,          "db2-top-query-collector");
+        shutdownGracefully(blockingSessionScheduler,   "db2-blocking-session-collector");
     }
 
     private void shutdownGracefully(ScheduledExecutorService scheduler, String name) {
@@ -232,8 +274,9 @@ public class Db2Receiver {
 
     public void closeConnection() {
         metricsConnection.close();
-        if (querySampleConnection != null) querySampleConnection.close();
-        if (topQueryConnection    != null) topQueryConnection.close();
+        if (querySampleConnection     != null) querySampleConnection.close();
+        if (topQueryConnection        != null) topQueryConnection.close();
+        if (blockingSessionConnection != null) blockingSessionConnection.close();
         log.info("[{}] DB2 receiver stopped", label);
     }
 }

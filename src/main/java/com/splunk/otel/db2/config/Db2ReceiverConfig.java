@@ -14,6 +14,8 @@ public class Db2ReceiverConfig {
     private String collectionInterval = "30s";
     private int topQueryCount = 250;
     private boolean topQueryEnabled = false;
+    private boolean blockingSessionEnabled = false;
+    private String blockingSessionInterval = "10s";
     private int maxQuerySampleCount = 1000;
     private boolean querySampleEnabled = false;
     private boolean useSnapshotMonitor = false;
@@ -70,6 +72,12 @@ public class Db2ReceiverConfig {
 
     public boolean isTopQueryEnabled() { return topQueryEnabled; }
     public void setTopQueryEnabled(boolean topQueryEnabled) { this.topQueryEnabled = topQueryEnabled; }
+
+    public boolean isBlockingSessionEnabled() { return blockingSessionEnabled; }
+    public void setBlockingSessionEnabled(boolean blockingSessionEnabled) { this.blockingSessionEnabled = blockingSessionEnabled; }
+
+    public Duration getBlockingSessionIntervalDuration() { return parseDuration(blockingSessionInterval, 10); }
+    public void setBlockingSessionInterval(String blockingSessionInterval) { this.blockingSessionInterval = blockingSessionInterval; }
 
     public int getMaxQuerySampleCount() { return maxQuerySampleCount; }
     public void setMaxQuerySampleCount(int maxQuerySampleCount) {
