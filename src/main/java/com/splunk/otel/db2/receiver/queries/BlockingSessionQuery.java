@@ -39,8 +39,16 @@ public class BlockingSessionQuery {
     // LEFT JOIN on MON_CURRENT_SQL for blocker so idle blockers still appear.
     // LOCK_WAIT_START_TIME is a TIMESTAMP — elapsed ms computed in Java.
     // MEMBER from REQ connection identifies the partition.
+    //
+    // CONNS CTE: DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear
+    // twice in the same FROM clause — materialise it once and join both sides.
+    //
     // exposed for integration test diagnostic — not part of the public API
     public static final String SQL =
+        "WITH CONNS AS ( " +
+        "  SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
+        "  FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS T " +
+        ") " +
         "SELECT " +
         "  LW.REQ_APPLICATION_HANDLE           AS BLOCKED_HANDLE, " +
         "  LW.HLD_APPLICATION_HANDLE           AS BLOCKER_HANDLE, " +
@@ -61,11 +69,11 @@ public class BlockingSessionQuery {
         "FROM SYSIBMADM.MON_LOCKWAITS LW " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKED_SQL " +
         "  ON BLOCKED_SQL.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
-        "LEFT JOIN TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) BLOCKED_CON " +
+        "LEFT JOIN CONNS BLOCKED_CON " +
         "  ON BLOCKED_CON.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
-        "LEFT JOIN TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) BLOCKER_CON " +
+        "LEFT JOIN CONNS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         "WITH UR";
 
