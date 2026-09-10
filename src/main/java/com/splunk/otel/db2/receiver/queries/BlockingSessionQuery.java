@@ -39,7 +39,8 @@ public class BlockingSessionQuery {
     // LEFT JOIN on MON_CURRENT_SQL for blocker so idle blockers still appear.
     // LOCK_WAIT_START_TIME is a TIMESTAMP — elapsed ms computed in Java.
     // MEMBER from REQ connection identifies the partition.
-    private static final String SQL =
+    // exposed for integration test diagnostic — not part of the public API
+    public static final String SQL =
         "SELECT " +
         "  LW.REQ_APPLICATION_HANDLE           AS BLOCKED_HANDLE, " +
         "  LW.HLD_APPLICATION_HANDLE           AS BLOCKER_HANDLE, " +

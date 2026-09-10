@@ -190,11 +190,43 @@ class BlockingSessionIntegrationTest {
             .isTrue();
     }
 
+    /**
+     * Directly runs the BlockingSessionQuery SQL while a lock wait is active and prints
+     * what DB2 returns (row count, column values, any SQL error). This lets CI logs surface
+     * the real error without the Awaitility timeout obscuring it.
+     */
+    private void validateBlockingSessionSqlDirectly() throws Exception {
+        try (Connection probe = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
+             java.sql.Statement st = probe.createStatement();
+             java.sql.ResultSet rs = st.executeQuery(
+                 com.splunk.otel.db2.receiver.queries.BlockingSessionQuery.SQL)) {
+            int rowCount = 0;
+            while (rs.next()) {
+                rowCount++;
+                System.out.printf("[DIAG] row=%d BLOCKED_HANDLE=%s BLOCKER_HANDLE=%s " +
+                    "BLOCKED_SQL='%s' BLOCKER_SQL='%s' BLOCKER_IS_IDLE=%d LOCK_OBJECT_TYPE=%s%n",
+                    rowCount,
+                    rs.getString("BLOCKED_HANDLE"),
+                    rs.getString("BLOCKER_HANDLE"),
+                    rs.getString("BLOCKED_SQL"),
+                    rs.getString("BLOCKER_SQL"),
+                    rs.getInt("BLOCKER_IS_IDLE"),
+                    rs.getString("LOCK_OBJECT_TYPE"));
+            }
+            assertThat(rowCount)
+                .as("BlockingSessionQuery SQL must return at least 1 row when a lock wait is active")
+                .isGreaterThan(0);
+        } catch (Exception e) {
+            throw new AssertionError("BlockingSessionQuery SQL failed: " + e.getMessage(), e);
+        }
+    }
+
     // ── tests ────────────────────────────────────────────────────────────────
 
     @Test
     void blockingSessionEventEmittedWithCorrectAttributes() throws Exception {
         createLockWait();
+        validateBlockingSessionSqlDirectly(); // surface SQL error before Awaitility times out
 
         receiver = buildReceiver(buildConfig());
         receiver.start();
@@ -253,6 +285,7 @@ class BlockingSessionIntegrationTest {
     @Test
     void idleBlockerFlagTrueAndQueryTextLookedUpFromPackageCache() throws Exception {
         createLockWait();
+        validateBlockingSessionSqlDirectly(); // surface SQL error before Awaitility times out
         // ownerConn did INSERT then became idle — BLOCKER_IS_IDLE should be true
         // and MON_GET_PKG_CACHE_STMT should have the INSERT in the plan cache
 
