@@ -140,13 +140,14 @@ Credential values can be literals or `${env:VAR_NAME}` references.
 
 ## Resource usage
 
-Each monitored database uses 1–3 JDBC connections depending on which collectors are enabled:
+Each monitored database uses 1–4 JDBC connections depending on which collectors are enabled:
 
 | Collector | Connection | Always open? |
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
 | Query sample (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
 | Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+| Blocking session (`blocking_session_enabled: true`) | `blockingSessionConnection` | Optional |
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
 
@@ -220,6 +221,67 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 **Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
 
+## Blocking sessions (log records)
+
+Lock contention is detected at `blocking_session_interval` and emitted as OTel log records (severity WARN). Disabled by default — set `blocking_session_enabled: true` to opt in. SQL text for both the blocked and blocker session is obfuscated before emission.
+
+Each record represents one blocked→blocker pair from `SYSIBMADM.MON_LOCKWAITS`. If the blocker is idle (holding an open transaction but not currently executing), its last statement is looked up from `MON_GET_PKG_CACHE_STMT`.
+
+The log record's native `event_name` field is set to `db.server.blocking_session`.
+
+Enable with:
+
+```yaml
+receivers:
+  db2:
+    hostname: "localhost"
+    database: "SAMPLE"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    blocking_session_enabled: true
+    blocking_session_interval: "10s"   # how often to poll MON_LOCKWAITS (default: 10s)
+```
+
+| Attribute | Description |
+|---|---|
+| `db.system.name` | Always `db2` |
+| `db.namespace` | Database name |
+| `db.query.text` | Obfuscated SQL of the **blocked** session |
+| `db2.application_handle` | Application handle of the blocked session |
+| `db2.activity_state` | Activity state of the blocked session (e.g. `LOCK_WAIT READ_DML`) |
+| `db2.member` | Db2 member number |
+| `user.name` | Authenticated user of the blocked session |
+| `client.address` | Client workstation of the blocked session |
+| `db2.blocking.blocker.application_handle` | Application handle of the blocking session |
+| `db2.blocking.blocker.user` | Authenticated user of the blocker |
+| `db2.blocking.blocker.client_address` | Client workstation of the blocker |
+| `db2.blocking.blocker.query_text` | Obfuscated SQL of the blocker (from `MON_CURRENT_SQL`; idle blockers fall back to `MON_GET_PKG_CACHE_STMT`; omitted if unavailable) |
+| `db2.blocking.blocker.is_idle` | `true` when the blocker has no active statement — it holds an open transaction but is not currently executing |
+| `db2.blocking.lock.object_type` | DB2 lock object type (`ROW`, `TABLE`, `TABLESPACE`, `PLAN`, `INTERNAL`, …) |
+| `db2.blocking.lock.mode` | DB2 lock mode (`S`, `X`, `IX`, `IS`, `SIX`, `U`, `NS`, `NX`, …) |
+| `db2.blocking.lock.object_name` | Name of the locked table or object |
+| `db2.blocking.lock.schema` | Schema of the locked object |
+| `db2.blocking.start_time` | Timestamp when the lock wait began |
+| `db2.blocking.wait_duration` | Elapsed time since the lock wait began, in seconds |
+
+**DB2-specific lock types** not present in SQL Server or PostgreSQL blocking detectors:
+
+| Type | Meaning |
+|---|---|
+| `PLAN` | Package compile lock — acquired when DB2 compiles a static SQL package; can block concurrent compilations |
+| `INTERNAL` | Internal latch — low-level engine synchronisation; rarely visible but can appear under high concurrency |
+| `TABLESPACE` | Tablespace-level lock — acquired during backup, restore, or `REORG` operations |
+| `NS` / `NX` modes | Next-key share/exclusive locks — used by range scans under `RR` isolation to prevent phantom reads |
+
+**Required permissions** (blocking session detection):
+
+```sql
+GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
+GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;  -- idle-blocker lookup
+```
+
 ## Top queries (log records)
 
 Top SQL statements are collected from the Db2 plan cache at `top_query_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `top_query_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
@@ -280,6 +342,14 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
 
 -- Db2 10.5+ wait time attribute (db2.wait_time)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
+
+-- Blocking session detection (blocking_session_enabled: true)
+GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
+-- MON_CURRENT_SQL already granted above for query sampling; add it here if not using query sampling:
+-- GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+-- MON_GET_CONNECTION already granted above.
+-- MON_GET_PKG_CACHE_STMT already granted above for top queries; add it here if not using top queries:
+-- GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
 
 -- Snapshot monitor path (use_snapshot_monitor: true)
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
