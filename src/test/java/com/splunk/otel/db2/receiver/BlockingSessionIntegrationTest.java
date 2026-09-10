@@ -22,6 +22,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
@@ -36,14 +37,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Integration tests for blocking session detection against a live DB2 container.
  *
- * Two scenarios:
- *   1. Idle blocker: session A inserts a row and holds the transaction open (not executing
- *      any SQL). Session B tries to read the same row WITH RR and blocks. The blocker has
- *      no active SQL in MON_CURRENT_SQL, so BLOCKER_IS_IDLE=true and the last statement
- *      is looked up from MON_GET_PKG_CACHE_STMT.
- *
- *   2. Attributes: verifies db.system.name, db.namespace, severity WARN, obfuscated blocked
- *      SQL, blocker application handle, lock object type and mode fields.
+ * The lock scenario: session A inserts a row and holds the transaction open (idle blocker —
+ * no active SQL after the INSERT). Session B tries to read the same row WITH RR and blocks.
+ * MON_LOCKWAITS shows the blocked→blocker pair; the blocker has BLOCKER_IS_IDLE=true and its
+ * last statement is looked up from MON_GET_PKG_CACHE_STMT.
  *
  * Run with: ./gradlew integrationTest
  */
@@ -89,19 +86,19 @@ class BlockingSessionIntegrationTest {
 
     @AfterEach
     void teardown() throws Exception {
-        // Unblock the blocked session first
+        // Cancel the blocked statement first so it can be closed
         if (blockedStmt != null)  { try { blockedStmt.cancel(); } catch (Exception ignored) {} }
         if (blockedConn != null)  { try { blockedConn.rollback(); blockedConn.close(); } catch (Exception ignored) {} }
         if (blockedFuture != null){ blockedFuture.cancel(true); }
         if (exec != null)         { exec.shutdownNow(); }
-        // Release the owner lock
+        // Release the owner lock after the blocked session is gone
         if (ownerConn != null)    { try { ownerConn.rollback(); ownerConn.close(); } catch (Exception ignored) {} }
 
         if (receiver != null) receiver.stop();
         if (loggerProvider != null) loggerProvider.shutdown();
         if (meterProvider  != null) meterProvider.shutdown();
 
-        // Drop table on fresh connection — DDL outside a transaction
+        // Drop table on fresh autoCommit connection
         try (Connection c = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
              Statement s  = c.createStatement()) {
             try { s.execute("DROP TABLE " + TABLE); } catch (Exception ignored) {}
@@ -144,6 +141,9 @@ class BlockingSessionIntegrationTest {
     /**
      * Session A: INSERT + hold (idle blocker — no active SQL after the INSERT).
      * Session B: SELECT … WITH RR → blocks on A's X-lock (blocked session).
+     *
+     * Also verifies that MON_LOCKWAITS actually sees the lock pair before returning,
+     * so the polling test isn't racing against DB2 internal lock registration.
      */
     private void createLockWait() throws Exception {
         // Owner: INSERT uncommitted row → holds X lock, then goes idle
@@ -152,9 +152,9 @@ class BlockingSessionIntegrationTest {
         try (Statement st = ownerConn.createStatement()) {
             st.execute("INSERT INTO " + TABLE + " VALUES (1, 'locked')");
         }
-        // ownerConn is now idle (no active SQL) but holds the lock — this is the idle-blocker pattern
+        // ownerConn is idle — holds the X lock but has no active SQL
 
-        // Blocked: tries to read same row with RR isolation → waits for the X lock
+        // Blocked: tries to read the same row with RR isolation → waits for the X lock
         exec        = Executors.newSingleThreadExecutor();
         blockedConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
         blockedConn.setAutoCommit(false);
@@ -165,8 +165,29 @@ class BlockingSessionIntegrationTest {
             } catch (Exception ignored) {}
         });
 
-        // Let the blocked session reach the lock-wait state before the first poll
-        Thread.sleep(2000);
+        // Wait until MON_LOCKWAITS actually sees the pair — poll up to 15s with 500ms cadence.
+        // This prevents the polling test from racing against DB2's internal lock registration.
+        boolean lockVisible = false;
+        try (Connection probe = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps)) {
+            for (int i = 0; i < 30; i++) {
+                Thread.sleep(500);
+                try (Statement st = probe.createStatement();
+                     ResultSet rs = st.executeQuery(
+                         "SELECT COUNT(*) AS CNT FROM SYSIBMADM.MON_LOCKWAITS")) {
+                    if (rs.next() && rs.getLong("CNT") > 0) {
+                        lockVisible = true;
+                        break;
+                    }
+                } catch (Exception e) {
+                    // If MON_LOCKWAITS is not accessible, fail fast with a clear message
+                    throw new IllegalStateException(
+                        "MON_LOCKWAITS is not accessible — check SYSMON authority on db2inst1: " + e.getMessage(), e);
+                }
+            }
+        }
+        assertThat(lockVisible)
+            .as("MON_LOCKWAITS must show the blocked→blocker pair within 15s of the lock being acquired")
+            .isTrue();
     }
 
     // ── tests ────────────────────────────────────────────────────────────────
@@ -178,9 +199,10 @@ class BlockingSessionIntegrationTest {
         receiver = buildReceiver(buildConfig());
         receiver.start();
 
-        // Wait for at least one blocking_session event referencing the test table
+        // Wait for at least one blocking_session event — MON_LOCKWAITS already has a row,
+        // so the first 2s poll cycle should emit it. Budget 60s for slow CI containers.
         Awaitility.await()
-            .atMost(30, TimeUnit.SECONDS)
+            .atMost(60, TimeUnit.SECONDS)
             .pollInterval(2, TimeUnit.SECONDS)
             .alias("blocking_session event in log exporter")
             .until(() -> logExporter.getFinishedLogRecordItems().stream()
@@ -209,19 +231,15 @@ class BlockingSessionIntegrationTest {
         assertThat(blockedHandle).isNotEqualTo(blockerHandle);
 
         // Lock details
-        // ROW lock is expected — the blocked query reads a specific row
         String lockObjectType = ev.getAttributes().get(BlockingSessionEvent.DB2_LOCK_OBJECT_TYPE);
         assertThat(lockObjectType).isNotBlank();
-
-        // Lock mode X (exclusive) held by the INSERT
         String lockMode = ev.getAttributes().get(BlockingSessionEvent.DB2_LOCK_MODE);
         assertThat(lockMode).isNotBlank();
 
-        // The blocked session's SQL should mention the test table
+        // The blocked session's SQL should mention the test table (obfuscated — no literals)
         String blockedSql = ev.getAttributes().get(BlockingSessionEvent.DB_QUERY_TEXT);
         assertThat(blockedSql).isNotNull();
         assertThat(blockedSql.toUpperCase()).contains(TABLE);
-        // Obfuscated — no string literals
         assertThat(blockedSql).doesNotContain("'");
 
         // Wait duration must be set (>= 0)
@@ -242,7 +260,7 @@ class BlockingSessionIntegrationTest {
         receiver.start();
 
         Awaitility.await()
-            .atMost(30, TimeUnit.SECONDS)
+            .atMost(60, TimeUnit.SECONDS)
             .pollInterval(2, TimeUnit.SECONDS)
             .until(() -> logExporter.getFinishedLogRecordItems().stream()
                 .anyMatch(r -> "db.server.blocking_session".equals(r.getEventName())));
@@ -256,28 +274,27 @@ class BlockingSessionIntegrationTest {
         Boolean blockerIsIdle = ev.getAttributes().get(BlockingSessionEvent.DB2_BLOCKER_IS_IDLE);
         assertThat(blockerIsIdle).isTrue();
 
-        // Blocker query text should be populated from MON_GET_PKG_CACHE_STMT
-        // (the INSERT executed before the blocker became idle). If the plan cache has
-        // already evicted it this is null — allow for that but assert no crash occurred.
+        // Blocker query text should be populated from MON_GET_PKG_CACHE_STMT.
+        // If the plan cache has evicted the INSERT, this field is null — that's acceptable.
+        // What must NOT happen: a crash or an error emitting the record.
         String blockerQueryText = ev.getAttributes().get(BlockingSessionEvent.DB2_BLOCKER_QUERY_TEXT);
         if (blockerQueryText != null) {
-            // If present, it must be obfuscated and reference the test table
-            assertThat(blockerQueryText).doesNotContain("'");
-            assertThat(blockerQueryText).doesNotContain("locked"); // literal replaced
+            assertThat(blockerQueryText).doesNotContain("'");       // obfuscated
+            assertThat(blockerQueryText).doesNotContain("locked");  // literal replaced
             assertThat(blockerQueryText.toUpperCase()).contains(TABLE);
         }
-        // Whether or not the plan-cache lookup found the statement, the event is still emitted
+        // Regardless of plan-cache availability, the event is still emitted at WARN
         assertThat(ev.getSeverity()).isEqualTo(Severity.WARN);
     }
 
     @Test
     void noEventEmittedWhenNothingIsBlocked() throws Exception {
-        // No lock contention — receiver should run cleanly and emit zero events
+        // No lock contention — receiver should run cleanly and emit zero blocking events
         receiver = buildReceiver(buildConfig());
         receiver.start();
 
-        // Run for 3 collection cycles
-        Thread.sleep(7000);
+        // Run for 3 collection cycles (3 × 2s = 6s + buffer)
+        Thread.sleep(8000);
 
         long blockingEvents = logExporter.getFinishedLogRecordItems().stream()
             .filter(r -> "db.server.blocking_session".equals(r.getEventName()))
