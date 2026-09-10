@@ -199,21 +199,25 @@ class BlockingSessionIntegrationTest {
         try (Connection probe = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
              java.sql.Statement st = probe.createStatement();
              java.sql.ResultSet rs = st.executeQuery(
-                 com.splunk.otel.db2.receiver.queries.BlockingSessionQuery.SQL_LOCKWAITS)) {
+                 com.splunk.otel.db2.receiver.queries.BlockingSessionQuery.SQL)) {
             int rowCount = 0;
             while (rs.next()) {
                 rowCount++;
-                System.out.printf("[DIAG] row=%d BLOCKED_HANDLE=%s BLOCKER_HANDLE=%s LOCK_OBJECT_TYPE=%s%n",
+                System.out.printf("[DIAG] row=%d BLOCKED_HANDLE=%s BLOCKER_HANDLE=%s " +
+                    "BLOCKED_SQL='%s' BLOCKER_SQL='%s' BLOCKER_IS_IDLE=%d LOCK_OBJECT_TYPE=%s%n",
                     rowCount,
                     rs.getString("BLOCKED_HANDLE"),
                     rs.getString("BLOCKER_HANDLE"),
+                    rs.getString("BLOCKED_SQL"),
+                    rs.getString("BLOCKER_SQL"),
+                    rs.getInt("BLOCKER_IS_IDLE"),
                     rs.getString("LOCK_OBJECT_TYPE"));
             }
             assertThat(rowCount)
-                .as("MON_LOCKWAITS must return at least 1 row when a lock wait is active")
+                .as("BlockingSessionQuery SQL must return at least 1 row when a lock wait is active")
                 .isGreaterThan(0);
         } catch (Exception e) {
-            throw new AssertionError("BlockingSessionQuery SQL_LOCKWAITS failed: " + e.getMessage(), e);
+            throw new AssertionError("BlockingSessionQuery SQL failed: " + e.getMessage(), e);
         }
     }
 
