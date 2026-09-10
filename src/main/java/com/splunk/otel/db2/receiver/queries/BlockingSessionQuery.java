@@ -31,58 +31,53 @@ import java.util.function.Supplier;
  * (S, X, IX, IS, SIX, Z, U, NS, NX) that have no equivalent in SQL Server or
  * Oracle/PostgreSQL OTel implementations.
  *
- * SQL design notes:
- * - DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear more than once in
- *   the same FROM clause. A CONNS CTE materialises it once; the CTE can then be
- *   joined from both the blocked and blocker sides.
- * - When a query starts with "WITH <name> AS (...)" (CTE syntax), the trailing
- *   "WITH UR" isolation clause is misinterpreted by the DB2 parser as the start
- *   of a second CTE definition, raising SqlSyntaxErrorException. The query
- *   therefore omits "WITH UR". MON_LOCKWAITS monitoring views use minimal locking
- *   internally, so dirty-read isolation is not required here.
- * - SYSIBMADM.MON_CURRENT_SQL is a view (not a table function), so it can be
- *   referenced twice in the same FROM clause with different aliases.
+ * SQL design note: DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear
+ * more than once in the same FROM clause. Each side (blocked, blocker) uses an
+ * independent derived-table subquery that wraps the TVF with a distinct alias
+ * (C1 / C2). This avoids both the duplicate-TVF restriction and the CTE +
+ * WITH-UR parser ambiguity (a query beginning with "WITH x AS ()" causes the
+ * trailing "WITH UR" to be misparsed as a second CTE definition).
  */
 public class BlockingSessionQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(BlockingSessionQuery.class);
 
     // One row per blocked→blocker pair.
-    // CONNS CTE: materialises TABLE(MON_GET_CONNECTION(...)) once — DB2 does not
-    // allow the same TVF in the same FROM clause more than once.
-    // No trailing "WITH UR": a CTE prefix (WITH x AS ...) causes DB2 to
-    // misparse any trailing "WITH UR" as a second CTE, raising SqlSyntaxErrorException.
+    // DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear more than once
+    // in the same FROM clause. Each side uses a correlated subquery that calls the
+    // TVF independently — this avoids both the duplicate-TVF restriction and the
+    // CTE+WITH-UR parser ambiguity (a query beginning with "WITH x AS ()" causes
+    // "WITH UR" at the end to be misparsed as a second CTE definition).
     // exposed for integration test diagnostics — not part of the public API
     public static final String SQL =
-        "WITH CONNS AS ( " +
-        "  SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
-        "  FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS T " +
-        ") " +
         "SELECT " +
-        "  LW.REQ_APPLICATION_HANDLE           AS BLOCKED_HANDLE, " +
-        "  LW.HLD_APPLICATION_HANDLE           AS BLOCKER_HANDLE, " +
-        "  LW.TABSCHEMA                        AS LOCK_SCHEMA, " +
-        "  LW.TABNAME                          AS LOCK_OBJECT, " +
-        "  LW.LOCK_OBJECT_TYPE                 AS LOCK_OBJECT_TYPE, " +
-        "  LW.LOCK_MODE                        AS LOCK_MODE, " +
-        "  LW.LOCK_WAIT_START_TIME             AS WAIT_START_TIME, " +
-        "  BLOCKED_SQL.STMT_TEXT               AS BLOCKED_SQL, " +
+        "  LW.REQ_APPLICATION_HANDLE               AS BLOCKED_HANDLE, " +
+        "  LW.HLD_APPLICATION_HANDLE               AS BLOCKER_HANDLE, " +
+        "  LW.TABSCHEMA                            AS LOCK_SCHEMA, " +
+        "  LW.TABNAME                              AS LOCK_OBJECT, " +
+        "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
+        "  LW.LOCK_MODE                            AS LOCK_MODE, " +
+        "  LW.LOCK_WAIT_START_TIME                 AS WAIT_START_TIME, " +
+        "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
         "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
-        "  BLOCKED_CON.SESSION_AUTH_ID         AS BLOCKED_USER, " +
-        "  BLOCKED_CON.CLIENT_WRKSTNNAME       AS BLOCKED_HOST, " +
-        "  BLOCKED_CON.MEMBER                  AS MEMBER, " +
-        "  BLOCKER_SQL.STMT_TEXT               AS BLOCKER_SQL, " +
-        "  BLOCKER_CON.SESSION_AUTH_ID         AS BLOCKER_USER, " +
-        "  BLOCKER_CON.CLIENT_WRKSTNNAME       AS BLOCKER_HOST, " +
+        "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
+        "  BLOCKED_CON.CLIENT_WRKSTNNAME           AS BLOCKED_HOST, " +
+        "  BLOCKED_CON.MEMBER                      AS MEMBER, " +
+        "  BLOCKER_SQL.STMT_TEXT                   AS BLOCKER_SQL, " +
+        "  BLOCKER_CON.SESSION_AUTH_ID             AS BLOCKER_USER, " +
+        "  BLOCKER_CON.CLIENT_WRKSTNNAME           AS BLOCKER_HOST, " +
         "  CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
         "FROM SYSIBMADM.MON_LOCKWAITS LW " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKED_SQL " +
         "  ON BLOCKED_SQL.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
-        "LEFT JOIN CONNS BLOCKED_CON " +
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
+        "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS C1) BLOCKED_CON " +
         "  ON BLOCKED_CON.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
-        "LEFT JOIN CONNS BLOCKER_CON " +
-        "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE";
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
+        "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS C2) BLOCKER_CON " +
+        "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        "WITH UR";
 
     // Idle blocker lookup: fetch the last statement executed by the blocker from the
     // plan cache. Used when BLOCKER_IS_IDLE=1 and the blocker has a known handle.
