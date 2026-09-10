@@ -115,8 +115,8 @@ class BlockingSessionIntegrationTest {
         config.setPassword(db2.getPassword());
         config.setDatabase(db2.getDatabaseName().toUpperCase());
         config.setCollectionInterval("2s");
-        config.setBlockingSessionEnabled(true);
-        config.setBlockingSessionInterval("2s");
+        config.setQuerySampleEnabled(true);   // blocking session runs with query sample
+        config.setQuerySampleInterval("2s");
         config.getTls().setInsecure(true);
         return config;
     }
@@ -288,8 +288,9 @@ class BlockingSessionIntegrationTest {
     }
 
     @Test
-    void noEventEmittedWhenNothingIsBlocked() throws Exception {
+    void noBlockingEventEmittedWhenNothingIsBlocked() throws Exception {
         // No lock contention — receiver should run cleanly and emit zero blocking events
+        // buildConfig() sets query_sample_enabled=true which starts the shared scheduler
         receiver = buildReceiver(buildConfig());
         receiver.start();
 

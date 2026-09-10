@@ -140,14 +140,13 @@ Credential values can be literals or `${env:VAR_NAME}` references.
 
 ## Resource usage
 
-Each monitored database uses 1–4 JDBC connections depending on which collectors are enabled:
+Each monitored database uses 1–3 JDBC connections depending on which collectors are enabled:
 
 | Collector | Connection | Always open? |
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
-| Query sample (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
+| Query sample + Blocking session (`query_sample_enabled` or `blocking_session_enabled`) | `querySampleConnection` | Optional |
 | Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
-| Blocking session (`blocking_session_enabled: true`) | `blockingSessionConnection` | Optional |
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
 
@@ -229,7 +228,7 @@ Each record represents one blocked→blocker pair from `SYSIBMADM.MON_LOCKWAITS`
 
 The log record's native `event_name` field is set to `db.server.blocking_session`.
 
-Enable with:
+Blocking session detection runs on the same connection and interval as query sampling — enable it alongside `query_sample_enabled` or on its own:
 
 ```yaml
 receivers:
@@ -238,8 +237,9 @@ receivers:
     database: "SAMPLE"
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
-    blocking_session_enabled: true
-    blocking_session_interval: "10s"   # how often to poll MON_LOCKWAITS (default: 10s)
+    query_sample_enabled: true         # optional — share the same poll tick
+    blocking_session_enabled: true     # polls MON_LOCKWAITS at query_sample_interval
+    query_sample_interval: "10s"       # controls the poll cadence for both
 ```
 
 | Attribute | Description |

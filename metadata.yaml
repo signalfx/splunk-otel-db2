@@ -377,8 +377,9 @@ events:
       one session waiting on a lock held by another. SQL text for both sides is obfuscated
       before emission — literal values are replaced with ?. For idle blockers (holding an
       open transaction but not actively executing), the blocker's last statement is looked
-      up from MON_GET_PKG_CACHE_STMT. Emitted at blocking_session_interval as OTel log
-      records with severity WARN.
+      up from MON_GET_PKG_CACHE_STMT. Runs automatically on every query_sample_interval
+      tick when query_sample_enabled: true (MON_CURRENT_SQL / default path only).
+      Emitted as OTel log records with severity WARN.
     attributes:
       - db.system.name
       - db.namespace
