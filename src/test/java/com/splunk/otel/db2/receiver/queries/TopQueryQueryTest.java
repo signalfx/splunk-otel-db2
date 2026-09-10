@@ -157,7 +157,7 @@ class TopQueryQueryTest {
 
         io.opentelemetry.api.common.Attributes attrs = cap.getValue();
         assertThat(attrs.get(TopQueryEvent.DB_QUERY_TEXT)).isEqualTo("SELECT ? FROM T");
-        assertThat(attrs.get(TopQueryEvent.DB_SYSTEM)).isEqualTo("db2");
+        assertThat(attrs.get(TopQueryEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(attrs.get(TopQueryEvent.DB_NAMESPACE)).isEqualTo("TESTDB");
         assertThat(attrs.get(TopQueryEvent.DB2_MEMBER)).isEqualTo(0L);
 

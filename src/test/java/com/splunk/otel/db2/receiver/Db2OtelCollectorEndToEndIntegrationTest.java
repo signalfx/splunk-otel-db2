@@ -38,9 +38,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * Assertions:
  *   - Collector container logs contain "db.server.query_sample" event records
- *     with db.system.name = "db2"
+ *     with db.system.name = "ibm.db2"
  *   - Collector container logs contain "db.server.top_query" event records
- *     with db.system.name = "db2"
+ *     with db.system.name = "ibm.db2"
  *   - Both event types carry db.namespace set to the configured database name
  *
  * Run with: ./gradlew integrationTest
@@ -152,7 +152,7 @@ class Db2OtelCollectorEndToEndIntegrationTest {
             // ── 4. Wait for query_sample to appear in collector logs ────────────────
             // verbosity:detailed prints every attribute on its own line:
             //   -> "db.server.query_sample"
-            //   -> db.system.name: Str(db2)
+            //   -> db.system.name: Str(ibm.db2)
             Awaitility.await()
                 .atMost(60, TimeUnit.SECONDS)
                 .pollInterval(3, TimeUnit.SECONDS)
@@ -160,7 +160,7 @@ class Db2OtelCollectorEndToEndIntegrationTest {
                 .until(() -> {
                     String logs = collector.getLogs();
                     return logs.contains("db.server.query_sample")
-                        && logs.contains("Str(db2)");
+                        && logs.contains("Str(ibm.db2)");
                 });
 
             // ── 5. Wait for top_query to appear in collector logs ───────────────────
@@ -182,8 +182,8 @@ class Db2OtelCollectorEndToEndIntegrationTest {
                 .contains("db.server.top_query");
 
             assertThat(logs)
-                .as("db.system.name must be 'db2")
-                .contains("Str(db2)");
+                .as("db.system.name must be 'ibm.db2'")
+                .contains("Str(ibm.db2)");
 
             // db.namespace = database name (TESTDB)
             assertThat(logs)

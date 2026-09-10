@@ -202,7 +202,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 | Attribute | Description |
 |---|---|
-| `db.system.name` | Always `db2` |
+| `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
@@ -232,7 +232,7 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 
 | Attribute | Description |
 |---|---|
-| `db.system.name` | Always `db2` |
+| `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db2.member` | Db2 member number |
@@ -517,7 +517,7 @@ make clean               # clean build outputs
 3. Starts a `Db2Pipeline` connected to both — scraper exports via OTLP gRPC to the collector.
 4. Creates a lock-wait workload (`INSERT` held uncommitted + `SELECT … WITH RR` blocks) so `MON_CURRENT_SQL` has an active query to capture.
 5. Runs a cross-join probe query (`E2E_TOPQ_PROBE`) that appears in the top-query plan cache.
-6. Asserts that the collector container logs contain both `db.server.query_sample` and `db.server.top_query` events with `db.system.name = db2` and the correct `db.namespace`.
+6. Asserts that the collector container logs contain both `db.server.query_sample` and `db.server.top_query` events with `db.system.name = ibm.db2` and the correct `db.namespace`.
 
 ## Resource attributes
 
@@ -531,7 +531,7 @@ The receiver sets the following OTel resource attributes on all telemetry. Any a
 | `server.address` | configured hostname; loopback resolved to collector hostname |
 | `host.name` | configured hostname (operator's typed value, preserved as-is) |
 | `server.port` | configured port (integer) |
-| `db.system.name` | `db2` |
+| `db.system.name` | `ibm.db2` |
 | `db.namespace` | configured database name |
 
 ## License
