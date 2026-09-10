@@ -19,6 +19,10 @@ import java.util.function.Supplier;
  * {@code SYSIBMADM.MON_CURRENT_SQL} (both sides) and {@code MON_GET_CONNECTION}
  * (both sides for user/host). All members (-2 on MON_GET_CONNECTION).
  *
+ * Wait duration: {@code LOCK_WAIT_ELAPSED_TIME} (microseconds elapsed since
+ * the lock wait began) is used instead of the non-existent LOCK_WAIT_START_TIME.
+ * The approximate start time is reconstructed as now − elapsed.
+ *
  * Idle-blocker handling: the blocker may not appear in MON_CURRENT_SQL if it is
  * idle (holding an open transaction). The query uses a LEFT JOIN so those rows
  * are still emitted with {@code db2.blocking.blocker.is_idle=true} and null SQL.
@@ -56,7 +60,7 @@ public class BlockingSessionQuery {
         "  LW.TABNAME                              AS LOCK_OBJECT, " +
         "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
         "  LW.LOCK_MODE                            AS LOCK_MODE, " +
-        "  LW.LOCK_WAIT_START_TIME                 AS WAIT_START_TIME, " +
+        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_US, " +
         "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
         "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
         "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
@@ -127,15 +131,15 @@ public class BlockingSessionQuery {
                         String lockObject     = rs.getString("LOCK_OBJECT");
                         String lockObjectType = rs.getString("LOCK_OBJECT_TYPE");
                         String lockMode       = rs.getString("LOCK_MODE");
-                        Timestamp waitStart   = rs.getTimestamp("WAIT_START_TIME");
+                        long waitElapsedUs    = rs.getLong("WAIT_ELAPSED_US");
                         long member           = rs.getLong("MEMBER");
                         boolean blockerIsIdle = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
-                        // Compute wait duration in ms from LOCK_WAIT_START_TIME to now
-                        long waitMs = waitStart != null
-                            ? Math.max(0, now.toEpochMilli() - waitStart.getTime()) : -1;
-
-                        String waitStartStr = waitStart != null ? waitStart.toString() : null;
+                        // LOCK_WAIT_ELAPSED_TIME is in microseconds; convert to ms
+                        long waitMs = waitElapsedUs > 0 ? waitElapsedUs / 1000 : -1;
+                        // Reconstruct approximate start time from elapsed
+                        String waitStartStr = waitMs >= 0
+                            ? new Timestamp(now.toEpochMilli() - waitMs).toString() : null;
 
                         // Obfuscate blocked SQL — drop record if obfuscation fails
                         String blockedObfuscated = null;

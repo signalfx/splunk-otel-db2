@@ -13,7 +13,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.sql.Timestamp;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,12 +50,13 @@ class BlockingSessionQueryTest {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L);
     }
 
+    // waitElapsedUs: microseconds the blocked session has been waiting (LOCK_WAIT_ELAPSED_TIME)
     private void stubRow(long blockedHandle, long blockerHandle,
                           String blockedSql, String blockerSql,
                           String activityState, String blockedUser, String blockedHost,
                           String blockerUser, String blockerHost,
                           String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          Timestamp waitStart, long member, boolean blockerIsIdle) throws Exception {
+                          long waitElapsedUs, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
         when(rs.getString("BLOCKED_SQL")).thenReturn(blockedSql);
@@ -70,7 +70,7 @@ class BlockingSessionQueryTest {
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getTimestamp("WAIT_START_TIME")).thenReturn(waitStart);
+        when(rs.getLong("WAIT_ELAPSED_US")).thenReturn(waitElapsedUs);
         when(rs.getLong("MEMBER")).thenReturn(member);
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
@@ -78,13 +78,13 @@ class BlockingSessionQueryTest {
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        Timestamp waitStart = new Timestamp(System.currentTimeMillis() - 3000);
+        // 3 seconds elapsed = 3_000_000 microseconds
         stubRow(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
-            waitStart, 0L, false);
+            3_000_000L, 0L, false);
 
         query().collect();
 
@@ -119,7 +119,7 @@ class BlockingSessionQueryTest {
     void severityIsWarn() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, null, 0L, false);
+            null, null, null, null, null, null, 0L, 0L, false);
 
         query().collect();
 
@@ -131,7 +131,7 @@ class BlockingSessionQueryTest {
     void eventNameIsBlockingSession() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, null, 0L, false);
+            null, null, null, null, null, null, 0L, 0L, false);
 
         query().collect();
 
@@ -142,7 +142,7 @@ class BlockingSessionQueryTest {
     void blockedObfuscationFailedDropsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, null, 0L, false);
+            null, null, null, null, null, null, 0L, 0L, false);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
             mocked.when(() -> SqlObfuscator.obfuscate(anyString()))
@@ -157,7 +157,7 @@ class BlockingSessionQueryTest {
     void blockerObfuscationFailedOmitsFieldButKeepsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", "UPDATE T SET X = 1", null, null, null,
-            null, null, null, null, null, null, null, 0L, false);
+            null, null, null, null, null, null, 0L, 0L, false);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
             mocked.when(() -> SqlObfuscator.obfuscate("SELECT 1 FROM T"))
@@ -179,7 +179,7 @@ class BlockingSessionQueryTest {
     void idleBlockerTriggersPackageCacheLookup() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, null, 0L, true); // blokerIsIdle = true
+            null, null, null, null, null, null, 0L, 0L, true); // blockerIsIdle = true
         when(prs.next()).thenReturn(true, false);
         when(prs.getString("STMT_TEXT")).thenReturn("UPDATE T SET X = 'literal'");
 
@@ -198,7 +198,7 @@ class BlockingSessionQueryTest {
     void idleBlockerPackageCacheLookupFailureIsHandledGracefully() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, null, 0L, true);
+            null, null, null, null, null, null, 0L, 0L, true);
         when(pstmt.executeQuery()).thenThrow(new java.sql.SQLException("table not found"));
 
         query().collect();
@@ -212,10 +212,10 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void nullWaitStartTimeResultsInNegativeWaitDurationOmitted() throws Exception {
+    void zeroWaitElapsedResultsInNegativeWaitDurationOmitted() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, null /* null waitStart */, 0L, false);
+            null, null, null, null, null, null, 0L /* zero elapsed */, 0L, false);
 
         query().collect();
 
