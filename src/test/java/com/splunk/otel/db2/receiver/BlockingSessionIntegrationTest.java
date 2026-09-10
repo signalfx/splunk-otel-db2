@@ -196,6 +196,11 @@ class BlockingSessionIntegrationTest {
      * the real error without the Awaitility timeout obscuring it.
      */
     private void validateBlockingSessionSqlDirectly() throws Exception {
+        // First, print the SQL so we can see exactly what DB2 receives
+        System.out.println("[DIAG] BlockingSessionQuery.SQL = " +
+            com.splunk.otel.db2.receiver.queries.BlockingSessionQuery.SQL);
+
+        // Try the full query
         try (Connection probe = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
              java.sql.Statement st = probe.createStatement();
              java.sql.ResultSet rs = st.executeQuery(
@@ -216,7 +221,14 @@ class BlockingSessionIntegrationTest {
             assertThat(rowCount)
                 .as("BlockingSessionQuery SQL must return at least 1 row when a lock wait is active")
                 .isGreaterThan(0);
-        } catch (Exception e) {
+        } catch (java.sql.SQLException e) {
+            // Print full DB2 error chain so CI logs show the SQLCODE
+            java.sql.SQLException next = e;
+            while (next != null) {
+                System.out.printf("[DIAG] SQLException SQLCODE=%d SQLSTATE=%s msg=%s%n",
+                    next.getErrorCode(), next.getSQLState(), next.getMessage());
+                next = next.getNextException();
+            }
             throw new AssertionError("BlockingSessionQuery SQL failed: " + e.getMessage(), e);
         }
     }
