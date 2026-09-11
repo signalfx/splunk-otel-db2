@@ -263,7 +263,7 @@ class BlockingSessionIntegrationTest {
         assertThat(ev.getSeverity()).isEqualTo(Severity.WARN);
 
         // Required identity attributes
-        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB_SYSTEM)).isEqualTo("db2");
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(ev.getAttributes().get(BlockingSessionEvent.DB_NAMESPACE))
             .isEqualToIgnoringCase(db2.getDatabaseName());
 

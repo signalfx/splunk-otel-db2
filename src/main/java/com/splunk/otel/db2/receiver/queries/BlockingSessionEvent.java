@@ -104,7 +104,7 @@ public final class BlockingSessionEvent {
 
     public void emit(Logger logger, Instant timestamp) {
         AttributesBuilder b = Attributes.builder()
-            .put(DB_SYSTEM,        "db2")
+            .put(DB_SYSTEM,        "ibm.db2")
             .put(DB_NAMESPACE,     dbNamespace)
             .put(DB2_MEMBER,       member)
             .put(DB2_APP_HANDLE,   blockedAppHandle)

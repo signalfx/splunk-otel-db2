@@ -94,7 +94,7 @@ class BlockingSessionQueryTest {
         verify(logBuilder).emit();
 
         io.opentelemetry.api.common.Attributes attrs = cap.getValue();
-        assertThat(attrs.get(BlockingSessionEvent.DB_SYSTEM)).isEqualTo("db2");
+        assertThat(attrs.get(BlockingSessionEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(attrs.get(BlockingSessionEvent.DB_NAMESPACE)).isEqualTo("TESTDB");
         assertThat(attrs.get(BlockingSessionEvent.DB2_APP_HANDLE)).isEqualTo("111");
         assertThat(attrs.get(BlockingSessionEvent.DB2_BLOCKER_APP_HANDLE)).isEqualTo("222");
