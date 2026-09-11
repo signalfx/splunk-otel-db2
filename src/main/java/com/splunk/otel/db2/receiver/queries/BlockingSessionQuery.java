@@ -83,15 +83,17 @@ public class BlockingSessionQuery {
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         "WITH UR";
 
-    // Idle blocker lookup: fetch the last statement executed by the blocker from the
-    // plan cache. Used when BLOCKER_IS_IDLE=1 and the blocker has a known handle.
+    // Idle blocker lookup: resolve the blocker's LAST_EXECUTABLE_ID from
+    // MON_GET_CONNECTION, then fetch the matching statement from the plan cache.
+    // MON_GET_PKG_CACHE_STMT has no APPLICATION_HANDLE column — EXECUTABLE_ID is
+    // the correct join key.
     private static final String IDLE_BLOCKER_SQL =
-        "SELECT STMT_TEXT " +
-        "FROM TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, -2)) AS T " +
-        "WHERE APPLICATION_HANDLE = ? " +
-        "  AND NUM_EXECUTIONS > 0 " +
-        "  AND STMT_TEXT NOT LIKE '%%MON_GET_PKG_CACHE_STMT%%' " +
-        "ORDER BY LAST_METRICS_UPDATE DESC " +
+        "SELECT P.STMT_TEXT " +
+        "FROM TABLE(MON_GET_CONNECTION(CAST(? AS BIGINT), -2)) AS C " +
+        "JOIN TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, -2)) AS P " +
+        "  ON P.EXECUTABLE_ID = C.LAST_EXECUTABLE_ID " +
+        "WHERE P.NUM_EXECUTIONS > 0 " +
+        "  AND P.STMT_TEXT NOT LIKE '%%MON_GET_PKG_CACHE_STMT%%' " +
         "FETCH FIRST 1 ROW ONLY";
 
     private final Supplier<Connection> connSupplier;
