@@ -15,50 +15,69 @@ import java.util.function.Supplier;
  * Detects blocking sessions in Db2 and emits each blocked→blocker pair as an OTel
  * log record ({@code db.server.blocking_session}, severity WARN).
  *
- * Source: {@code SYSIBMADM.MON_LOCKWAITS} (Db2 9.7+) joined with
- * {@code SYSIBMADM.MON_CURRENT_SQL} (both sides) and {@code MON_GET_CONNECTION}
- * (both sides for user/host). All members (-2 on MON_GET_CONNECTION).
+ * Two SQL paths are selected at construction time via {@code useSnapshotMonitor}:
  *
- * Wait duration: {@code LOCK_WAIT_ELAPSED_TIME} (seconds elapsed since the lock
- * wait began per IBM documentation) is used. The approximate start time is
- * reconstructed as now − elapsed.
+ * Default path (useSnapshotMonitor=false):
+ *   Uses only {@code SYSIBMADM.MON_LOCKWAITS} + {@code MON_CURRENT_SQL} +
+ *   {@code MON_GET_CONNECTION}. Start time is approximated as now minus
+ *   {@code LOCK_WAIT_ELAPSED_TIME} (INTEGER milliseconds).
+ *
+ * Snapshot path (useSnapshotMonitor=true):
+ *   Additionally joins {@code SYSIBMADM.LOCKWAITS} (snapshot-based, Db2 9.1+,
+ *   requires SYSMON authority) to get the exact {@code LOCK_WAIT_START_TIME}
+ *   TIMESTAMP. Duration is computed as now minus that timestamp.
  *
  * Idle-blocker handling: the blocker may not appear in MON_CURRENT_SQL if it is
- * idle (holding an open transaction). The query uses a LEFT JOIN so those rows
- * are still emitted with {@code db2.blocking.blocker.is_idle=true} and null SQL.
- * An optional second pass looks up the blocker's last statement from
- * MON_GET_PKG_CACHE_STMT by application_handle and emits it as
- * {@code db2.blocking.blocker.query_text} when available.
- *
- * Lock detail: LOCK_OBJECT_TYPE and LOCK_MODE from MON_LOCKWAITS capture the
- * DB2-specific lock types (ROW, TABLE, PLAN, INTERNAL, TABLESPACE) and modes
- * (S, X, IX, IS, SIX, Z, U, NS, NX) that have no equivalent in SQL Server or
- * Oracle/PostgreSQL OTel implementations.
+ * idle (holding an open transaction). A second pass looks up the blocker's last
+ * statement from MON_GET_PKG_CACHE_STMT by application_handle.
  *
  * SQL design note: DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear
- * more than once in the same FROM clause. Each side (blocked, blocker) uses an
- * independent derived-table subquery that wraps the TVF with a distinct alias
- * (C1 / C2). This avoids both the duplicate-TVF restriction and the CTE +
- * WITH-UR parser ambiguity (a query beginning with "WITH x AS ()" causes the
- * trailing "WITH UR" to be misparsed as a second CTE definition).
+ * more than once in the same FROM clause. Each side uses an independent
+ * derived-table subquery (C1 / C2).
  */
 public class BlockingSessionQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(BlockingSessionQuery.class);
 
-    // One row per blocked→blocker pair.
-    // SYSIBMADM.LOCKWAITS (snapshot-based, Db2 9.1+) carries LOCK_WAIT_START_TIME as an
-    // exact TIMESTAMP. We LEFT JOIN it on (blocked agent_id, holding agent_id) so we get
-    // the precise start time for duration computation instead of approximating from the
-    // INTEGER elapsed counter. The join is LEFT so rows are still emitted on the rare case
-    // where the snapshot view lags behind MON_LOCKWAITS.
-    //
-    // DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear more than once
-    // in the same FROM clause. Each side uses an independent derived-table subquery
-    // (C1 / C2) to avoid both the duplicate-TVF restriction and the CTE+WITH-UR parser
-    // ambiguity (a query beginning with "WITH x AS ()" causes "WITH UR" to be misparsed
-    // as a second CTE definition).
+    // Default path: no snapshot dependency. Start time approximated as now - LOCK_WAIT_ELAPSED_TIME.
     // exposed for integration test diagnostics — not part of the public API
     public static final String SQL =
+        "SELECT " +
+        "  LW.REQ_APPLICATION_HANDLE               AS BLOCKED_HANDLE, " +
+        "  LW.REQ_MEMBER                           AS BLOCKED_MEMBER, " +
+        "  LW.HLD_APPLICATION_HANDLE               AS BLOCKER_HANDLE, " +
+        "  LW.HLD_MEMBER                           AS BLOCKER_MEMBER, " +
+        "  LW.TABSCHEMA                            AS LOCK_SCHEMA, " +
+        "  LW.TABNAME                              AS LOCK_OBJECT, " +
+        "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
+        "  LW.LOCK_MODE                            AS LOCK_MODE, " +
+        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_MS, " +
+        "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
+        "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
+        "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
+        "  BLOCKED_CON.CLIENT_WRKSTNNAME           AS BLOCKED_HOST, " +
+        "  BLOCKER_SQL.STMT_TEXT                   AS BLOCKER_SQL, " +
+        "  BLOCKER_CON.SESSION_AUTH_ID             AS BLOCKER_USER, " +
+        "  BLOCKER_CON.CLIENT_WRKSTNNAME           AS BLOCKER_HOST, " +
+        "  CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "FROM SYSIBMADM.MON_LOCKWAITS LW " +
+        "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKED_SQL " +
+        "  ON BLOCKED_SQL.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
+        "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS C1) BLOCKED_CON " +
+        "  ON BLOCKED_CON.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
+        "  AND BLOCKED_CON.MEMBER = LW.REQ_MEMBER " +
+        "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
+        "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
+        "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS C2) BLOCKER_CON " +
+        "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        "  AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
+        "WITH UR";
+
+    // Snapshot path: joins SYSIBMADM.LOCKWAITS for the exact LOCK_WAIT_START_TIME TIMESTAMP.
+    // Requires SYSMON authority (use_snapshot_monitor: true).
+    // exposed for integration test diagnostics — not part of the public API
+    public static final String SQL_SNAPSHOT =
         "SELECT " +
         "  LW.REQ_APPLICATION_HANDLE               AS BLOCKED_HANDLE, " +
         "  LW.REQ_MEMBER                           AS BLOCKED_MEMBER, " +
@@ -112,14 +131,24 @@ public class BlockingSessionQuery {
     private final String dbName;
     private final Logger otelLogger;
     private final int queryTimeoutSeconds;
+    private final boolean useSnapshotMonitor;
+    private final String sql;
 
     public BlockingSessionQuery(Supplier<Connection> connSupplier, String dbName,
-                                 Logger otelLogger, long intervalSeconds) {
+                                 Logger otelLogger, long intervalSeconds, boolean useSnapshotMonitor) {
         this.connSupplier        = connSupplier;
         this.dbName              = dbName;
         this.otelLogger          = otelLogger;
         this.queryTimeoutSeconds = (int) Math.max(10L, intervalSeconds / 2);
-        log.info("BlockingSessionQuery: interval={}s, timeout={}s", intervalSeconds, queryTimeoutSeconds);
+        this.useSnapshotMonitor  = useSnapshotMonitor;
+        this.sql                 = useSnapshotMonitor ? SQL_SNAPSHOT : SQL;
+        log.info("BlockingSessionQuery: interval={}s, timeout={}s, snapshot={}", intervalSeconds, queryTimeoutSeconds, useSnapshotMonitor);
+    }
+
+    // backwards-compat: default path (no snapshot)
+    public BlockingSessionQuery(Supplier<Connection> connSupplier, String dbName,
+                                 Logger otelLogger, long intervalSeconds) {
+        this(connSupplier, dbName, otelLogger, intervalSeconds, false);
     }
 
     public void collect() {
@@ -130,7 +159,7 @@ public class BlockingSessionQuery {
             Connection conn = connSupplier.get();
             try (Statement st = conn.createStatement()) {
                 st.setQueryTimeout(queryTimeoutSeconds);
-                try (ResultSet rs = st.executeQuery(SQL)) {
+                try (ResultSet rs = st.executeQuery(sql)) {
                     while (rs.next()) {
                         String blockedHandle   = String.valueOf(rs.getLong("BLOCKED_HANDLE"));
                         long   blockedMember   = rs.getLong("BLOCKED_MEMBER");
@@ -147,14 +176,22 @@ public class BlockingSessionQuery {
                         String lockObject      = rs.getString("LOCK_OBJECT");
                         String lockObjectType  = rs.getString("LOCK_OBJECT_TYPE");
                         String lockMode        = rs.getString("LOCK_MODE");
-                        Timestamp lockWaitStartTime = rs.getTimestamp("LOCK_WAIT_START_TIME");
                         boolean blockerIsIdle  = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
-                        // LOCK_WAIT_START_TIME from SYSIBMADM.LOCKWAITS — exact timestamp since Db2 9.1.
-                        // Duration = now - start. Null when the LEFT JOIN finds no snapshot row (rare lag).
-                        String waitStartStr = lockWaitStartTime != null ? lockWaitStartTime.toString() : null;
-                        long waitMs = lockWaitStartTime != null
-                            ? now.toEpochMilli() - lockWaitStartTime.getTime() : 0;
+                        final String waitStartStr;
+                        final long waitMs;
+                        if (useSnapshotMonitor) {
+                            // Exact TIMESTAMP from SYSIBMADM.LOCKWAITS (snapshot path)
+                            Timestamp lockWaitStartTime = rs.getTimestamp("LOCK_WAIT_START_TIME");
+                            waitStartStr = lockWaitStartTime != null ? lockWaitStartTime.toString() : null;
+                            waitMs = lockWaitStartTime != null
+                                ? now.toEpochMilli() - lockWaitStartTime.getTime() : 0;
+                        } else {
+                            // LOCK_WAIT_ELAPSED_TIME (INTEGER ms) from MON_LOCKWAITS (default path)
+                            long elapsedMs = rs.getLong("WAIT_ELAPSED_MS");
+                            waitMs = elapsedMs;
+                            waitStartStr = new Timestamp(now.toEpochMilli() - elapsedMs).toString();
+                        }
 
                         // Obfuscate blocked SQL — drop record if obfuscation fails
                         String blockedObfuscated = null;

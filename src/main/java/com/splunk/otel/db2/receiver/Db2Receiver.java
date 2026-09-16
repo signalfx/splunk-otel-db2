@@ -131,14 +131,16 @@ public class Db2Receiver {
             db2Version,
             querySampleTimeoutSeconds);
 
-        // Co-locate blocking session on the query-sample scheduler when both are enabled
+        // Co-locate blocking session on the query-sample scheduler when both are enabled.
+        // Snapshot monitor is not supported on the query-sample path (MON_CURRENT_SQL only).
         BlockingSessionQuery blockingSessionQuery =
             (config.isBlockingSessionEnabled() && !config.isUseSnapshotMonitor())
             ? new BlockingSessionQuery(
                 querySampleConnSupplier,
                 config.getDatabase(),
                 otelLogger,
-                config.getBlockingSessionIntervalDuration().getSeconds())
+                config.getBlockingSessionIntervalDuration().getSeconds(),
+                false)
             : null;
 
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -176,7 +178,8 @@ public class Db2Receiver {
         };
         long intervalSeconds = config.getBlockingSessionIntervalDuration().getSeconds();
         BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
-            connSupplier, config.getDatabase(), otelLogger, intervalSeconds);
+            connSupplier, config.getDatabase(), otelLogger, intervalSeconds,
+            config.isUseSnapshotMonitor());
 
         blockingSessionScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-blocking-session[" + label + "]");

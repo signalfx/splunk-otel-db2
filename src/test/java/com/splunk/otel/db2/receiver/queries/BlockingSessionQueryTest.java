@@ -48,16 +48,20 @@ class BlockingSessionQueryTest {
     }
 
     private BlockingSessionQuery query() {
-        return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L);
+        return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L, false);
     }
 
-    // waitStartMs: epoch ms when the lock wait began (from SYSIBMADM.LOCKWAITS.LOCK_WAIT_START_TIME)
+    private BlockingSessionQuery querySnapshot() {
+        return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L, true);
+    }
+
+    // Default path: waitElapsedMs from LOCK_WAIT_ELAPSED_TIME (MON_LOCKWAITS)
     private void stubRow(long blockedHandle, long blockerHandle,
                           String blockedSql, String blockerSql,
                           String activityState, String blockedUser, String blockedHost,
                           String blockerUser, String blockerHost,
                           String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          long waitStartMs, long member, boolean blockerIsIdle) throws Exception {
+                          long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
@@ -73,24 +77,37 @@ class BlockingSessionQueryTest {
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
+        when(rs.getLong("WAIT_ELAPSED_MS")).thenReturn(waitElapsedMs);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
+    }
+
+    // Snapshot path: waitStartMs as epoch ms for LOCK_WAIT_START_TIME
+    private void stubRowSnapshot(long blockedHandle, long blockerHandle,
+                          String blockedSql, String blockerSql,
+                          String activityState, String blockedUser, String blockedHost,
+                          String blockerUser, String blockerHost,
+                          String lockSchema, String lockObject, String lockObjectType, String lockMode,
+                          long waitStartMs, long member, boolean blockerIsIdle) throws Exception {
+        stubRow(blockedHandle, blockerHandle, blockedSql, blockerSql, activityState,
+                blockedUser, blockedHost, blockerUser, blockerHost,
+                lockSchema, lockObject, lockObjectType, lockMode, 0L, member, blockerIsIdle);
         when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
             .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
-        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // start time 3 seconds ago — duration should be >= 2.9s
+        // snapshot path: start time 3 seconds ago — duration should be >= 2.9s
         long startMs = System.currentTimeMillis() - 3000;
-        stubRow(111L, 222L,
+        stubRowSnapshot(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
             startMs, 0L, false);
 
-        query().collect();
+        querySnapshot().collect();
 
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
@@ -216,13 +233,13 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void nullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
+    void snapshotNullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // 0L → stubRow returns null Timestamp (simulates LEFT JOIN miss on SYSIBMADM.LOCKWAITS)
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        // 0L → stubRowSnapshot returns null Timestamp (simulates LEFT JOIN miss on SYSIBMADM.LOCKWAITS)
+        stubRowSnapshot(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, false);
 
-        query().collect();
+        querySnapshot().collect();
 
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
@@ -233,7 +250,22 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void sqlContainsMON_LOCKWAITS() throws Exception {
+    void defaultPathUsesElapsedTimeForStartTime() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+            null, null, null, null, null, null, 3000L, 0L, false);
+
+        query().collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isGreaterThanOrEqualTo(2.9);
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNotNull();
+    }
+
+    @Test
+    void defaultSqlContainsMON_LOCKWAITSNotLOCKWAITS() throws Exception {
         when(rs.next()).thenReturn(false);
         query().collect();
 
@@ -242,6 +274,18 @@ class BlockingSessionQueryTest {
         assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.MON_LOCKWAITS");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_CURRENT_SQL");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_GET_CONNECTION");
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("SYSIBMADM.LOCKWAITS ");
+    }
+
+    @Test
+    void snapshotSqlContainsLOCKWAITS() throws Exception {
+        when(rs.next()).thenReturn(false);
+        querySnapshot().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.LOCKWAITS");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_START_TIME");
     }
 
     @Test
