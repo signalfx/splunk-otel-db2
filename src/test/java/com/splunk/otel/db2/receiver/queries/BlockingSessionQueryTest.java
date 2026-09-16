@@ -1,6 +1,7 @@
 package com.splunk.otel.db2.receiver.queries;
 
 import com.splunk.otel.db2.util.SqlObfuscator;
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.LogRecordBuilder;
 import io.opentelemetry.api.logs.Severity;
@@ -55,13 +56,34 @@ class BlockingSessionQueryTest {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L, true);
     }
 
-    // Default path: waitElapsedMs from LOCK_WAIT_ELAPSED_TIME (MON_LOCKWAITS)
+    // SYSMON path (useSnapshotMonitor=false): drives from SYSIBMADM.LOCKWAITS.
+    // waitStartMs=0 → null Timestamp; >0 → real Timestamp for exact start time.
     private void stubRow(long blockedHandle, long blockerHandle,
-                          String blockedSql, String blockerSql,
-                          String activityState, String blockedUser, String blockedHost,
-                          String blockerUser, String blockerHost,
-                          String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
+                         String blockedUser,
+                         String lockSchema, String lockObject, String lockObjectType, String lockMode,
+                         long waitStartMs, long member) throws Exception {
+        when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
+        when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
+        when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(member);
+        when(rs.getString("LOCK_SCHEMA")).thenReturn(lockSchema);
+        when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
+        when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
+        when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKED_USER")).thenReturn(blockedUser);
+        when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
+            .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
+    }
+
+    // Enhanced path (useSnapshotMonitor=true): drives from SYSIBMADM.MON_LOCKWAITS + joins.
+    // waitElapsedMs is INTEGER milliseconds from LOCK_WAIT_ELAPSED_TIME.
+    private void stubRowEnhanced(long blockedHandle, long blockerHandle,
+                                  String blockedSql, String blockerSql,
+                                  String activityState, String blockedUser, String blockedHost,
+                                  String blockerUser, String blockerHost,
+                                  String lockSchema, String lockObject, String lockObjectType, String lockMode,
+                                  long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
@@ -81,40 +103,24 @@ class BlockingSessionQueryTest {
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
-    // Snapshot path: waitStartMs as epoch ms for LOCK_WAIT_START_TIME
-    private void stubRowSnapshot(long blockedHandle, long blockerHandle,
-                          String blockedSql, String blockerSql,
-                          String activityState, String blockedUser, String blockedHost,
-                          String blockerUser, String blockerHost,
-                          String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          long waitStartMs, long member, boolean blockerIsIdle) throws Exception {
-        stubRow(blockedHandle, blockerHandle, blockedSql, blockerSql, activityState,
-                blockedUser, blockedHost, blockerUser, blockerHost,
-                lockSchema, lockObject, lockObjectType, lockMode, 0L, member, blockerIsIdle);
-        when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
-            .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
-    }
-
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // snapshot path: start time 3 seconds ago — duration should be >= 2.9s
-        long startMs = System.currentTimeMillis() - 3000;
-        stubRowSnapshot(111L, 222L,
+        // enhanced path: elapsed 3s — duration should be >= 2.9s
+        stubRowEnhanced(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
-            startMs, 0L, false);
+            3000L, 0L, false);
 
         querySnapshot().collect();
 
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         verify(logBuilder).emit();
 
-        io.opentelemetry.api.common.Attributes attrs = cap.getValue();
+        Attributes attrs = cap.getValue();
         assertThat(attrs.get(BlockingSessionEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
         assertThat(attrs.get(BlockingSessionEvent.DB_NAMESPACE)).isEqualTo("TESTDB");
         assertThat(attrs.get(BlockingSessionEvent.DB2_APP_HANDLE)).isEqualTo("111");
@@ -139,8 +145,7 @@ class BlockingSessionQueryTest {
     @Test
     void severityIsWarn() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 0L, 0L, false);
+        stubRow(1L, 2L, null, null, null, null, null, 0L, 0L);
 
         query().collect();
 
@@ -151,8 +156,7 @@ class BlockingSessionQueryTest {
     @Test
     void eventNameIsBlockingSession() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 0L, 0L, false);
+        stubRow(1L, 2L, null, null, null, null, null, 0L, 0L);
 
         query().collect();
 
@@ -162,13 +166,13 @@ class BlockingSessionQueryTest {
     @Test
     void blockedObfuscationFailedDropsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, false);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
             mocked.when(() -> SqlObfuscator.obfuscate(anyString()))
                 .thenReturn(SqlObfuscator.OBFUSCATION_FAILED);
-            query().collect();
+            querySnapshot().collect();
         }
 
         verify(otelLogger, never()).logRecordBuilder();
@@ -177,7 +181,7 @@ class BlockingSessionQueryTest {
     @Test
     void blockerObfuscationFailedOmitsFieldButKeepsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", "UPDATE T SET X = 1", null, null, null,
+        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", "UPDATE T SET X = 1", null, null, null,
             null, null, null, null, null, null, 0L, 0L, false);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
@@ -185,13 +189,12 @@ class BlockingSessionQueryTest {
                 .thenReturn("SELECT ? FROM T");
             mocked.when(() -> SqlObfuscator.obfuscate("UPDATE T SET X = 1"))
                 .thenReturn(SqlObfuscator.OBFUSCATION_FAILED);
-            query().collect();
+            querySnapshot().collect();
         }
 
         verify(logBuilder).emit(); // record is still emitted
 
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKER_QUERY_TEXT)).isNull();
     }
@@ -199,16 +202,15 @@ class BlockingSessionQueryTest {
     @Test
     void idleBlockerTriggersPackageCacheLookup() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, true); // blockerIsIdle = true
         when(prs.next()).thenReturn(true, false);
         when(prs.getString("STMT_TEXT")).thenReturn("UPDATE T SET X = 'literal'");
 
-        query().collect();
+        querySnapshot().collect();
 
         verify(conn).prepareStatement(argThat(s -> s.contains("MON_GET_PKG_CACHE_STMT")));
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKER_QUERY_TEXT))
             .isEqualTo("UPDATE T SET X = ?");
@@ -218,74 +220,69 @@ class BlockingSessionQueryTest {
     @Test
     void idleBlockerPackageCacheLookupFailureIsHandledGracefully() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, true);
         when(pstmt.executeQuery()).thenThrow(new java.sql.SQLException("table not found"));
 
-        query().collect();
+        querySnapshot().collect();
 
         // Record still emitted, blocker query text just omitted
         verify(logBuilder).emit();
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKER_QUERY_TEXT)).isNull();
     }
 
     @Test
-    void snapshotNullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
+    void symonNullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // 0L → stubRowSnapshot returns null Timestamp (simulates LEFT JOIN miss on SYSIBMADM.LOCKWAITS)
-        stubRowSnapshot(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 0L, 0L, false);
+        // 0L → null Timestamp (simulates missing LOCK_WAIT_START_TIME)
+        stubRow(1L, 2L, null, null, null, null, null, 0L, 0L);
 
-        querySnapshot().collect();
+        query().collect();
 
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
-        // null start time → duration falls back to 0ms → 0.0s; start_time attribute omitted
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isEqualTo(0.0);
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNull();
     }
 
     @Test
-    void defaultPathUsesElapsedTimeForStartTime() throws Exception {
+    void symonPathUsesLockWaitStartTime() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 3000L, 0L, false);
+        long startMs = System.currentTimeMillis() - 3000;
+        stubRow(1L, 2L, null, null, null, null, null, startMs, 0L);
 
         query().collect();
 
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isGreaterThanOrEqualTo(2.9);
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNotNull();
     }
 
     @Test
-    void defaultSqlContainsMON_LOCKWAITSNotLOCKWAITS() throws Exception {
+    void symonSqlDrivesFromLOCKWAITS() throws Exception {
         when(rs.next()).thenReturn(false);
         query().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.LOCKWAITS");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_START_TIME");
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("MON_LOCKWAITS");
+    }
+
+    @Test
+    void enhancedSqlDrivesFromMON_LOCKWAITS() throws Exception {
+        when(rs.next()).thenReturn(false);
+        querySnapshot().collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
         assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.MON_LOCKWAITS");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_CURRENT_SQL");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_GET_CONNECTION");
-        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("SYSIBMADM.LOCKWAITS ");
-    }
-
-    @Test
-    void snapshotSqlContainsLOCKWAITS() throws Exception {
-        when(rs.next()).thenReturn(false);
-        querySnapshot().collect();
-
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeQuery(sqlCap.capture());
-        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.LOCKWAITS");
-        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_START_TIME");
     }
 
     @Test
@@ -300,14 +297,10 @@ class BlockingSessionQueryTest {
         when(rs.next()).thenReturn(true, true, false);
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(1L, 3L);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(2L, 4L);
-        when(rs.getString("BLOCKED_SQL")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
-        when(rs.getString(argThat(s -> !s.equals("BLOCKED_SQL")))).thenReturn(null);
-        when(rs.getLong(argThat(s -> !s.equals("BLOCKED_HANDLE") && !s.equals("BLOCKER_HANDLE")
-                && !s.equals("BLOCKED_MEMBER") && !s.equals("BLOCKER_MEMBER"))))
-            .thenReturn(0L);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(0L);
         when(rs.getLong("BLOCKER_MEMBER")).thenReturn(0L);
-        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(0);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getTimestamp("LOCK_WAIT_START_TIME")).thenReturn(null);
 
         query().collect();
 

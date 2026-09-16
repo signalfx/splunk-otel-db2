@@ -97,7 +97,6 @@ public class Db2Receiver {
         // When only blocking_session_enabled is set (query_sample_enabled=false), it
         // gets its own dedicated connection and scheduler.
         if (otelLogger != null && config.isBlockingSessionEnabled()
-                && !config.isUseSnapshotMonitor()
                 && !config.isQuerySampleEnabled()) {
             startBlockingSessionScheduler();
         }
