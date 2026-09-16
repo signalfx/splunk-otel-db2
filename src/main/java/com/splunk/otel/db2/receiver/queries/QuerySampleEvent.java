@@ -22,7 +22,7 @@ public final class QuerySampleEvent {
     public static final AttributeKey<String> DB_NAMESPACE     = AttributeKey.stringKey("db.namespace");
     public static final AttributeKey<String> DB_QUERY_TEXT    = AttributeKey.stringKey("db.query.text");
     public static final AttributeKey<String> DB_OPERATION     = AttributeKey.stringKey("db.operation.name");
-    public static final AttributeKey<String> DB2_APP_HANDLE   = AttributeKey.stringKey("db2.application_handle");
+    public static final AttributeKey<String> DB2_APP_HANDLE   = AttributeKey.stringKey("db2.session_id");
     public static final AttributeKey<String> DB2_ACTIVITY     = AttributeKey.stringKey("db2.activity_state");
     public static final AttributeKey<String> DB2_QUERY_START  = AttributeKey.stringKey("db2.query_start");
     public static final AttributeKey<Double> DB2_DURATION     = AttributeKey.doubleKey("db2.session.duration");

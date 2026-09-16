@@ -23,13 +23,13 @@ public final class BlockingSessionEvent {
 
     // Blocked session
     public static final AttributeKey<String> DB_QUERY_TEXT          = AttributeKey.stringKey("db.query.text");
-    public static final AttributeKey<String> DB2_APP_HANDLE         = AttributeKey.stringKey("db2.application_handle");
+    public static final AttributeKey<String> DB2_APP_HANDLE         = AttributeKey.stringKey("db2.session_id");
     public static final AttributeKey<String> DB2_ACTIVITY_STATE     = AttributeKey.stringKey("db2.activity_state");
     public static final AttributeKey<String> USER_NAME              = AttributeKey.stringKey("user.name");
     public static final AttributeKey<String> CLIENT_ADDRESS         = AttributeKey.stringKey("client.address");
 
     // Blocker session
-    public static final AttributeKey<String> DB2_BLOCKER_APP_HANDLE = AttributeKey.stringKey("db2.blocking.blocker.application_handle");
+    public static final AttributeKey<String> DB2_BLOCKER_APP_HANDLE = AttributeKey.stringKey("db2.blocking.blocker.session_id");
     public static final AttributeKey<String> DB2_BLOCKER_USER       = AttributeKey.stringKey("db2.blocking.blocker.user");
     public static final AttributeKey<String> DB2_BLOCKER_HOST       = AttributeKey.stringKey("db2.blocking.blocker.client_address");
     public static final AttributeKey<String> DB2_BLOCKER_QUERY_TEXT = AttributeKey.stringKey("db2.blocking.blocker.query_text");

@@ -22,8 +22,8 @@ public final class TopQueryEvent {
     public static final AttributeKey<String> DB_NAMESPACE     = AttributeKey.stringKey("db.namespace");
     public static final AttributeKey<String> DB_QUERY_TEXT    = AttributeKey.stringKey("db.query.text");
     public static final AttributeKey<Long>   DB2_MEMBER       = AttributeKey.longKey("db2.member");
-    public static final AttributeKey<Long>   DB2_EXECUTIONS   = AttributeKey.longKey("db2.executions");
-    public static final AttributeKey<Double> DB2_TOTAL_EXEC_TIME = AttributeKey.doubleKey("db2.total_exec_time");
+    public static final AttributeKey<Long>   DB2_EXECUTIONS   = AttributeKey.longKey("db2.num_executions");
+    public static final AttributeKey<Double> DB2_TOTAL_EXEC_TIME = AttributeKey.doubleKey("db2.total_elapsed_time");
     public static final AttributeKey<Double> DB2_AVG_EXEC_TIME   = AttributeKey.doubleKey("db2.avg_exec_time");
     public static final AttributeKey<Double> DB2_TOTAL_CPU_TIME  = AttributeKey.doubleKey("db2.total_cpu_time");
     public static final AttributeKey<Long>   DB2_ROWS_READ     = AttributeKey.longKey("db2.rows_read");
