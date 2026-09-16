@@ -13,6 +13,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.sql.Timestamp;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -50,13 +51,13 @@ class BlockingSessionQueryTest {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L);
     }
 
-    // waitElapsedMs: milliseconds the blocked session has been waiting (LOCK_WAIT_ELAPSED_TIME, IBM units = ms)
+    // waitStartMs: epoch ms when the lock wait began (from SYSIBMADM.LOCKWAITS.LOCK_WAIT_START_TIME)
     private void stubRow(long blockedHandle, long blockerHandle,
                           String blockedSql, String blockerSql,
                           String activityState, String blockedUser, String blockedHost,
                           String blockerUser, String blockerHost,
                           String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
+                          long waitStartMs, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
@@ -72,20 +73,22 @@ class BlockingSessionQueryTest {
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getLong("WAIT_ELAPSED_MS")).thenReturn(waitElapsedMs);
+        when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
+            .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // 3000 ms elapsed (LOCK_WAIT_ELAPSED_TIME is in milliseconds per IBM column type INTEGER)
+        // start time 3 seconds ago — duration should be >= 2.9s
+        long startMs = System.currentTimeMillis() - 3000;
         stubRow(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
-            3000L, 0L, false);
+            startMs, 0L, false);
 
         query().collect();
 
@@ -213,18 +216,20 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void zeroWaitElapsedEmitsZeroDuration() throws Exception {
+    void nullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
         when(rs.next()).thenReturn(true, false);
+        // 0L → stubRow returns null Timestamp (simulates LEFT JOIN miss on SYSIBMADM.LOCKWAITS)
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 0L /* zero ms elapsed */, 0L, false);
+            null, null, null, null, null, null, 0L, 0L, false);
 
         query().collect();
 
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
-        // 0 ms is a valid duration (sub-millisecond wait) — emitted as 0.0 seconds
+        // null start time → duration falls back to 0ms → 0.0s; start_time attribute omitted
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isEqualTo(0.0);
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNull();
     }
 
     @Test

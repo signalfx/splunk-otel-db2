@@ -46,11 +46,17 @@ public class BlockingSessionQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(BlockingSessionQuery.class);
 
     // One row per blocked→blocker pair.
+    // SYSIBMADM.LOCKWAITS (snapshot-based, Db2 9.1+) carries LOCK_WAIT_START_TIME as an
+    // exact TIMESTAMP. We LEFT JOIN it on (blocked agent_id, holding agent_id) so we get
+    // the precise start time for duration computation instead of approximating from the
+    // INTEGER elapsed counter. The join is LEFT so rows are still emitted on the rare case
+    // where the snapshot view lags behind MON_LOCKWAITS.
+    //
     // DB2 does not allow TABLE(MON_GET_CONNECTION(...)) to appear more than once
-    // in the same FROM clause. Each side uses a correlated subquery that calls the
-    // TVF independently — this avoids both the duplicate-TVF restriction and the
-    // CTE+WITH-UR parser ambiguity (a query beginning with "WITH x AS ()" causes
-    // "WITH UR" at the end to be misparsed as a second CTE definition).
+    // in the same FROM clause. Each side uses an independent derived-table subquery
+    // (C1 / C2) to avoid both the duplicate-TVF restriction and the CTE+WITH-UR parser
+    // ambiguity (a query beginning with "WITH x AS ()" causes "WITH UR" to be misparsed
+    // as a second CTE definition).
     // exposed for integration test diagnostics — not part of the public API
     public static final String SQL =
         "SELECT " +
@@ -62,7 +68,7 @@ public class BlockingSessionQuery {
         "  LW.TABNAME                              AS LOCK_OBJECT, " +
         "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
         "  LW.LOCK_MODE                            AS LOCK_MODE, " +
-        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_MS, " +
+        "  LK.LOCK_WAIT_START_TIME                 AS LOCK_WAIT_START_TIME, " +
         "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
         "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
         "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
@@ -72,6 +78,9 @@ public class BlockingSessionQuery {
         "  BLOCKER_CON.CLIENT_WRKSTNNAME           AS BLOCKER_HOST, " +
         "  CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
         "FROM SYSIBMADM.MON_LOCKWAITS LW " +
+        "LEFT JOIN SYSIBMADM.LOCKWAITS LK " +
+        "  ON LK.AGENT_ID = LW.REQ_APPLICATION_HANDLE " +
+        "  AND LK.AGENT_ID_HOLDING_LK = LW.HLD_APPLICATION_HANDLE " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKED_SQL " +
         "  ON BLOCKED_SQL.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
@@ -138,11 +147,14 @@ public class BlockingSessionQuery {
                         String lockObject      = rs.getString("LOCK_OBJECT");
                         String lockObjectType  = rs.getString("LOCK_OBJECT_TYPE");
                         String lockMode        = rs.getString("LOCK_MODE");
-                        long waitMs            = rs.getLong("WAIT_ELAPSED_MS");
+                        Timestamp lockWaitStartTime = rs.getTimestamp("LOCK_WAIT_START_TIME");
                         boolean blockerIsIdle  = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
-                        // LOCK_WAIT_ELAPSED_TIME is in milliseconds (INTEGER column in MON_LOCKWAITS)
-                        String waitStartStr = new Timestamp(now.toEpochMilli() - waitMs).toString();
+                        // LOCK_WAIT_START_TIME from SYSIBMADM.LOCKWAITS — exact timestamp since Db2 9.1.
+                        // Duration = now - start. Null when the LEFT JOIN finds no snapshot row (rare lag).
+                        String waitStartStr = lockWaitStartTime != null ? lockWaitStartTime.toString() : null;
+                        long waitMs = lockWaitStartTime != null
+                            ? now.toEpochMilli() - lockWaitStartTime.getTime() : 0;
 
                         // Obfuscate blocked SQL — drop record if obfuscation fails
                         String blockedObfuscated = null;
