@@ -96,9 +96,8 @@ public final class BlockingSessionEvent {
     public BlockingSessionEvent lockSchema(String v)        { this.lockSchema         = v; return this; }
     public BlockingSessionEvent blockingStartTime(String v) { this.blockingStartTime  = v; return this; }
 
-    /** Pass wait duration in milliseconds; stored as seconds. */
-    public BlockingSessionEvent waitDurationMillis(long ms) {
-        if (ms >= 0) this.waitDurationSec = ms / 1000.0;
+    public BlockingSessionEvent waitDurationSeconds(double sec) {
+        if (sec >= 0) this.waitDurationSec = sec;
         return this;
     }
 

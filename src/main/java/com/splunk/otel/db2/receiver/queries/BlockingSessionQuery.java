@@ -151,7 +151,7 @@ public class BlockingSessionQuery {
                         String blockedUser    = rs.getString("BLOCKED_USER");
 
                         final String waitStartStr;
-                        final long waitMs;
+                        final double waitSec;
                         final String blockedRawSql;
                         final String blockerRawSql;
                         final String activityState;
@@ -163,7 +163,7 @@ public class BlockingSessionQuery {
                             // Snapshot path: exact start time from LOCKWAITS
                             Timestamp ts = rs.getTimestamp("LOCK_WAIT_START_TIME");
                             waitStartStr = ts != null ? ts.toString() : null;
-                            waitMs       = ts != null ? now.toEpochMilli() - ts.getTime() : 0;
+                            waitSec      = ts != null ? (now.toEpochMilli() - ts.getTime()) / 1000.0 : 0;
                             blockedRawSql  = null;
                             blockerRawSql  = null;
                             activityState  = null;
@@ -171,10 +171,9 @@ public class BlockingSessionQuery {
                             blockerUser    = null;
                             blockerHost    = null;
                         } else {
-                            // Default path: approximate start time from elapsed seconds
-                            long elapsedSec = rs.getLong("WAIT_ELAPSED_SEC");
-                            waitMs       = elapsedSec * 1000L;
-                            waitStartStr = new Timestamp(now.toEpochMilli() - waitMs).toString();
+                            // Default path: LOCK_WAIT_ELAPSED_TIME is in seconds on Db2 11.5
+                            waitSec      = rs.getLong("WAIT_ELAPSED_SEC");
+                            waitStartStr = new Timestamp(now.toEpochMilli() - (long)(waitSec * 1000)).toString();
                             blockedRawSql  = rs.getString("BLOCKED_SQL");
                             blockerRawSql  = rs.getString("BLOCKER_SQL");
                             activityState  = rs.getString("ACTIVITY_STATE");
@@ -221,7 +220,7 @@ public class BlockingSessionQuery {
                             .lockObjectName(trim(lockObject))
                             .lockSchema(trim(lockSchema))
                             .blockingStartTime(waitStartStr)
-                            .waitDurationMillis(waitMs)
+                            .waitDurationSeconds(waitSec)
                             .emit(otelLogger, now);
                         emitCount++;
                     }
