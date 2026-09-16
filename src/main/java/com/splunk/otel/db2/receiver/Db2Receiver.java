@@ -93,11 +93,9 @@ public class Db2Receiver {
             startQuerySampleScheduler(db2Version);
         }
 
-        // Blocking session runs co-located with query sample when both are enabled.
-        // When only blocking_session_enabled is set (query_sample_enabled=false), it
-        // gets its own dedicated connection and scheduler.
-        if (otelLogger != null && config.isBlockingSessionEnabled()
-                && !config.isQuerySampleEnabled()) {
+        // Blocking session runs co-located with query sample when query_sample_enabled.
+        // Otherwise it gets its own dedicated connection and scheduler.
+        if (otelLogger != null && !config.isQuerySampleEnabled()) {
             startBlockingSessionScheduler();
         }
 
@@ -130,17 +128,13 @@ public class Db2Receiver {
             db2Version,
             querySampleTimeoutSeconds);
 
-        // Co-locate blocking session on the query-sample scheduler when both are enabled.
-        // Snapshot monitor is not supported on the query-sample path (MON_CURRENT_SQL only).
-        BlockingSessionQuery blockingSessionQuery =
-            (config.isBlockingSessionEnabled() && !config.isUseSnapshotMonitor())
-            ? new BlockingSessionQuery(
-                querySampleConnSupplier,
-                config.getDatabase(),
-                otelLogger,
-                config.getBlockingSessionIntervalDuration().getSeconds(),
-                false)
-            : null;
+        // Co-locate blocking session on the query-sample scheduler.
+        BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
+            querySampleConnSupplier,
+            config.getDatabase(),
+            otelLogger,
+            config.getBlockingSessionIntervalDuration().getSeconds(),
+            config.isUseSnapshotMonitor());
 
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
@@ -154,12 +148,10 @@ public class Db2Receiver {
                 } catch (Exception e) {
                     log.warn("[{}] Query sample collection error: {}", label, e.getMessage());
                 }
-                if (blockingSessionQuery != null) {
-                    try {
-                        blockingSessionQuery.collect();
-                    } catch (Exception e) {
-                        log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
-                    }
+                try {
+                    blockingSessionQuery.collect();
+                } catch (Exception e) {
+                    log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
                 }
             },
             0, intervalSeconds, TimeUnit.SECONDS

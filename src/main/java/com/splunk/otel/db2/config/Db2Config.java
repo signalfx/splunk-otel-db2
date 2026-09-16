@@ -172,7 +172,6 @@ public class Db2Config {
         if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
         if (db2.get("top_query_interval")    != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
         if (db2.get("query_sample_enabled")      != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
-        if (db2.get("blocking_session_enabled")  != null) rc.setBlockingSessionEnabled(asBool(db2, "blocking_session_enabled"));
         if (db2.get("blocking_session_interval") != null) rc.setBlockingSessionInterval(asString(db2, "blocking_session_interval"));
         if (db2.get("use_snapshot_monitor")      != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
         if (db2.get("connect_timeout_seconds")!= null) rc.setConnectTimeoutSeconds(asInt(db2, "connect_timeout_seconds"));
