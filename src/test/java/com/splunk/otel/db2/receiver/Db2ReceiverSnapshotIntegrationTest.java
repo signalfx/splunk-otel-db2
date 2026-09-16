@@ -1,6 +1,7 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import com.splunk.otel.db2.receiver.queries.BlockingSessionEvent;
 import com.splunk.otel.db2.receiver.queries.QuerySampleEvent;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
@@ -71,6 +72,24 @@ class Db2ReceiverSnapshotIntegrationTest {
         config.setUseSnapshotMonitor(true);
         config.getTls().setInsecure(true);
         return config;
+    }
+
+    private void recycleWithMonitorSwitches() throws Exception {
+        // DFT_MON_STMT and DFT_MON_LOCK both take effect only after instance recycle.
+        String script =
+            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON DFT_MON_LOCK ON && " +
+            "db2stop force && " +
+            "db2start";
+        org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
+            "su", "-", "db2inst1", "-c", script
+        );
+        if (result.getExitCode() != 0) {
+            throw new IllegalStateException(
+                "Failed to recycle DB2 instance: exit=" + result.getExitCode() +
+                " stdout=" + result.getStdout() +
+                " stderr=" + result.getStderr());
+        }
+        Thread.sleep(5000);
     }
 
     @Test
@@ -214,5 +233,98 @@ class Db2ReceiverSnapshotIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
         assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+    }
+
+    @Test
+    void snapshotPathEmitsBlockingSessionEvent() throws Exception {
+        // SYSIBMADM.LOCKWAITS requires DFT_MON_LOCK ON (instance-level monitor switch).
+        recycleWithMonitorSwitches();
+
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Connection ddlConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        try (Statement st = ddlConn.createStatement()) {
+            try { st.execute("DROP TABLE SPLUNK_SNAP_BLOCK_TEST"); } catch (Exception ignored) {}
+            st.execute("CREATE TABLE SPLUNK_SNAP_BLOCK_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
+            st.execute("INSERT INTO SPLUNK_SNAP_BLOCK_TEST VALUES (1, 1)");
+        }
+        ddlConn.setAutoCommit(false);
+        ddlConn.commit();
+        ddlConn.close();
+
+        // Blocker: hold an X-lock without committing
+        Connection blockerConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        blockerConn.setAutoCommit(false);
+        try (Statement st = blockerConn.createStatement()) {
+            st.execute("UPDATE SPLUNK_SNAP_BLOCK_TEST SET VAL = 2 WHERE ID = 1");
+        }
+
+        // Blocked: try to read with RR — will wait for the X-lock
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Connection blockedConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        blockedConn.setAutoCommit(false);
+        Statement blockedStmt = blockedConn.createStatement();
+        exec.submit(() -> {
+            try { blockedStmt.executeQuery("SELECT VAL FROM SPLUNK_SNAP_BLOCK_TEST WITH RR"); }
+            catch (Exception ignored) {}
+        });
+
+        Thread.sleep(2000); // let the lock wait establish
+
+        Db2ReceiverConfig config = buildSnapshotConfig();
+        config.setBlockingSessionEnabled(true);
+        config.setBlockingSessionInterval("2s");
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        try {
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(1, TimeUnit.SECONDS)
+                .alias("blocking_session event on snapshot path")
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> "db.server.blocking_session".equals(r.getEventName())));
+        } finally {
+            blockerConn.rollback();
+            blockerConn.close();
+            blockedStmt.cancel();
+            blockedConn.rollback();
+            blockedConn.close();
+            exec.shutdownNow();
+            Connection cleanupConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+            try (Statement st = cleanupConn.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_SNAP_BLOCK_TEST");
+            } finally { cleanupConn.close(); }
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
+
+        io.opentelemetry.sdk.logs.data.LogRecordData ev = logExporter.getFinishedLogRecordItems().stream()
+            .filter(r -> "db.server.blocking_session".equals(r.getEventName()))
+            .findFirst().orElseThrow();
+
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB2_APP_HANDLE)).isNotNull();
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB2_BLOCKER_APP_HANDLE)).isNotNull();
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isGreaterThan(0.0);
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNotNull();
+        // Snapshot path: BLOCKER_IS_IDLE must be omitted (state unknown)
+        assertThat(ev.getAttributes().get(BlockingSessionEvent.DB2_BLOCKER_IS_IDLE)).isNull();
+        assertThat(ev.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.WARN);
     }
 }

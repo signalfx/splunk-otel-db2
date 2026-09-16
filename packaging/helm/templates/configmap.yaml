@@ -20,6 +20,8 @@ data:
           insecure: {{ .tls.insecure }}
         top_query_enabled: {{ .topQueryEnabled }}
         query_sample_enabled: {{ .querySampleEnabled }}
+        blocking_session_enabled: {{ .blockingSessionEnabled }}
+        blocking_session_interval: {{ .blockingSessionInterval | quote }}
     {{- end }}
 
     exporters:

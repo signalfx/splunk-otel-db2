@@ -59,7 +59,7 @@ public final class BlockingSessionEvent {
     private String blockerUser;
     private String blockerHost;
     private String blockerQueryText;
-    private boolean blockerIsIdle;
+    private Boolean blockerIsIdle;
 
     // Optional — lock details
     private String lockObjectType;
@@ -89,7 +89,7 @@ public final class BlockingSessionEvent {
     public BlockingSessionEvent blockerUser(String v)       { this.blockerUser        = v; return this; }
     public BlockingSessionEvent blockerHost(String v)       { this.blockerHost        = v; return this; }
     public BlockingSessionEvent blockerQueryText(String v)  { this.blockerQueryText   = v; return this; }
-    public BlockingSessionEvent blockerIsIdle(boolean v)    { this.blockerIsIdle      = v; return this; }
+    public BlockingSessionEvent blockerIsIdle(Boolean v)    { this.blockerIsIdle      = v; return this; }
     public BlockingSessionEvent lockObjectType(String v)    { this.lockObjectType     = v; return this; }
     public BlockingSessionEvent lockMode(String v)          { this.lockMode           = v; return this; }
     public BlockingSessionEvent lockObjectName(String v)    { this.lockObjectName     = v; return this; }
@@ -116,7 +116,7 @@ public final class BlockingSessionEvent {
         if (blockerUser       != null) b.put(DB2_BLOCKER_USER,       blockerUser);
         if (blockerHost       != null) b.put(DB2_BLOCKER_HOST,       blockerHost);
         if (blockerQueryText  != null) b.put(DB2_BLOCKER_QUERY_TEXT, blockerQueryText);
-        b.put(DB2_BLOCKER_IS_IDLE, blockerIsIdle);
+        if (blockerIsIdle     != null) b.put(DB2_BLOCKER_IS_IDLE,   blockerIsIdle);
         if (lockObjectType    != null) b.put(DB2_LOCK_OBJECT_TYPE,   lockObjectType);
         if (lockMode          != null) b.put(DB2_LOCK_MODE,          lockMode);
         if (lockObjectName    != null) b.put(DB2_LOCK_OBJECT_NAME,   lockObjectName);

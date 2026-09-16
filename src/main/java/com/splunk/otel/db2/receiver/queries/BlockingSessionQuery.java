@@ -28,6 +28,9 @@ import java.util.function.Supplier;
  *   no explicit SQL GRANTs needed. Provides exact {@code LOCK_WAIT_START_TIME}
  *   (TIMESTAMP), lock details, and blocked user. SQL text and blocker user/host
  *   are not available from this view.
+ *   Prerequisite: DB2 lock monitor switch must be ON. Enable with:
+ *     db2 update monitor switches using lock on
+ *   or permanently via DBM CFG: UPDATE DBM CFG USING DFT_MON_LOCK ON (requires db2stop/db2start).
  *
  * SQL design note (default path): DB2 does not allow TABLE(MON_GET_CONNECTION(...))
  * to appear more than once in the same FROM clause. Each side uses an independent
@@ -89,8 +92,7 @@ public class BlockingSessionQuery {
         "  LK.LOCK_OBJECT_TYPE      AS LOCK_OBJECT_TYPE, " +
         "  LK.LOCK_MODE_REQUESTED   AS LOCK_MODE, " +
         "  LK.LOCK_WAIT_START_TIME  AS LOCK_WAIT_START_TIME, " +
-        "  LK.AUTHID                AS BLOCKED_USER, " +
-        "  1                        AS BLOCKER_IS_IDLE " +
+        "  LK.AUTHID                AS BLOCKED_USER " +
         "FROM SYSIBMADM.LOCKWAITS LK " +
         "WITH UR";
 
@@ -141,13 +143,14 @@ public class BlockingSessionQuery {
                     while (rs.next()) {
                         String blockedHandle  = String.valueOf(rs.getLong("BLOCKED_HANDLE"));
                         long   blockedMember  = rs.getLong("BLOCKED_MEMBER");
-                        String blockerHandle  = String.valueOf(rs.getLong("BLOCKER_HANDLE"));
+                        // blocker handle can be NULL if holder is not tracked — preserve as null
+                        Object blockerHandleObj = rs.getObject("BLOCKER_HANDLE");
+                        String blockerHandle  = blockerHandleObj != null ? String.valueOf(((Number) blockerHandleObj).longValue()) : null;
                         long   blockerMember  = rs.getLong("BLOCKER_MEMBER");
                         String lockSchema     = rs.getString("LOCK_SCHEMA");
                         String lockObject     = rs.getString("LOCK_OBJECT");
                         String lockObjectType = rs.getString("LOCK_OBJECT_TYPE");
                         String lockMode       = rs.getString("LOCK_MODE");
-                        boolean blockerIsIdle = rs.getInt("BLOCKER_IS_IDLE") == 1;
                         String blockedUser    = rs.getString("BLOCKED_USER");
 
                         final String waitStartStr;
@@ -158,9 +161,10 @@ public class BlockingSessionQuery {
                         final String blockedHost;
                         final String blockerUser;
                         final String blockerHost;
+                        final Boolean blockerIsIdle;
 
                         if (useSnapshotMonitor) {
-                            // Snapshot path: exact start time from LOCKWAITS
+                            // Snapshot path: exact start time from LOCKWAITS; blocker state unknown
                             Timestamp ts = rs.getTimestamp("LOCK_WAIT_START_TIME");
                             waitStartStr = ts != null ? ts.toString() : null;
                             waitSec      = ts != null ? (now.toEpochMilli() - ts.getTime()) / 1000.0 : 0;
@@ -170,6 +174,7 @@ public class BlockingSessionQuery {
                             blockedHost    = null;
                             blockerUser    = null;
                             blockerHost    = null;
+                            blockerIsIdle  = null; // LOCKWAITS has no active-SQL concept
                         } else {
                             // Default path: LOCK_WAIT_ELAPSED_TIME is in seconds on Db2 11.5
                             waitSec      = rs.getLong("WAIT_ELAPSED_SEC");
@@ -180,6 +185,7 @@ public class BlockingSessionQuery {
                             blockedHost    = rs.getString("BLOCKED_HOST");
                             blockerUser    = rs.getString("BLOCKER_USER");
                             blockerHost    = rs.getString("BLOCKER_HOST");
+                            blockerIsIdle  = rs.getInt("BLOCKER_IS_IDLE") == 1;
                         }
 
                         // Obfuscate blocked SQL — drop record if obfuscation fails
@@ -202,8 +208,8 @@ public class BlockingSessionQuery {
                         }
 
                         // Default path only: idle-blocker plan-cache lookup
-                        if (!useSnapshotMonitor && blockerIsIdle && blockerObfuscated == null) {
-                            blockerObfuscated = fetchIdleBlockerSql(conn, rs.getLong("BLOCKER_HANDLE"), blockerMember);
+                        if (Boolean.TRUE.equals(blockerIsIdle) && blockerObfuscated == null) {
+                            blockerObfuscated = fetchIdleBlockerSql(conn, ((Number) rs.getObject("BLOCKER_HANDLE")).longValue(), blockerMember);
                         }
 
                         BlockingSessionEvent.of(dbName, blockedMember, blockedHandle, blockerHandle)

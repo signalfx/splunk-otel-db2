@@ -67,7 +67,7 @@ class BlockingSessionQueryTest {
                          long waitElapsedSec, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
-        when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(blockerHandle);
         when(rs.getLong("BLOCKER_MEMBER")).thenReturn(member);
         when(rs.getString("BLOCKED_SQL")).thenReturn(blockedSql);
         when(rs.getString("BLOCKER_SQL")).thenReturn(blockerSql);
@@ -91,13 +91,12 @@ class BlockingSessionQueryTest {
                                   long waitStartMs, long member) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
-        when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(blockerHandle);
         when(rs.getLong("BLOCKER_MEMBER")).thenReturn(member);
         when(rs.getString("LOCK_SCHEMA")).thenReturn(lockSchema);
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
         when(rs.getString("BLOCKED_USER")).thenReturn(blockedUser);
         when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
             .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
@@ -246,6 +245,18 @@ class BlockingSessionQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isEqualTo(0.0);
         assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNull();
+    }
+
+    @Test
+    void snapshotPathOmitsBlockerIsIdle() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRowSnapshot(1L, 2L, null, null, null, null, null, 0L, 0L);
+
+        querySnapshot().collect();
+
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKER_IS_IDLE)).isNull();
     }
 
     @Test

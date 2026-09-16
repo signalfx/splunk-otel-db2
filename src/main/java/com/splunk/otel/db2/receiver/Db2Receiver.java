@@ -93,9 +93,11 @@ public class Db2Receiver {
             startQuerySampleScheduler(db2Version);
         }
 
-        // Blocking session runs co-located with query sample when query_sample_enabled.
-        // Otherwise it gets its own dedicated connection and scheduler.
-        if (otelLogger != null && !config.isQuerySampleEnabled()) {
+        // Blocking session runs co-located with query sample when both are enabled.
+        // When only blocking_session_enabled is set (query_sample_enabled=false), it
+        // gets its own dedicated connection and scheduler.
+        if (otelLogger != null && config.isBlockingSessionEnabled()
+                && !config.isQuerySampleEnabled()) {
             startBlockingSessionScheduler();
         }
 
@@ -128,19 +130,23 @@ public class Db2Receiver {
             db2Version,
             querySampleTimeoutSeconds);
 
-        // Co-locate blocking session on the query-sample scheduler.
-        BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
-            querySampleConnSupplier,
-            config.getDatabase(),
-            otelLogger,
-            config.getBlockingSessionIntervalDuration().getSeconds(),
-            config.isUseSnapshotMonitor());
+        // Co-locate blocking session on the query-sample scheduler when enabled.
+        // Run it every blockingEvery ticks so its cadence matches blocking_session_interval.
+        long blockingIntervalSeconds = config.isBlockingSessionEnabled()
+            ? config.getBlockingSessionIntervalDuration().getSeconds() : 0;
+        BlockingSessionQuery blockingSessionQuery = config.isBlockingSessionEnabled()
+            ? new BlockingSessionQuery(querySampleConnSupplier, config.getDatabase(), otelLogger,
+                blockingIntervalSeconds, config.isUseSnapshotMonitor())
+            : null;
+        long blockingEvery = blockingSessionQuery != null
+            ? Math.max(1, blockingIntervalSeconds / intervalSeconds) : 0;
 
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
             t.setDaemon(true);
             return t;
         });
+        final long[] tick = {0};
         querySampleScheduler.scheduleAtFixedRate(
             () -> {
                 try {
@@ -148,11 +154,14 @@ public class Db2Receiver {
                 } catch (Exception e) {
                     log.warn("[{}] Query sample collection error: {}", label, e.getMessage());
                 }
-                try {
-                    blockingSessionQuery.collect();
-                } catch (Exception e) {
-                    log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
+                if (blockingSessionQuery != null && tick[0] % blockingEvery == 0) {
+                    try {
+                        blockingSessionQuery.collect();
+                    } catch (Exception e) {
+                        log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
+                    }
                 }
+                tick[0]++;
             },
             0, intervalSeconds, TimeUnit.SECONDS
         );
