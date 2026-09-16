@@ -48,42 +48,23 @@ class BlockingSessionQueryTest {
         when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
     }
 
+    // Default path (useSnapshotMonitor=false): MON_LOCKWAITS + joins, explicit GRANTs required.
     private BlockingSessionQuery query() {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L, false);
     }
 
+    // Snapshot path (useSnapshotMonitor=true): SYSIBMADM.LOCKWAITS, SYSMON sufficient.
     private BlockingSessionQuery querySnapshot() {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L, true);
     }
 
-    // SYSMON path (useSnapshotMonitor=false): drives from SYSIBMADM.LOCKWAITS.
-    // waitStartMs=0 → null Timestamp; >0 → real Timestamp for exact start time.
+    // Default path: MON_LOCKWAITS columns — waitElapsedMs from LOCK_WAIT_ELAPSED_TIME (INTEGER ms).
     private void stubRow(long blockedHandle, long blockerHandle,
-                         String blockedUser,
+                         String blockedSql, String blockerSql,
+                         String activityState, String blockedUser, String blockedHost,
+                         String blockerUser, String blockerHost,
                          String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                         long waitStartMs, long member) throws Exception {
-        when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
-        when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
-        when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
-        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(member);
-        when(rs.getString("LOCK_SCHEMA")).thenReturn(lockSchema);
-        when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
-        when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
-        when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
-        when(rs.getString("BLOCKED_USER")).thenReturn(blockedUser);
-        when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
-            .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
-    }
-
-    // Enhanced path (useSnapshotMonitor=true): drives from SYSIBMADM.MON_LOCKWAITS + joins.
-    // waitElapsedMs is INTEGER milliseconds from LOCK_WAIT_ELAPSED_TIME.
-    private void stubRowEnhanced(long blockedHandle, long blockerHandle,
-                                  String blockedSql, String blockerSql,
-                                  String activityState, String blockedUser, String blockedHost,
-                                  String blockerUser, String blockerHost,
-                                  String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                                  long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
+                         long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
@@ -103,18 +84,37 @@ class BlockingSessionQueryTest {
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
+    // Snapshot path: LOCKWAITS columns — waitStartMs as epoch ms for LOCK_WAIT_START_TIME (0 → null).
+    private void stubRowSnapshot(long blockedHandle, long blockerHandle,
+                                  String blockedUser,
+                                  String lockSchema, String lockObject, String lockObjectType, String lockMode,
+                                  long waitStartMs, long member) throws Exception {
+        when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
+        when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
+        when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(member);
+        when(rs.getString("LOCK_SCHEMA")).thenReturn(lockSchema);
+        when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
+        when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
+        when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKED_USER")).thenReturn(blockedUser);
+        when(rs.getTimestamp("LOCK_WAIT_START_TIME"))
+            .thenReturn(waitStartMs > 0 ? new Timestamp(waitStartMs) : null);
+    }
+
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // enhanced path: elapsed 3s — duration should be >= 2.9s
-        stubRowEnhanced(111L, 222L,
+        // default path: elapsed 3s — duration should be >= 2.9s
+        stubRow(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
             3000L, 0L, false);
 
-        querySnapshot().collect();
+        query().collect();
 
         ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
@@ -145,7 +145,8 @@ class BlockingSessionQueryTest {
     @Test
     void severityIsWarn() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, null, null, null, null, null, 0L, 0L);
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+            null, null, null, null, null, null, 0L, 0L, false);
 
         query().collect();
 
@@ -156,7 +157,8 @@ class BlockingSessionQueryTest {
     @Test
     void eventNameIsBlockingSession() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow(1L, 2L, null, null, null, null, null, 0L, 0L);
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+            null, null, null, null, null, null, 0L, 0L, false);
 
         query().collect();
 
@@ -166,13 +168,13 @@ class BlockingSessionQueryTest {
     @Test
     void blockedObfuscationFailedDropsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, false);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
             mocked.when(() -> SqlObfuscator.obfuscate(anyString()))
                 .thenReturn(SqlObfuscator.OBFUSCATION_FAILED);
-            querySnapshot().collect();
+            query().collect();
         }
 
         verify(otelLogger, never()).logRecordBuilder();
@@ -181,7 +183,7 @@ class BlockingSessionQueryTest {
     @Test
     void blockerObfuscationFailedOmitsFieldButKeepsRecord() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", "UPDATE T SET X = 1", null, null, null,
+        stubRow(1L, 2L, "SELECT 1 FROM T", "UPDATE T SET X = 1", null, null, null,
             null, null, null, null, null, null, 0L, 0L, false);
 
         try (MockedStatic<SqlObfuscator> mocked = mockStatic(SqlObfuscator.class)) {
@@ -189,10 +191,10 @@ class BlockingSessionQueryTest {
                 .thenReturn("SELECT ? FROM T");
             mocked.when(() -> SqlObfuscator.obfuscate("UPDATE T SET X = 1"))
                 .thenReturn(SqlObfuscator.OBFUSCATION_FAILED);
-            querySnapshot().collect();
+            query().collect();
         }
 
-        verify(logBuilder).emit(); // record is still emitted
+        verify(logBuilder).emit();
 
         ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
@@ -202,12 +204,12 @@ class BlockingSessionQueryTest {
     @Test
     void idleBlockerTriggersPackageCacheLookup() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, true); // blockerIsIdle = true
         when(prs.next()).thenReturn(true, false);
         when(prs.getString("STMT_TEXT")).thenReturn("UPDATE T SET X = 'literal'");
 
-        querySnapshot().collect();
+        query().collect();
 
         verify(conn).prepareStatement(argThat(s -> s.contains("MON_GET_PKG_CACHE_STMT")));
         ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
@@ -220,13 +222,12 @@ class BlockingSessionQueryTest {
     @Test
     void idleBlockerPackageCacheLookupFailureIsHandledGracefully() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRowEnhanced(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
             null, null, null, null, null, null, 0L, 0L, true);
         when(pstmt.executeQuery()).thenThrow(new java.sql.SQLException("table not found"));
 
-        querySnapshot().collect();
+        query().collect();
 
-        // Record still emitted, blocker query text just omitted
         verify(logBuilder).emit();
         ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
@@ -234,12 +235,12 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void symonNullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
+    void snapshotNullStartTimeEmitsZeroDurationAndNullStartTime() throws Exception {
         when(rs.next()).thenReturn(true, false);
         // 0L → null Timestamp (simulates missing LOCK_WAIT_START_TIME)
-        stubRow(1L, 2L, null, null, null, null, null, 0L, 0L);
+        stubRowSnapshot(1L, 2L, null, null, null, null, null, 0L, 0L);
 
-        query().collect();
+        querySnapshot().collect();
 
         ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
@@ -248,10 +249,24 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void symonPathUsesLockWaitStartTime() throws Exception {
+    void snapshotPathUsesExactLockWaitStartTime() throws Exception {
         when(rs.next()).thenReturn(true, false);
         long startMs = System.currentTimeMillis() - 3000;
-        stubRow(1L, 2L, null, null, null, null, null, startMs, 0L);
+        stubRowSnapshot(1L, 2L, null, null, null, null, null, startMs, 0L);
+
+        querySnapshot().collect();
+
+        ArgumentCaptor<Attributes> cap = ArgumentCaptor.forClass(Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isGreaterThanOrEqualTo(2.9);
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_BLOCKING_START)).isNotNull();
+    }
+
+    @Test
+    void defaultPathUsesElapsedMs() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
+            null, null, null, null, null, null, 3000L, 0L, false);
 
         query().collect();
 
@@ -262,27 +277,28 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void symonSqlDrivesFromLOCKWAITS() throws Exception {
+    void defaultSqlDrivesFromMON_LOCKWAITS() throws Exception {
         when(rs.next()).thenReturn(false);
         query().collect();
-
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeQuery(sqlCap.capture());
-        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.LOCKWAITS");
-        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_START_TIME");
-        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("MON_LOCKWAITS");
-    }
-
-    @Test
-    void enhancedSqlDrivesFromMON_LOCKWAITS() throws Exception {
-        when(rs.next()).thenReturn(false);
-        querySnapshot().collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
         assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.MON_LOCKWAITS");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_CURRENT_SQL");
         assertThat(sqlCap.getValue()).containsIgnoringCase("MON_GET_CONNECTION");
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("SYSIBMADM.LOCKWAITS ");
+    }
+
+    @Test
+    void snapshotSqlDrivesFromLOCKWAITS() throws Exception {
+        when(rs.next()).thenReturn(false);
+        querySnapshot().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.LOCKWAITS");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_START_TIME");
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("MON_LOCKWAITS");
     }
 
     @Test
@@ -297,10 +313,14 @@ class BlockingSessionQueryTest {
         when(rs.next()).thenReturn(true, true, false);
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(1L, 3L);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(2L, 4L);
+        when(rs.getString("BLOCKED_SQL")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
+        when(rs.getString(argThat(s -> !s.equals("BLOCKED_SQL")))).thenReturn(null);
+        when(rs.getLong(argThat(s -> !s.equals("BLOCKED_HANDLE") && !s.equals("BLOCKER_HANDLE")
+                && !s.equals("BLOCKED_MEMBER") && !s.equals("BLOCKER_MEMBER"))))
+            .thenReturn(0L);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(0L);
         when(rs.getLong("BLOCKER_MEMBER")).thenReturn(0L);
-        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
-        when(rs.getTimestamp("LOCK_WAIT_START_TIME")).thenReturn(null);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(0);
 
         query().collect();
 

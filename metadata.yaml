@@ -379,15 +379,16 @@ events:
       A blocked→blocker lock pair. Each record represents one session waiting on a lock
       held by another. Emitted as OTel log records with severity WARN.
 
-      Default path (use_snapshot_monitor: false, SYSMON authority sufficient):
-        Reads SYSIBMADM.LOCKWAITS. Provides exact blocking start time (LOCK_WAIT_START_TIME),
-        lock details, and blocked user. SQL text and blocker user/host are not available.
-
-      Enhanced path (use_snapshot_monitor: true, explicit GRANTs required):
+      Default path (use_snapshot_monitor: false, explicit GRANTs required):
         Reads SYSIBMADM.MON_LOCKWAITS joined with MON_CURRENT_SQL and MON_GET_CONNECTION.
         Provides obfuscated SQL text for both sides, user/host for both sides, activity state,
         and idle-blocker lookup from MON_GET_PKG_CACHE_STMT. Start time approximated as
         now minus LOCK_WAIT_ELAPSED_TIME.
+
+      Snapshot path (use_snapshot_monitor: true, SYSMON authority sufficient):
+        Reads SYSIBMADM.LOCKWAITS only. Requires SYSMON_GROUP membership; no explicit SQL
+        GRANTs needed. Provides exact blocking start time (LOCK_WAIT_START_TIME), lock
+        details, and blocked user. SQL text and blocker user/host are not available.
     attributes:
       - db.system.name
       - db.namespace

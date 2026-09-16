@@ -17,19 +17,19 @@ import java.util.function.Supplier;
  *
  * Two SQL paths selected at construction time via {@code useSnapshotMonitor}:
  *
- * Default path (useSnapshotMonitor=false) — SYSMON authority sufficient:
- *   Queries {@code SYSIBMADM.LOCKWAITS} only. Requires SYSMON_GROUP membership;
- *   no explicit SQL GRANTs needed. Provides exact {@code LOCK_WAIT_START_TIME}
- *   (TIMESTAMP), lock details, and blocked user. SQL text and blocker user/host
- *   are not available from this view.
- *
- * Enhanced path (useSnapshotMonitor=true) — explicit GRANTs required:
+ * Default path (useSnapshotMonitor=false) — explicit GRANTs required:
  *   Queries {@code SYSIBMADM.MON_LOCKWAITS} joined with {@code MON_CURRENT_SQL}
  *   and {@code MON_GET_CONNECTION}. Provides full SQL text for both sides,
  *   user/host for both sides, activity state, and idle-blocker plan-cache lookup.
  *   Start time approximated as now minus {@code LOCK_WAIT_ELAPSED_TIME} (ms).
  *
- * SQL design note (enhanced path): DB2 does not allow TABLE(MON_GET_CONNECTION(...))
+ * Snapshot path (useSnapshotMonitor=true) — SYSMON authority sufficient:
+ *   Queries {@code SYSIBMADM.LOCKWAITS} only. Requires SYSMON_GROUP membership;
+ *   no explicit SQL GRANTs needed. Provides exact {@code LOCK_WAIT_START_TIME}
+ *   (TIMESTAMP), lock details, and blocked user. SQL text and blocker user/host
+ *   are not available from this view.
+ *
+ * SQL design note (default path): DB2 does not allow TABLE(MON_GET_CONNECTION(...))
  * to appear more than once in the same FROM clause. Each side uses an independent
  * derived-table subquery (C1 / C2) to avoid both the duplicate-TVF restriction and
  * the CTE+WITH-UR parser ambiguity.
@@ -37,31 +37,11 @@ import java.util.function.Supplier;
 public class BlockingSessionQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(BlockingSessionQuery.class);
 
-    // Default path: SYSIBMADM.LOCKWAITS — SYSMON authority sufficient (Db2 9.1+).
-    // Provides exact LOCK_WAIT_START_TIME. No SQL text or blocker user/host.
+    // Default path: MON_LOCKWAITS + MON_CURRENT_SQL + MON_GET_CONNECTION.
+    // Requires explicit GRANTs. Full SQL text, user/host both sides, activity state,
+    // idle-blocker lookup. Start time approximated as now - LOCK_WAIT_ELAPSED_TIME (INTEGER ms).
     // exposed for integration test diagnostics — not part of the public API
     public static final String SQL =
-        "SELECT " +
-        "  LK.AGENT_ID              AS BLOCKED_HANDLE, " +
-        "  LK.MEMBER                AS BLOCKED_MEMBER, " +
-        "  LK.AGENT_ID_HOLDING_LK   AS BLOCKER_HANDLE, " +
-        "  LK.MEMBER                AS BLOCKER_MEMBER, " +
-        "  LK.TABSCHEMA             AS LOCK_SCHEMA, " +
-        "  LK.TABNAME               AS LOCK_OBJECT, " +
-        "  LK.LOCK_OBJECT_TYPE      AS LOCK_OBJECT_TYPE, " +
-        "  LK.LOCK_MODE_REQUESTED   AS LOCK_MODE, " +
-        "  LK.LOCK_WAIT_START_TIME  AS LOCK_WAIT_START_TIME, " +
-        "  LK.AUTHID                AS BLOCKED_USER, " +
-        "  1                        AS BLOCKER_IS_IDLE " +
-        "FROM SYSIBMADM.LOCKWAITS LK " +
-        "WITH UR";
-
-    // Enhanced path: MON_LOCKWAITS + MON_CURRENT_SQL + MON_GET_CONNECTION.
-    // Requires explicit GRANTs (use_snapshot_monitor: true). Full SQL text,
-    // user/host both sides, activity state, idle-blocker lookup. Start time
-    // approximated as now - LOCK_WAIT_ELAPSED_TIME (INTEGER ms).
-    // exposed for integration test diagnostics — not part of the public API
-    public static final String SQL_ENHANCED =
         "SELECT " +
         "  LW.REQ_APPLICATION_HANDLE               AS BLOCKED_HANDLE, " +
         "  LW.REQ_MEMBER                           AS BLOCKED_MEMBER, " +
@@ -95,7 +75,26 @@ public class BlockingSessionQuery {
         "  AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
         "WITH UR";
 
-    // Enhanced path only: look up the idle blocker's last statement from the plan cache.
+    // Snapshot path: SYSIBMADM.LOCKWAITS — SYSMON authority sufficient (Db2 9.1+).
+    // Provides exact LOCK_WAIT_START_TIME. No SQL text or blocker user/host.
+    // exposed for integration test diagnostics — not part of the public API
+    public static final String SQL_SNAPSHOT =
+        "SELECT " +
+        "  LK.AGENT_ID              AS BLOCKED_HANDLE, " +
+        "  LK.MEMBER                AS BLOCKED_MEMBER, " +
+        "  LK.AGENT_ID_HOLDING_LK   AS BLOCKER_HANDLE, " +
+        "  LK.MEMBER                AS BLOCKER_MEMBER, " +
+        "  LK.TABSCHEMA             AS LOCK_SCHEMA, " +
+        "  LK.TABNAME               AS LOCK_OBJECT, " +
+        "  LK.LOCK_OBJECT_TYPE      AS LOCK_OBJECT_TYPE, " +
+        "  LK.LOCK_MODE_REQUESTED   AS LOCK_MODE, " +
+        "  LK.LOCK_WAIT_START_TIME  AS LOCK_WAIT_START_TIME, " +
+        "  LK.AUTHID                AS BLOCKED_USER, " +
+        "  1                        AS BLOCKER_IS_IDLE " +
+        "FROM SYSIBMADM.LOCKWAITS LK " +
+        "WITH UR";
+
+    // Default path only: look up the idle blocker's last statement from the plan cache.
     private static final String IDLE_BLOCKER_SQL =
         "SELECT P.STMT_TEXT " +
         "FROM TABLE(MON_GET_CONNECTION(CAST(? AS BIGINT), CAST(? AS INTEGER))) AS C " +
@@ -119,12 +118,12 @@ public class BlockingSessionQuery {
         this.otelLogger          = otelLogger;
         this.queryTimeoutSeconds = (int) Math.max(10L, intervalSeconds / 2);
         this.useSnapshotMonitor  = useSnapshotMonitor;
-        this.sql                 = useSnapshotMonitor ? SQL_ENHANCED : SQL;
+        this.sql                 = useSnapshotMonitor ? SQL_SNAPSHOT : SQL;
         log.info("BlockingSessionQuery: interval={}s, timeout={}s, path={}",
-            intervalSeconds, queryTimeoutSeconds, useSnapshotMonitor ? "enhanced" : "sysmon");
+            intervalSeconds, queryTimeoutSeconds, useSnapshotMonitor ? "snapshot" : "default");
     }
 
-    // backwards-compat: defaults to SYSMON path
+    // backwards-compat: defaults to default (MON_LOCKWAITS) path
     public BlockingSessionQuery(Supplier<Connection> connSupplier, String dbName,
                                  Logger otelLogger, long intervalSeconds) {
         this(connSupplier, dbName, otelLogger, intervalSeconds, false);
@@ -161,18 +160,7 @@ public class BlockingSessionQuery {
                         final String blockerHost;
 
                         if (useSnapshotMonitor) {
-                            // Enhanced path: approximate start time from elapsed ms
-                            long elapsedMs = rs.getLong("WAIT_ELAPSED_MS");
-                            waitMs       = elapsedMs;
-                            waitStartStr = new Timestamp(now.toEpochMilli() - elapsedMs).toString();
-                            blockedRawSql  = rs.getString("BLOCKED_SQL");
-                            blockerRawSql  = rs.getString("BLOCKER_SQL");
-                            activityState  = rs.getString("ACTIVITY_STATE");
-                            blockedHost    = rs.getString("BLOCKED_HOST");
-                            blockerUser    = rs.getString("BLOCKER_USER");
-                            blockerHost    = rs.getString("BLOCKER_HOST");
-                        } else {
-                            // SYSMON path: exact start time from LOCKWAITS
+                            // Snapshot path: exact start time from LOCKWAITS
                             Timestamp ts = rs.getTimestamp("LOCK_WAIT_START_TIME");
                             waitStartStr = ts != null ? ts.toString() : null;
                             waitMs       = ts != null ? now.toEpochMilli() - ts.getTime() : 0;
@@ -182,6 +170,17 @@ public class BlockingSessionQuery {
                             blockedHost    = null;
                             blockerUser    = null;
                             blockerHost    = null;
+                        } else {
+                            // Default path: approximate start time from elapsed ms
+                            long elapsedMs = rs.getLong("WAIT_ELAPSED_MS");
+                            waitMs       = elapsedMs;
+                            waitStartStr = new Timestamp(now.toEpochMilli() - elapsedMs).toString();
+                            blockedRawSql  = rs.getString("BLOCKED_SQL");
+                            blockerRawSql  = rs.getString("BLOCKER_SQL");
+                            activityState  = rs.getString("ACTIVITY_STATE");
+                            blockedHost    = rs.getString("BLOCKED_HOST");
+                            blockerUser    = rs.getString("BLOCKER_USER");
+                            blockerHost    = rs.getString("BLOCKER_HOST");
                         }
 
                         // Obfuscate blocked SQL — drop record if obfuscation fails
@@ -203,8 +202,8 @@ public class BlockingSessionQuery {
                             }
                         }
 
-                        // Enhanced path only: idle-blocker plan-cache lookup
-                        if (useSnapshotMonitor && blockerIsIdle && blockerObfuscated == null) {
+                        // Default path only: idle-blocker plan-cache lookup
+                        if (!useSnapshotMonitor && blockerIsIdle && blockerObfuscated == null) {
                             blockerObfuscated = fetchIdleBlockerSql(conn, rs.getLong("BLOCKER_HANDLE"), blockerMember);
                         }
 
