@@ -145,7 +145,7 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 | Collector | Connection | Always open? |
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
-| Query sample + Blocking session (`query_sample_enabled` or `blocking_session_enabled`) | `querySampleConnection` | Optional |
+| Query sample + Blocking session (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
 | Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
@@ -353,11 +353,11 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
 -- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
--- Also requires DFT_MON_STMT ON and DFT_MON_LOCK ON. Run as SYSADM, then restart the instance:
---   db2 UPDATE DBM CFG USING DFT_MON_STMT ON DFT_MON_LOCK ON
+-- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
+--   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
 --   db2stop force && db2start
--- Both settings take effect only after the instance is cycled; without the restart
--- new connections inherit the old defaults and SNAP_GET_STMT returns no statement text.
+-- This setting takes effect only after the instance is cycled; without the restart
+-- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
 ```
 
 > **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.

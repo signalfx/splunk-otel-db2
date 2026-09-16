@@ -74,9 +74,10 @@ class Db2ReceiverSnapshotIntegrationTest {
     }
 
     private void recycleWithMonitorSwitches() throws Exception {
-        // DFT_MON_STMT and DFT_MON_LOCK both take effect only after instance recycle.
+        // DFT_MON_STMT takes effect only after instance recycle.
+        // DFT_MON_LOCK is not needed: snapshot path does not query MON_LOCKWAITS.
         String script =
-            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON DFT_MON_LOCK ON && " +
+            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
             "db2stop force && " +
             "db2start";
         org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
@@ -281,14 +282,33 @@ class Db2ReceiverSnapshotIntegrationTest {
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
 
+        io.opentelemetry.sdk.logs.data.LogRecordData snapRecord;
         try {
-            Thread.sleep(6000); // 3+ collection cycles
+            try {
+                Awaitility.await()
+                    .atMost(60, TimeUnit.SECONDS)
+                    .pollInterval(1, TimeUnit.SECONDS)
+                    .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                        .anyMatch(r -> {
+                            String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                            return text != null && text.toUpperCase().contains("SPLUNK_SNAP_BLOCK_TEST");
+                        }));
+            } catch (org.awaitility.core.ConditionTimeoutException cte) {
+                throw new AssertionError("No query sample found for SPLUNK_SNAP_BLOCK_TEST after 60s", cte);
+            }
 
-            // On snapshot path, no blocking attributes should be set on any record
-            long blockingRecords = logExporter.getFinishedLogRecordItems().stream()
-                .filter(r -> r.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE) != null)
-                .count();
-            assertThat(blockingRecords).isZero();
+            snapRecord = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> {
+                    String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                    return text != null && text.toUpperCase().contains("SPLUNK_SNAP_BLOCK_TEST");
+                })
+                .findFirst()
+                .orElseThrow();
+
+            // Snapshot path: blocking detection not available — always INFO, no blocking attributes.
+            assertThat(snapRecord.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+            assertThat(snapRecord.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE)).isNull();
+            assertThat(snapRecord.getAttributes().get(QuerySampleEvent.DB2_WAIT_DURATION)).isNull();
         } finally {
             blockerConn.rollback();
             blockerConn.close();

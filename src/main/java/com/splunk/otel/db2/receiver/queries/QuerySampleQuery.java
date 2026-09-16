@@ -52,6 +52,7 @@ public class QuerySampleQuery {
         "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
         "       CAST(-1 AS BIGINT) AS LOCK_WAIT_TIME_MS, " +
+        "       CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 1 ELSE 0 END AS IS_BLOCKED, " +
         "       LW.HLD_APPLICATION_HANDLE AS BLOCKER_HANDLE, " +
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
@@ -99,6 +100,7 @@ public class QuerySampleQuery {
         "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
         "       COALESCE(A.LOCK_WAIT_TIME, -1) AS LOCK_WAIT_TIME_MS, " +
+        "       CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 1 ELSE 0 END AS IS_BLOCKED, " +
         "       LW.HLD_APPLICATION_HANDLE AS BLOCKER_HANDLE, " +
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
@@ -265,15 +267,26 @@ public class QuerySampleQuery {
                             .waitTimeMillis(waitMs);
 
                         // Blocking columns only on the default (MON_CURRENT) paths.
-                        if (!useSnapshotMonitor) {
+                        // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
+                        // HLD_APPLICATION_HANDLE is NULL (global lock or unidentified holder).
+                        if (!useSnapshotMonitor && rs.getInt("IS_BLOCKED") == 1) {
+                            double waitSec      = rs.getLong("BLOCKING_WAIT_SEC");
+                            String waitStartStr = new Timestamp(now.toEpochMilli() - (long)(waitSec * 1000)).toString();
+
+                            ev.lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
+                              .lockMode(trim(rs.getString("LOCK_MODE")))
+                              .lockObjectName(trim(rs.getString("LOCK_OBJECT")))
+                              .lockSchema(trim(rs.getString("LOCK_SCHEMA")))
+                              .blockingStartTime(waitStartStr)
+                              .waitDurationSeconds(waitSec);
+
+                            // Blocker identity is NULL for global lock waits or unknown holders.
                             Object blockerHandleObj = rs.getObject("BLOCKER_HANDLE");
                             if (blockerHandleObj != null) {
-                                long   blockerHandleLong = ((Number) blockerHandleObj).longValue();
-                                long   blockerMember     = rs.getLong("BLOCKER_MEMBER");
-                                double waitSec           = rs.getLong("BLOCKING_WAIT_SEC");
-                                String waitStartStr      = new Timestamp(now.toEpochMilli() - (long)(waitSec * 1000)).toString();
-                                String blockerRawSql     = rs.getString("BLOCKER_SQL");
-                                boolean isIdle           = rs.getInt("BLOCKER_IS_IDLE") == 1;
+                                long    blockerHandleLong = ((Number) blockerHandleObj).longValue();
+                                long    blockerMember     = rs.getLong("BLOCKER_MEMBER");
+                                String  blockerRawSql     = rs.getString("BLOCKER_SQL");
+                                boolean isIdle            = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
                                 String blockerObf = null;
                                 if (blockerRawSql != null && !blockerRawSql.isBlank()) {
@@ -290,13 +303,7 @@ public class QuerySampleQuery {
                                   .blockerUser(trim(rs.getString("BLOCKER_USER")))
                                   .blockerHost(trim(rs.getString("BLOCKER_HOST")))
                                   .blockerIsIdle(isIdle)
-                                  .blockerQueryText(blockerObf)
-                                  .lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
-                                  .lockMode(trim(rs.getString("LOCK_MODE")))
-                                  .lockObjectName(trim(rs.getString("LOCK_OBJECT")))
-                                  .lockSchema(trim(rs.getString("LOCK_SCHEMA")))
-                                  .blockingStartTime(waitStartStr)
-                                  .waitDurationSeconds(waitSec);
+                                  .blockerQueryText(blockerObf);
                             }
                         }
 

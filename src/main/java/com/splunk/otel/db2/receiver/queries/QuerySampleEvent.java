@@ -155,7 +155,9 @@ public final class QuerySampleEvent {
         if (waitDurationSec   != null) b.put(DB2_WAIT_DURATION,      waitDurationSec);
 
         // Blocked sessions are escalated to WARN so they stand out in OTel backends.
-        boolean isBlocked = blockerHandle != null;
+        // waitDurationSec is set whenever a MON_LOCKWAITS row matched — including
+        // global lock waits where blockerHandle may be null.
+        boolean isBlocked = waitDurationSec != null;
         Severity severity = isBlocked ? Severity.WARN : Severity.INFO;
 
         logger.logRecordBuilder()

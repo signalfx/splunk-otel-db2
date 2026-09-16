@@ -77,6 +77,7 @@ class QuerySampleQueryTest {
         when(rs.getLong("CPU_US")).thenReturn(cpuUs);
         when(rs.getLong("LOCK_WAIT_TIME_MS")).thenReturn(lockWaitMs);
         // No blocker
+        when(rs.getInt("IS_BLOCKED")).thenReturn(0);
         when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null);
     }
 
@@ -98,6 +99,7 @@ class QuerySampleQueryTest {
         when(rs.getLong("MEMBER")).thenReturn(member);
         when(rs.getLong("CPU_US")).thenReturn(0L);
         when(rs.getLong("LOCK_WAIT_TIME_MS")).thenReturn(-1L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
         when(rs.getObject("BLOCKER_HANDLE")).thenReturn(blockerHandle);
         when(rs.getLong("BLOCKER_MEMBER")).thenReturn(blockerMember);
         when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(waitElapsedSec);
@@ -277,6 +279,7 @@ class QuerySampleQueryTest {
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
         assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.MON_LOCKWAITS");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("IS_BLOCKED");
         assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKER_HANDLE");
     }
 
@@ -341,6 +344,7 @@ class QuerySampleQueryTest {
         when(rs.getString("STMT_TEXT"))
             .thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
         when(rs.getLong(anyString())).thenReturn(0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(0);
         when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null);
 
         query(false).collect();
@@ -453,6 +457,46 @@ class QuerySampleQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_QUERY_TEXT)).isNull();
+    }
+
+    @Test
+    void globalLockWaitWithNullHolderEmitsWarnWithLockAttributes() throws Exception {
+        // DB2 can return HLD_APPLICATION_HANDLE = NULL for global lock waits or when
+        // the holder cannot be identified. IS_BLOCKED = 1 is the authoritative signal.
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("SELECT ID FROM T WHERE ID = 1");
+        when(rs.getString("ACTIVITY_STATE")).thenReturn("LOCKWAIT DML");
+        when(rs.getString("OPERATION_NAME")).thenReturn("READ");
+        when(rs.getString("LOCAL_START_TIME")).thenReturn(null);
+        when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(2L);
+        when(rs.getString("CLIENT_USERID")).thenReturn("user1");
+        when(rs.getString("CLIENT_WRKSTNNAME")).thenReturn("host1");
+        when(rs.getString("APPLICATION_HANDLE")).thenReturn("77");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getLong("CPU_US")).thenReturn(0L);
+        when(rs.getLong("LOCK_WAIT_TIME_MS")).thenReturn(-1L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null); // unknown holder
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(2L);
+        when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn("TABLE");
+        when(rs.getString("LOCK_MODE")).thenReturn("S");
+        when(rs.getString("LOCK_OBJECT")).thenReturn("MY_TABLE");
+        when(rs.getString("LOCK_SCHEMA")).thenReturn("MYSCHEMA");
+
+        query(false).collect();
+
+        verify(logBuilder).setSeverity(Severity.WARN);
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        io.opentelemetry.api.common.Attributes attrs = cap.getValue();
+        assertThat(attrs.get(QuerySampleEvent.DB2_WAIT_DURATION)).isGreaterThanOrEqualTo(1.9);
+        assertThat(attrs.get(QuerySampleEvent.DB2_LOCK_OBJECT_TYPE)).isEqualTo("TABLE");
+        assertThat(attrs.get(QuerySampleEvent.DB2_LOCK_MODE)).isEqualTo("S");
+        assertThat(attrs.get(QuerySampleEvent.DB2_LOCK_OBJECT_NAME)).isEqualTo("MY_TABLE");
+        assertThat(attrs.get(QuerySampleEvent.DB2_LOCK_SCHEMA)).isEqualTo("MYSCHEMA");
+        // Blocker identity unavailable — omitted but record still emitted at WARN
+        assertThat(attrs.get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE)).isNull();
     }
 
     @Test
