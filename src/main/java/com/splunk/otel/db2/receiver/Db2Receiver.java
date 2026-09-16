@@ -138,7 +138,7 @@ public class Db2Receiver {
                 querySampleConnSupplier,
                 config.getDatabase(),
                 otelLogger,
-                intervalSeconds)
+                config.getBlockingSessionIntervalDuration().getSeconds())
             : null;
 
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {

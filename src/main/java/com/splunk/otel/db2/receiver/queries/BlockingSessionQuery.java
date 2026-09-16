@@ -201,7 +201,7 @@ public class BlockingSessionQuery {
 
     private String fetchIdleBlockerSql(Connection conn, long blockerHandle, long blockerMember) {
         // Use -2 (all members) as fallback for single-member environments where HLD_MEMBER may be 0
-        int member = blockerMember > 0 ? (int) blockerMember : -2;
+        int member = blockerMember >= 0 ? (int) blockerMember : -2;
         try (java.sql.PreparedStatement ps = conn.prepareStatement(IDLE_BLOCKER_SQL)) {
             ps.setQueryTimeout(queryTimeoutSeconds);
             ps.setLong(1, blockerHandle);

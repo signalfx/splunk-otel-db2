@@ -11,7 +11,7 @@ resource_attributes:
     type: string
     enabled: true
   db.system.name:
-    description: The database management system. Always db2 for this receiver.
+    description: The database management system. Always ibm.db2 for this receiver.
     type: string
     enabled: true
   server.address:
@@ -140,7 +140,7 @@ attributes:
     type: string
   db2.blocking.start_time:
     description: >
-      Timestamp when the lock wait began (MON_LOCKWAITS.LOCK_WAIT_START_TIME).
+      Approximate timestamp when the lock wait began (reconstructed as now minus LOCK_WAIT_ELAPSED_TIME).
     type: string
   db2.blocking.wait_duration:
     description: Elapsed time since the lock wait began, in seconds.
@@ -385,11 +385,11 @@ events:
       - db.namespace
       - db2.member
       - db.query.text                          # blocked session SQL
-      - db2.application_handle                 # blocked session handle
+      - db2.session_id                         # blocked session handle
       - db2.activity_state                     # blocked session state+type
       - user.name                              # blocked session user
       - client.address                         # blocked session host
-      - db2.blocking.blocker.application_handle
+      - db2.blocking.blocker.session_id
       - db2.blocking.blocker.user
       - db2.blocking.blocker.client_address
       - db2.blocking.blocker.query_text        # omitted if unavailable
@@ -412,7 +412,7 @@ events:
       - db.system.name
       - db.namespace
       - db.query.text
-      - db2.application_handle
+      - db2.session_id
       - db2.activity_state
       - db2.query_start
       - db2.session.duration
@@ -435,8 +435,8 @@ events:
       - db.namespace
       - db.query.text
       - db2.member
-      - db2.executions
-      - db2.total_exec_time
+      - db2.num_executions
+      - db2.total_elapsed_time
       - db2.avg_exec_time
       - db2.total_cpu_time
       - db2.rows_read
