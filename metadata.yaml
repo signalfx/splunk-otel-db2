@@ -140,7 +140,8 @@ attributes:
     type: string
   db2.blocking.start_time:
     description: >
-      Approximate timestamp when the lock wait began (reconstructed as now minus LOCK_WAIT_ELAPSED_TIME).
+      Timestamp when the lock wait began. Exact (from LOCK_WAIT_START_TIME) on the default
+      SYSMON path; approximated as now minus LOCK_WAIT_ELAPSED_TIME on the enhanced path.
     type: string
   db2.blocking.wait_duration:
     description: >
@@ -375,13 +376,18 @@ events:
   db.server.blocking_session:
     enabled: false
     description: >
-      A blocked→blocker lock pair from SYSIBMADM.MON_LOCKWAITS. Each record represents
-      one session waiting on a lock held by another. SQL text for both sides is obfuscated
-      before emission — literal values are replaced with ?. For idle blockers (holding an
-      open transaction but not actively executing), the blocker's last statement is looked
-      up from MON_GET_PKG_CACHE_STMT. Runs automatically on every query_sample_interval
-      tick when query_sample_enabled: true (MON_CURRENT_SQL / default path only).
-      Emitted as OTel log records with severity WARN.
+      A blocked→blocker lock pair. Each record represents one session waiting on a lock
+      held by another. Emitted as OTel log records with severity WARN.
+
+      Default path (use_snapshot_monitor: false, SYSMON authority sufficient):
+        Reads SYSIBMADM.LOCKWAITS. Provides exact blocking start time (LOCK_WAIT_START_TIME),
+        lock details, and blocked user. SQL text and blocker user/host are not available.
+
+      Enhanced path (use_snapshot_monitor: true, explicit GRANTs required):
+        Reads SYSIBMADM.MON_LOCKWAITS joined with MON_CURRENT_SQL and MON_GET_CONNECTION.
+        Provides obfuscated SQL text for both sides, user/host for both sides, activity state,
+        and idle-blocker lookup from MON_GET_PKG_CACHE_STMT. Start time approximated as
+        now minus LOCK_WAIT_ELAPSED_TIME.
     attributes:
       - db.system.name
       - db.namespace
