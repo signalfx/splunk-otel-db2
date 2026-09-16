@@ -58,13 +58,13 @@ class BlockingSessionQueryTest {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L, true);
     }
 
-    // Default path: MON_LOCKWAITS columns — waitElapsedMs from LOCK_WAIT_ELAPSED_TIME (INTEGER ms).
+    // Default path: MON_LOCKWAITS columns — waitElapsedSec from LOCK_WAIT_ELAPSED_TIME (INTEGER seconds).
     private void stubRow(long blockedHandle, long blockerHandle,
                          String blockedSql, String blockerSql,
                          String activityState, String blockedUser, String blockedHost,
                          String blockerUser, String blockerHost,
                          String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                         long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
+                         long waitElapsedSec, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
@@ -80,7 +80,7 @@ class BlockingSessionQueryTest {
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getLong("WAIT_ELAPSED_MS")).thenReturn(waitElapsedMs);
+        when(rs.getLong("WAIT_ELAPSED_SEC")).thenReturn(waitElapsedSec);
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
@@ -112,7 +112,7 @@ class BlockingSessionQueryTest {
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
-            3000L, 0L, false);
+            3L, 0L, false);
 
         query().collect();
 
@@ -266,7 +266,7 @@ class BlockingSessionQueryTest {
     void defaultPathUsesElapsedMs() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 3000L, 0L, false);
+            null, null, null, null, null, null, 3L, 0L, false);
 
         query().collect();
 

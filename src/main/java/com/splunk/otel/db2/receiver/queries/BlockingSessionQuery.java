@@ -51,7 +51,7 @@ public class BlockingSessionQuery {
         "  LW.TABNAME                              AS LOCK_OBJECT, " +
         "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
         "  LW.LOCK_MODE                            AS LOCK_MODE, " +
-        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_MS, " +
+        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_SEC, " +
         "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
         "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
         "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
@@ -171,10 +171,10 @@ public class BlockingSessionQuery {
                             blockerUser    = null;
                             blockerHost    = null;
                         } else {
-                            // Default path: approximate start time from elapsed ms
-                            long elapsedMs = rs.getLong("WAIT_ELAPSED_MS");
-                            waitMs       = elapsedMs;
-                            waitStartStr = new Timestamp(now.toEpochMilli() - elapsedMs).toString();
+                            // Default path: approximate start time from elapsed seconds
+                            long elapsedSec = rs.getLong("WAIT_ELAPSED_SEC");
+                            waitMs       = elapsedSec * 1000L;
+                            waitStartStr = new Timestamp(now.toEpochMilli() - waitMs).toString();
                             blockedRawSql  = rs.getString("BLOCKED_SQL");
                             blockerRawSql  = rs.getString("BLOCKER_SQL");
                             activityState  = rs.getString("ACTIVITY_STATE");

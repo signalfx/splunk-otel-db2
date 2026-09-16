@@ -146,7 +146,7 @@ attributes:
   db2.blocking.wait_duration:
     description: >
       Elapsed time since the lock wait began, in seconds
-      (converted from MON_LOCKWAITS.LOCK_WAIT_ELAPSED_TIME which is in milliseconds).
+      (from MON_LOCKWAITS.LOCK_WAIT_ELAPSED_TIME which is in seconds on Db2 11.5).
     type: double
 
   # --- query sample event attributes ---
