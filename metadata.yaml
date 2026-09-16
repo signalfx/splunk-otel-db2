@@ -65,10 +65,10 @@ attributes:
     enum: [capacity, used, free]
 
   # --- top query event attributes ---
-  db2.executions:
+  db2.num_executions:
     description: Number of times the statement has been executed.
     type: int
-  db2.total_exec_time:
+  db2.total_elapsed_time:
     description: >
       Interval delta of statement execution elapsed time, in seconds.
       Computed as the difference in STMT_EXEC_TIME between two consecutive collections.
@@ -102,8 +102,8 @@ attributes:
     type: string
 
   # --- blocking session event attributes ---
-  db2.blocking.blocker.application_handle:
-    description: Application handle of the session holding the lock (blocker).
+  db2.blocking.blocker.session_id:
+    description: Session identifier (application handle) of the session holding the lock (blocker).
     type: string
   db2.blocking.blocker.user:
     description: Authenticated user ID of the blocker.
@@ -150,8 +150,8 @@ attributes:
   db.query.text:
     description: Obfuscated SQL statement text. Literal values replaced with ?.
     type: string
-  db2.application_handle:
-    description: Application handle / agent ID.
+  db2.session_id:
+    description: Session identifier (application handle) of the active connection.
     type: string
   db2.activity_state:
     description: >

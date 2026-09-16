@@ -50,15 +50,17 @@ class BlockingSessionQueryTest {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L);
     }
 
-    // waitElapsedUs: microseconds the blocked session has been waiting (LOCK_WAIT_ELAPSED_TIME)
+    // waitElapsedSec: seconds the blocked session has been waiting (LOCK_WAIT_ELAPSED_TIME, IBM units = seconds)
     private void stubRow(long blockedHandle, long blockerHandle,
                           String blockedSql, String blockerSql,
                           String activityState, String blockedUser, String blockedHost,
                           String blockerUser, String blockerHost,
                           String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          long waitElapsedUs, long member, boolean blockerIsIdle) throws Exception {
+                          long waitElapsedSec, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
+        when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(member);
         when(rs.getString("BLOCKED_SQL")).thenReturn(blockedSql);
         when(rs.getString("BLOCKER_SQL")).thenReturn(blockerSql);
         when(rs.getString("ACTIVITY_STATE")).thenReturn(activityState);
@@ -70,21 +72,20 @@ class BlockingSessionQueryTest {
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getLong("WAIT_ELAPSED_US")).thenReturn(waitElapsedUs);
-        when(rs.getLong("MEMBER")).thenReturn(member);
+        when(rs.getLong("WAIT_ELAPSED_SEC")).thenReturn(waitElapsedSec);
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // 3 seconds elapsed = 3_000_000 microseconds
+        // 3 seconds elapsed (LOCK_WAIT_ELAPSED_TIME is in seconds per IBM docs)
         stubRow(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
-            3_000_000L, 0L, false);
+            3L, 0L, false);
 
         query().collect();
 
@@ -251,8 +252,11 @@ class BlockingSessionQueryTest {
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(2L, 4L);
         when(rs.getString("BLOCKED_SQL")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T");
         when(rs.getString(argThat(s -> !s.equals("BLOCKED_SQL")))).thenReturn(null);
-        when(rs.getLong(argThat(s -> !s.equals("BLOCKED_HANDLE") && !s.equals("BLOCKER_HANDLE"))))
+        when(rs.getLong(argThat(s -> !s.equals("BLOCKED_HANDLE") && !s.equals("BLOCKER_HANDLE")
+                && !s.equals("BLOCKED_MEMBER") && !s.equals("BLOCKER_MEMBER"))))
             .thenReturn(0L);
+        when(rs.getLong("BLOCKED_MEMBER")).thenReturn(0L);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(0L);
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(0);
 
         query().collect();

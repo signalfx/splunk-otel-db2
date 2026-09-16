@@ -19,9 +19,9 @@ import java.util.function.Supplier;
  * {@code SYSIBMADM.MON_CURRENT_SQL} (both sides) and {@code MON_GET_CONNECTION}
  * (both sides for user/host). All members (-2 on MON_GET_CONNECTION).
  *
- * Wait duration: {@code LOCK_WAIT_ELAPSED_TIME} (microseconds elapsed since
- * the lock wait began) is used instead of the non-existent LOCK_WAIT_START_TIME.
- * The approximate start time is reconstructed as now − elapsed.
+ * Wait duration: {@code LOCK_WAIT_ELAPSED_TIME} (seconds elapsed since the lock
+ * wait began per IBM documentation) is used. The approximate start time is
+ * reconstructed as now − elapsed.
  *
  * Idle-blocker handling: the blocker may not appear in MON_CURRENT_SQL if it is
  * idle (holding an open transaction). The query uses a LEFT JOIN so those rows
@@ -55,17 +55,18 @@ public class BlockingSessionQuery {
     public static final String SQL =
         "SELECT " +
         "  LW.REQ_APPLICATION_HANDLE               AS BLOCKED_HANDLE, " +
+        "  LW.REQ_MEMBER                           AS BLOCKED_MEMBER, " +
         "  LW.HLD_APPLICATION_HANDLE               AS BLOCKER_HANDLE, " +
+        "  LW.HLD_MEMBER                           AS BLOCKER_MEMBER, " +
         "  LW.TABSCHEMA                            AS LOCK_SCHEMA, " +
         "  LW.TABNAME                              AS LOCK_OBJECT, " +
         "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
         "  LW.LOCK_MODE                            AS LOCK_MODE, " +
-        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_US, " +
+        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_SEC, " +
         "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
         "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
         "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
         "  BLOCKED_CON.CLIENT_WRKSTNNAME           AS BLOCKED_HOST, " +
-        "  BLOCKED_CON.MEMBER                      AS MEMBER, " +
         "  BLOCKER_SQL.STMT_TEXT                   AS BLOCKER_SQL, " +
         "  BLOCKER_CON.SESSION_AUTH_ID             AS BLOCKER_USER, " +
         "  BLOCKER_CON.CLIENT_WRKSTNNAME           AS BLOCKER_HOST, " +
@@ -73,24 +74,28 @@ public class BlockingSessionQuery {
         "FROM SYSIBMADM.MON_LOCKWAITS LW " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKED_SQL " +
         "  ON BLOCKED_SQL.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
+        "  AND BLOCKED_SQL.MEMBER = LW.REQ_MEMBER " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS C1) BLOCKED_CON " +
         "  ON BLOCKED_CON.APPLICATION_HANDLE = LW.REQ_APPLICATION_HANDLE " +
+        "  AND BLOCKED_CON.MEMBER = LW.REQ_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        "  AND BLOCKER_SQL.MEMBER = LW.HLD_MEMBER " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2)) AS C2) BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        "  AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
         "WITH UR";
 
     // Idle blocker lookup: resolve the blocker's LAST_EXECUTABLE_ID from
-    // MON_GET_CONNECTION, then fetch the matching statement from the plan cache.
-    // MON_GET_PKG_CACHE_STMT has no APPLICATION_HANDLE column — EXECUTABLE_ID is
-    // the correct join key.
+    // MON_GET_CONNECTION on the blocker's member, then fetch the matching statement
+    // from the plan cache on that same member. IBM's documented lookup constrains
+    // both TVFs to the holding member.
     private static final String IDLE_BLOCKER_SQL =
         "SELECT P.STMT_TEXT " +
-        "FROM TABLE(MON_GET_CONNECTION(CAST(? AS BIGINT), -2)) AS C " +
-        "JOIN TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, -2)) AS P " +
+        "FROM TABLE(MON_GET_CONNECTION(CAST(? AS BIGINT), CAST(? AS INTEGER))) AS C " +
+        "JOIN TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, CAST(? AS INTEGER))) AS P " +
         "  ON P.EXECUTABLE_ID = C.LAST_EXECUTABLE_ID " +
         "WHERE P.NUM_EXECUTIONS > 0 " +
         "  AND P.STMT_TEXT NOT LIKE '%%MON_GET_PKG_CACHE_STMT%%' " +
@@ -120,25 +125,26 @@ public class BlockingSessionQuery {
                 st.setQueryTimeout(queryTimeoutSeconds);
                 try (ResultSet rs = st.executeQuery(SQL)) {
                     while (rs.next()) {
-                        String blockedHandle  = String.valueOf(rs.getLong("BLOCKED_HANDLE"));
-                        String blockerHandle  = String.valueOf(rs.getLong("BLOCKER_HANDLE"));
-                        String blockedRawSql  = rs.getString("BLOCKED_SQL");
-                        String blockerRawSql  = rs.getString("BLOCKER_SQL");
-                        String activityState  = rs.getString("ACTIVITY_STATE");
-                        String blockedUser    = rs.getString("BLOCKED_USER");
-                        String blockedHost    = rs.getString("BLOCKED_HOST");
-                        String blockerUser    = rs.getString("BLOCKER_USER");
-                        String blockerHost    = rs.getString("BLOCKER_HOST");
-                        String lockSchema     = rs.getString("LOCK_SCHEMA");
-                        String lockObject     = rs.getString("LOCK_OBJECT");
-                        String lockObjectType = rs.getString("LOCK_OBJECT_TYPE");
-                        String lockMode       = rs.getString("LOCK_MODE");
-                        long waitElapsedUs    = rs.getLong("WAIT_ELAPSED_US");
-                        long member           = rs.getLong("MEMBER");
-                        boolean blockerIsIdle = rs.getInt("BLOCKER_IS_IDLE") == 1;
+                        String blockedHandle   = String.valueOf(rs.getLong("BLOCKED_HANDLE"));
+                        long   blockedMember   = rs.getLong("BLOCKED_MEMBER");
+                        String blockerHandle   = String.valueOf(rs.getLong("BLOCKER_HANDLE"));
+                        long   blockerMember   = rs.getLong("BLOCKER_MEMBER");
+                        String blockedRawSql   = rs.getString("BLOCKED_SQL");
+                        String blockerRawSql   = rs.getString("BLOCKER_SQL");
+                        String activityState   = rs.getString("ACTIVITY_STATE");
+                        String blockedUser     = rs.getString("BLOCKED_USER");
+                        String blockedHost     = rs.getString("BLOCKED_HOST");
+                        String blockerUser     = rs.getString("BLOCKER_USER");
+                        String blockerHost     = rs.getString("BLOCKER_HOST");
+                        String lockSchema      = rs.getString("LOCK_SCHEMA");
+                        String lockObject      = rs.getString("LOCK_OBJECT");
+                        String lockObjectType  = rs.getString("LOCK_OBJECT_TYPE");
+                        String lockMode        = rs.getString("LOCK_MODE");
+                        long waitElapsedSec    = rs.getLong("WAIT_ELAPSED_SEC");
+                        boolean blockerIsIdle  = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
-                        // LOCK_WAIT_ELAPSED_TIME is in microseconds; convert to ms
-                        long waitMs = waitElapsedUs > 0 ? waitElapsedUs / 1000 : -1;
+                        // LOCK_WAIT_ELAPSED_TIME is in seconds (IBM docs); convert to ms for waitDurationMillis
+                        long waitMs = waitElapsedSec > 0 ? waitElapsedSec * 1000 : -1;
                         // Reconstruct approximate start time from elapsed
                         String waitStartStr = waitMs >= 0
                             ? new Timestamp(now.toEpochMilli() - waitMs).toString() : null;
@@ -163,11 +169,12 @@ public class BlockingSessionQuery {
                         }
 
                         // For idle blockers with no SQL in MON_CURRENT_SQL, try plan cache lookup
+                        // Pass the blocker's member so the package-cache lookup targets the correct member
                         if (blockerIsIdle && blockerObfuscated == null) {
-                            blockerObfuscated = fetchIdleBlockerSql(conn, rs.getLong("BLOCKER_HANDLE"));
+                            blockerObfuscated = fetchIdleBlockerSql(conn, rs.getLong("BLOCKER_HANDLE"), blockerMember);
                         }
 
-                        BlockingSessionEvent.of(dbName, member, blockedHandle, blockerHandle)
+                        BlockingSessionEvent.of(dbName, blockedMember, blockedHandle, blockerHandle)
                             .blockedQueryText(blockedObfuscated)
                             .activityState(trim(activityState))
                             .blockedUser(blockedUser)
@@ -194,10 +201,14 @@ public class BlockingSessionQuery {
         log.debug("BlockingSessionQuery: emitted {} blocking pairs", emitCount);
     }
 
-    private String fetchIdleBlockerSql(Connection conn, long blockerHandle) {
+    private String fetchIdleBlockerSql(Connection conn, long blockerHandle, long blockerMember) {
+        // Use -2 (all members) as fallback for single-member environments where HLD_MEMBER may be 0
+        int member = blockerMember > 0 ? (int) blockerMember : -2;
         try (java.sql.PreparedStatement ps = conn.prepareStatement(IDLE_BLOCKER_SQL)) {
             ps.setQueryTimeout(queryTimeoutSeconds);
             ps.setLong(1, blockerHandle);
+            ps.setInt(2, member);
+            ps.setInt(3, member);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     String raw = rs.getString("STMT_TEXT");
@@ -208,7 +219,7 @@ public class BlockingSessionQuery {
                 }
             }
         } catch (Exception e) {
-            log.debug("BlockingSessionQuery: idle blocker SQL lookup failed for handle={}: {}", blockerHandle, e.getMessage());
+            log.debug("BlockingSessionQuery: idle blocker SQL lookup failed for handle={} member={}: {}", blockerHandle, blockerMember, e.getMessage());
         }
         return null;
     }
