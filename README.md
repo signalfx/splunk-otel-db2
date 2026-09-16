@@ -206,7 +206,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
-| `db2.application_handle` | Application handle / agent ID |
+| `db2.session_id` | Session identifier (DB2 application handle) |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
@@ -244,15 +244,15 @@ receivers:
 
 | Attribute | Description |
 |---|---|
-| `db.system.name` | Always `db2` |
+| `db.system.name` | Always `ibm.db2` |
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL of the **blocked** session |
-| `db2.application_handle` | Application handle of the blocked session |
+| `db2.session_id` | Session identifier of the blocked session (DB2 application handle) |
 | `db2.activity_state` | Activity state of the blocked session (e.g. `LOCK_WAIT READ_DML`) |
 | `db2.member` | Db2 member number |
 | `user.name` | Authenticated user of the blocked session |
 | `client.address` | Client workstation of the blocked session |
-| `db2.blocking.blocker.application_handle` | Application handle of the blocking session |
+| `db2.blocking.blocker.session_id` | Session identifier of the blocking session (DB2 application handle) |
 | `db2.blocking.blocker.user` | Authenticated user of the blocker |
 | `db2.blocking.blocker.client_address` | Client workstation of the blocker |
 | `db2.blocking.blocker.query_text` | Obfuscated SQL of the blocker (from `MON_CURRENT_SQL`; idle blockers fall back to `MON_GET_PKG_CACHE_STMT`; omitted if unavailable) |
@@ -298,8 +298,8 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db2.member` | Db2 member number |
-| `db2.executions` | Total executions added during this interval |
-| `db2.total_exec_time` | Interval execution elapsed time in seconds |
+| `db2.num_executions` | Total executions added during this interval |
+| `db2.total_elapsed_time` | Interval execution elapsed time in seconds |
 | `db2.avg_exec_time` | Average execution time per execution this interval, in seconds |
 | `db2.total_cpu_time` | Interval CPU time in seconds |
 | `db2.rows_read` | Rows read during this interval |
