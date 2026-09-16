@@ -222,13 +222,15 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 ## Blocking sessions (log records)
 
-Lock contention is detected at `blocking_session_interval` and emitted as OTel log records (severity WARN). Disabled by default — set `blocking_session_enabled: true` to opt in. SQL text for both the blocked and blocker session is obfuscated before emission.
+Lock contention is detected automatically whenever query sampling is enabled. When a sampled session is waiting for a lock (`LOCKWAIT`), its `db.server.query_sample` record is enriched with blocking attributes and emitted at severity WARN. No separate flag is needed.
 
-Each record represents one blocked→blocker pair from `SYSIBMADM.MON_LOCKWAITS`. If the blocker is idle (holding an open transaction but not currently executing), its last statement is looked up from `MON_GET_PKG_CACHE_STMT`.
+- `query_sample_enabled: true` enables both query samples and blocking detection.
+- `query_sample_interval` controls the poll cadence for both.
+- Both share the same `querySampleConnection`.
 
-The log record's native `event_name` field is set to `db.server.blocking_session`.
+If the blocker is idle (holding an open transaction but not currently executing), its last statement is looked up from `MON_GET_PKG_CACHE_STMT` and attached as `db2.blocking.blocker.query_text`.
 
-Blocking session detection runs on the same connection and interval as query sampling — enable it alongside `query_sample_enabled` or on its own:
+Blocking detection is available on the **default path only** (`use_snapshot_monitor: false`). The snapshot path emits query samples at INFO severity without blocking attributes.
 
 ```yaml
 receivers:
@@ -237,9 +239,8 @@ receivers:
     database: "SAMPLE"
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
-    query_sample_enabled: true         # optional — share the same poll tick
-    blocking_session_enabled: true     # polls MON_LOCKWAITS at query_sample_interval
-    query_sample_interval: "10s"       # controls the poll cadence for both
+    query_sample_enabled: true    # enables query sampling and blocking detection
+    query_sample_interval: "10s"  # controls poll cadence for both
 ```
 
 | Attribute | Description |
@@ -256,7 +257,7 @@ receivers:
 | `db2.blocking.blocker.user` | Authenticated user of the blocker |
 | `db2.blocking.blocker.client_address` | Client workstation of the blocker |
 | `db2.blocking.blocker.query_text` | Obfuscated SQL of the blocker (from `MON_CURRENT_SQL`; idle blockers fall back to `MON_GET_PKG_CACHE_STMT`; omitted if unavailable) |
-| `db2.blocking.blocker.is_idle` | `true` when the blocker has no active statement — it holds an open transaction but is not currently executing |
+| `db2.blocking.blocker.is_idle` | `true` when the blocker has no active statement — it holds an open transaction but is not currently executing (omitted on snapshot path) |
 | `db2.blocking.lock.object_type` | DB2 lock object type (`ROW`, `TABLE`, `TABLESPACE`, `PLAN`, `INTERNAL`, …) |
 | `db2.blocking.lock.mode` | DB2 lock mode (`S`, `X`, `IX`, `IS`, `SIX`, `U`, `NS`, `NX`, …) |
 | `db2.blocking.lock.object_name` | Name of the locked table or object |
@@ -343,23 +344,20 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
 -- Db2 10.5+ wait time attribute (db2.wait_time)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
--- Blocking session detection (blocking_session_enabled: true)
+-- Blocking session detection (runs automatically with query_sample_enabled: true)
 GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
--- MON_CURRENT_SQL already granted above for query sampling; add it here if not using query sampling:
--- GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
--- MON_GET_CONNECTION already granted above.
--- MON_GET_PKG_CACHE_STMT already granted above for top queries; add it here if not using top queries:
--- GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
+-- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
 
 -- Snapshot monitor path (use_snapshot_monitor: true)
+-- Note: blocking detection is NOT available on this path.
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
 -- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
--- Also requires DFT_MON_STMT ON. Run the following as SYSADM, then restart the instance:
---   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
+-- Also requires DFT_MON_STMT ON and DFT_MON_LOCK ON. Run as SYSADM, then restart the instance:
+--   db2 UPDATE DBM CFG USING DFT_MON_STMT ON DFT_MON_LOCK ON
 --   db2stop force && db2start
--- DFT_MON_STMT ON takes effect only after the instance is cycled; without the restart
--- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
+-- Both settings take effect only after the instance is cycled; without the restart
+-- new connections inherit the old defaults and SNAP_GET_STMT returns no statement text.
 ```
 
 > **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.

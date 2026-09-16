@@ -1,7 +1,6 @@
 package com.splunk.otel.db2.receiver;
 
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
-import com.splunk.otel.db2.receiver.queries.BlockingSessionQuery;
 import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
 import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
@@ -30,7 +29,7 @@ public class Db2Receiver {
 
     // Each collector has its own connection so they never contend:
     //   metricsConnection     — DatabaseQuery, BufferpoolQuery, TablespaceQuery (OTel SDK reader thread)
-    //   querySampleConnection — QuerySampleQuery + co-located BlockingSessionQuery (db2-query-sampler thread)
+    //   querySampleConnection — QuerySampleQuery (includes blocking detection) (db2-query-sampler thread)
     //   topQueryConnection    — TopQueryQuery (db2-top-query-collector thread)
     private final Db2Connection metricsConnection;
     private Db2Connection querySampleConnection;
@@ -120,11 +119,6 @@ public class Db2Receiver {
             db2Version,
             querySampleTimeoutSeconds);
 
-        // Blocking session always co-located with query sample, same interval.
-        BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
-            querySampleConnSupplier, config.getDatabase(), otelLogger,
-            intervalSeconds, config.isUseSnapshotMonitor());
-
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
             t.setDaemon(true);
@@ -136,11 +130,6 @@ public class Db2Receiver {
                     querySampleQuery.collect();
                 } catch (Exception e) {
                     log.warn("[{}] Query sample collection error: {}", label, e.getMessage());
-                }
-                try {
-                    blockingSessionQuery.collect();
-                } catch (Exception e) {
-                    log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
                 }
             },
             0, intervalSeconds, TimeUnit.SECONDS
