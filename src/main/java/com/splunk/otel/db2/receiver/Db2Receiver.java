@@ -29,17 +29,14 @@ public class Db2Receiver {
     private final String label; // e.g. "[prod] db2host:50000/TESTDB" — for log context (A3)
 
     // Each collector has its own connection so they never contend:
-    //   metricsConnection         — DatabaseQuery, BufferpoolQuery, TablespaceQuery (OTel SDK reader thread)
-    //   querySampleConnection     — QuerySampleQuery + co-located BlockingSessionQuery (db2-query-sampler thread)
-    //   blockingSessionConnection — BlockingSessionQuery when running standalone (db2-blocking-session thread)
-    //   topQueryConnection        — TopQueryQuery (db2-top-query-collector thread)
+    //   metricsConnection     — DatabaseQuery, BufferpoolQuery, TablespaceQuery (OTel SDK reader thread)
+    //   querySampleConnection — QuerySampleQuery + co-located BlockingSessionQuery (db2-query-sampler thread)
+    //   topQueryConnection    — TopQueryQuery (db2-top-query-collector thread)
     private final Db2Connection metricsConnection;
     private Db2Connection querySampleConnection;
-    private Db2Connection blockingSessionConnection;
     private Db2Connection topQueryConnection;
 
     private ScheduledExecutorService querySampleScheduler;
-    private ScheduledExecutorService blockingSessionScheduler;
     private ScheduledExecutorService topQueryScheduler;
 
     private final AtomicBoolean stopped = new AtomicBoolean(false); // B3: idempotent stop
@@ -93,13 +90,6 @@ public class Db2Receiver {
             startQuerySampleScheduler(db2Version);
         }
 
-        // Blocking session runs co-located with query sample when both are enabled.
-        // When only blocking_session_enabled is set (query_sample_enabled=false), it
-        // gets its own dedicated connection and scheduler.
-        if (otelLogger != null && config.isBlockingSessionEnabled()
-                && !config.isQuerySampleEnabled()) {
-            startBlockingSessionScheduler();
-        }
 
         if (otelLogger != null && config.isTopQueryEnabled()) {
             long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
@@ -130,23 +120,16 @@ public class Db2Receiver {
             db2Version,
             querySampleTimeoutSeconds);
 
-        // Co-locate blocking session on the query-sample scheduler when enabled.
-        // Run it every blockingEvery ticks so its cadence matches blocking_session_interval.
-        long blockingIntervalSeconds = config.isBlockingSessionEnabled()
-            ? config.getBlockingSessionIntervalDuration().getSeconds() : 0;
-        BlockingSessionQuery blockingSessionQuery = config.isBlockingSessionEnabled()
-            ? new BlockingSessionQuery(querySampleConnSupplier, config.getDatabase(), otelLogger,
-                blockingIntervalSeconds, config.isUseSnapshotMonitor())
-            : null;
-        long blockingEvery = blockingSessionQuery != null
-            ? Math.max(1, blockingIntervalSeconds / intervalSeconds) : 0;
+        // Blocking session always co-located with query sample, same interval.
+        BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
+            querySampleConnSupplier, config.getDatabase(), otelLogger,
+            intervalSeconds, config.isUseSnapshotMonitor());
 
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
             t.setDaemon(true);
             return t;
         });
-        final long[] tick = {0};
         querySampleScheduler.scheduleAtFixedRate(
             () -> {
                 try {
@@ -154,40 +137,6 @@ public class Db2Receiver {
                 } catch (Exception e) {
                     log.warn("[{}] Query sample collection error: {}", label, e.getMessage());
                 }
-                if (blockingSessionQuery != null && tick[0] % blockingEvery == 0) {
-                    try {
-                        blockingSessionQuery.collect();
-                    } catch (Exception e) {
-                        log.warn("[{}] Blocking session collection error: {}", label, e.getMessage());
-                    }
-                }
-                tick[0]++;
-            },
-            0, intervalSeconds, TimeUnit.SECONDS
-        );
-    }
-
-    void startBlockingSessionScheduler() {
-        blockingSessionConnection = new Db2Connection(config, label);
-        Supplier<Connection> connSupplier = () -> {
-            try {
-                return blockingSessionConnection.getOrConnect();
-            } catch (SQLException e) {
-                throw new RuntimeException("[" + label + "] DB2 blocking-session connection failed: " + e.getMessage(), e);
-            }
-        };
-        long intervalSeconds = config.getBlockingSessionIntervalDuration().getSeconds();
-        BlockingSessionQuery blockingSessionQuery = new BlockingSessionQuery(
-            connSupplier, config.getDatabase(), otelLogger, intervalSeconds,
-            config.isUseSnapshotMonitor());
-
-        blockingSessionScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "db2-blocking-session[" + label + "]");
-            t.setDaemon(true);
-            return t;
-        });
-        blockingSessionScheduler.scheduleAtFixedRate(
-            () -> {
                 try {
                     blockingSessionQuery.collect();
                 } catch (Exception e) {
@@ -197,6 +146,7 @@ public class Db2Receiver {
             0, intervalSeconds, TimeUnit.SECONDS
         );
     }
+
 
     // Package-private: allows integration tests to inject a short interval without violating the
     // production minimum. Production code always calls start() which enforces the 60s minimum
@@ -277,8 +227,7 @@ public class Db2Receiver {
     public void stopScheduler() {
         // B4: graceful drain — let the current collection cycle finish, then force-stop
         shutdownGracefully(querySampleScheduler,     "db2-query-sampler");
-        shutdownGracefully(blockingSessionScheduler, "db2-blocking-session");
-        shutdownGracefully(topQueryScheduler,        "db2-top-query-collector");
+        shutdownGracefully(topQueryScheduler, "db2-top-query-collector");
     }
 
     private void shutdownGracefully(ScheduledExecutorService scheduler, String name) {
@@ -297,9 +246,8 @@ public class Db2Receiver {
 
     public void closeConnection() {
         metricsConnection.close();
-        if (querySampleConnection     != null) querySampleConnection.close();
-        if (blockingSessionConnection != null) blockingSessionConnection.close();
-        if (topQueryConnection        != null) topQueryConnection.close();
+        if (querySampleConnection != null) querySampleConnection.close();
+        if (topQueryConnection    != null) topQueryConnection.close();
         log.info("[{}] DB2 receiver stopped", label);
     }
 }

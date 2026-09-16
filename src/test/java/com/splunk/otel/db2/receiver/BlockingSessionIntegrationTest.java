@@ -116,7 +116,6 @@ class BlockingSessionIntegrationTest {
         config.setDatabase(db2.getDatabaseName().toUpperCase());
         config.setCollectionInterval("2s");
         config.setQuerySampleEnabled(true);
-        config.setBlockingSessionEnabled(true);
         config.setQuerySampleInterval("2s");
         config.getTls().setInsecure(true);
         return config;

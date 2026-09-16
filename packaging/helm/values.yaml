@@ -69,8 +69,6 @@ receivers:
       insecure: true
     topQueryEnabled: false
     querySampleEnabled: false
-    blockingSessionEnabled: false
-    blockingSessionInterval: "10s"
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────
 otlp:

@@ -285,8 +285,6 @@ class Db2ReceiverSnapshotIntegrationTest {
         Thread.sleep(2000); // let the lock wait establish
 
         Db2ReceiverConfig config = buildSnapshotConfig();
-        config.setBlockingSessionEnabled(true);
-        config.setBlockingSessionInterval("2s");
 
         Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
         receiver.start();
