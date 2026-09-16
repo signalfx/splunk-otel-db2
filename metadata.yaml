@@ -143,7 +143,9 @@ attributes:
       Approximate timestamp when the lock wait began (reconstructed as now minus LOCK_WAIT_ELAPSED_TIME).
     type: string
   db2.blocking.wait_duration:
-    description: Elapsed time since the lock wait began, in seconds.
+    description: >
+      Elapsed time since the lock wait began, in seconds
+      (converted from MON_LOCKWAITS.LOCK_WAIT_ELAPSED_TIME which is in milliseconds).
     type: double
 
   # --- query sample event attributes ---

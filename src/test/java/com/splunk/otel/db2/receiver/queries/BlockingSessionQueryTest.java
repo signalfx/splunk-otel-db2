@@ -50,13 +50,13 @@ class BlockingSessionQueryTest {
         return new BlockingSessionQuery(() -> conn, "TESTDB", otelLogger, 10L);
     }
 
-    // waitElapsedSec: seconds the blocked session has been waiting (LOCK_WAIT_ELAPSED_TIME, IBM units = seconds)
+    // waitElapsedMs: milliseconds the blocked session has been waiting (LOCK_WAIT_ELAPSED_TIME, IBM units = ms)
     private void stubRow(long blockedHandle, long blockerHandle,
                           String blockedSql, String blockerSql,
                           String activityState, String blockedUser, String blockedHost,
                           String blockerUser, String blockerHost,
                           String lockSchema, String lockObject, String lockObjectType, String lockMode,
-                          long waitElapsedSec, long member, boolean blockerIsIdle) throws Exception {
+                          long waitElapsedMs, long member, boolean blockerIsIdle) throws Exception {
         when(rs.getLong("BLOCKED_HANDLE")).thenReturn(blockedHandle);
         when(rs.getLong("BLOCKED_MEMBER")).thenReturn(member);
         when(rs.getLong("BLOCKER_HANDLE")).thenReturn(blockerHandle);
@@ -72,20 +72,20 @@ class BlockingSessionQueryTest {
         when(rs.getString("LOCK_OBJECT")).thenReturn(lockObject);
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn(lockObjectType);
         when(rs.getString("LOCK_MODE")).thenReturn(lockMode);
-        when(rs.getLong("WAIT_ELAPSED_SEC")).thenReturn(waitElapsedSec);
+        when(rs.getLong("WAIT_ELAPSED_MS")).thenReturn(waitElapsedMs);
         when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(blockerIsIdle ? 1 : 0);
     }
 
     @Test
     void emitsObfuscatedLogRecordWithAllAttributes() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        // 3 seconds elapsed (LOCK_WAIT_ELAPSED_TIME is in seconds per IBM docs)
+        // 3000 ms elapsed (LOCK_WAIT_ELAPSED_TIME is in milliseconds per IBM column type INTEGER)
         stubRow(111L, 222L,
             "SELECT * FROM T WHERE ID = 99", "UPDATE T SET X = 1 WHERE ID = 99",
             "LOCK_WAIT READ_DML", "user1", "host1",
             "user2", "host2",
             "DB2INST1", "ORDERS", "ROW", "X",
-            3L, 0L, false);
+            3000L, 0L, false);
 
         query().collect();
 
@@ -213,17 +213,18 @@ class BlockingSessionQueryTest {
     }
 
     @Test
-    void zeroWaitElapsedResultsInNegativeWaitDurationOmitted() throws Exception {
+    void zeroWaitElapsedEmitsZeroDuration() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow(1L, 2L, "SELECT 1 FROM T", null, null, null, null,
-            null, null, null, null, null, null, 0L /* zero elapsed */, 0L, false);
+            null, null, null, null, null, null, 0L /* zero ms elapsed */, 0L, false);
 
         query().collect();
 
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
-        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isNull();
+        // 0 ms is a valid duration (sub-millisecond wait) — emitted as 0.0 seconds
+        assertThat(cap.getValue().get(BlockingSessionEvent.DB2_WAIT_DURATION)).isEqualTo(0.0);
     }
 
     @Test

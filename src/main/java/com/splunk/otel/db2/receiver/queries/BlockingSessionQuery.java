@@ -62,7 +62,7 @@ public class BlockingSessionQuery {
         "  LW.TABNAME                              AS LOCK_OBJECT, " +
         "  LW.LOCK_OBJECT_TYPE                     AS LOCK_OBJECT_TYPE, " +
         "  LW.LOCK_MODE                            AS LOCK_MODE, " +
-        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_SEC, " +
+        "  LW.LOCK_WAIT_ELAPSED_TIME               AS WAIT_ELAPSED_MS, " +
         "  BLOCKED_SQL.STMT_TEXT                   AS BLOCKED_SQL, " +
         "  CONCAT(CONCAT(BLOCKED_SQL.ACTIVITY_STATE, ' '), BLOCKED_SQL.ACTIVITY_TYPE) AS ACTIVITY_STATE, " +
         "  BLOCKED_CON.SESSION_AUTH_ID             AS BLOCKED_USER, " +
@@ -138,14 +138,11 @@ public class BlockingSessionQuery {
                         String lockObject      = rs.getString("LOCK_OBJECT");
                         String lockObjectType  = rs.getString("LOCK_OBJECT_TYPE");
                         String lockMode        = rs.getString("LOCK_MODE");
-                        long waitElapsedSec    = rs.getLong("WAIT_ELAPSED_SEC");
+                        long waitMs            = rs.getLong("WAIT_ELAPSED_MS");
                         boolean blockerIsIdle  = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
-                        // LOCK_WAIT_ELAPSED_TIME is in seconds (IBM docs); convert to ms for waitDurationMillis
-                        long waitMs = waitElapsedSec > 0 ? waitElapsedSec * 1000 : -1;
-                        // Reconstruct approximate start time from elapsed
-                        String waitStartStr = waitMs >= 0
-                            ? new Timestamp(now.toEpochMilli() - waitMs).toString() : null;
+                        // LOCK_WAIT_ELAPSED_TIME is in milliseconds (INTEGER column in MON_LOCKWAITS)
+                        String waitStartStr = new Timestamp(now.toEpochMilli() - waitMs).toString();
 
                         // Obfuscate blocked SQL — drop record if obfuscation fails
                         String blockedObfuscated = null;
