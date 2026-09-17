@@ -59,7 +59,7 @@ public class QuerySampleQuery {
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
         "       LW.LOCK_OBJECT_TYPE AS LOCK_OBJECT_TYPE, " +
-        "       LW.LOCK_MODE AS LOCK_MODE, " +
+        "       LW.LOCK_MODE_REQUESTED AS LOCK_MODE, " +
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
@@ -107,7 +107,7 @@ public class QuerySampleQuery {
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
         "       LW.LOCK_OBJECT_TYPE AS LOCK_OBJECT_TYPE, " +
-        "       LW.LOCK_MODE AS LOCK_MODE, " +
+        "       LW.LOCK_MODE_REQUESTED AS LOCK_MODE, " +
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +

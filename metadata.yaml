@@ -129,8 +129,8 @@ attributes:
     type: string
   db2.blocking.lock.mode:
     description: >
-      DB2 lock mode (S, X, IX, IS, SIX, Z, U, NS, NX, etc.)
-      from MON_LOCKWAITS.LOCK_MODE.
+      Lock mode requested by the blocked session (S, X, IX, IS, SIX, Z, U, NS, NX, etc.)
+      from MON_LOCKWAITS.LOCK_MODE_REQUESTED.
     type: string
   db2.blocking.lock.object_name:
     description: Name of the locked table or object from MON_LOCKWAITS.TABNAME.
