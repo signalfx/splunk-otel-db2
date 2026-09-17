@@ -245,6 +245,54 @@ class Db2ConfigTest {
     }
 
     @Test
+    void explainPlanEnabledDefaultIsFalse() {
+        assertThat(new Db2ReceiverConfig().isExplainPlanEnabled()).isFalse();
+    }
+
+    @Test
+    void explainPlanEnabledTrueIsParsed() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    explain_plan_enabled: true\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers().get(0).isExplainPlanEnabled()).isTrue();
+    }
+
+    @Test
+    void explainPlanIntervalBelowMinimumFails() {
+        Db2ReceiverConfig cfg = new Db2ReceiverConfig();
+        cfg.setExplainPlanInterval("30s");
+        assertThatThrownBy(cfg::getExplainPlanIntervalDuration)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("explain_plan_interval");
+    }
+
+    @Test
+    void explainPlanMaxPlansZeroFails() {
+        Db2ReceiverConfig cfg = new Db2ReceiverConfig();
+        assertThatThrownBy(() -> cfg.setExplainPlanMaxPlans(0))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("explain_plan_max_plans");
+    }
+
+    @Test
+    void explainPlanMaxPlansNegativeFails() {
+        Db2ReceiverConfig cfg = new Db2ReceiverConfig();
+        assertThatThrownBy(() -> cfg.setExplainPlanMaxPlans(-5))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("explain_plan_max_plans");
+    }
+
+    @Test
     void unsupportedReceiverTypeFailsAtLoad() throws Exception {
         Path f = writeConfig(tmp,
             "receivers:\n" +

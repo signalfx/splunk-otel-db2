@@ -221,6 +221,33 @@ class ExplainPlanQueryTest {
     }
 
     @Test
+    void clobIsFreeAfterPlanFetch() throws Exception {
+        Clob clob = mock(Clob.class);
+        when(clob.length()).thenReturn((long) PLAN_XML.length());
+        when(clob.getSubString(1, PLAN_XML.length())).thenReturn(PLAN_XML);
+        when(planRs.getClob("SECTION_XML")).thenReturn(clob);
+        stubTopRow("SELECT 1 FROM T", MEMBER, EXEC_ID);
+
+        query().collect();
+
+        verify(clob).free();
+    }
+
+    @Test
+    void clobIsFreeEvenWhenXmlIsBlank() throws Exception {
+        Clob clob = mock(Clob.class);
+        when(clob.length()).thenReturn(3L);
+        when(clob.getSubString(1, 3)).thenReturn("   ");
+        when(planRs.getClob("SECTION_XML")).thenReturn(clob);
+        stubTopRow("SELECT 1 FROM T", MEMBER, EXEC_ID);
+
+        query().collect();
+
+        verify(clob).free();
+        verify(logBuilder, never()).emit();
+    }
+
+    @Test
     void connectionExceptionHandledGracefully() {
         new ExplainPlanQuery(
             () -> { throw new RuntimeException("refused"); },
@@ -254,7 +281,7 @@ class ExplainPlanQueryTest {
 
     @Test
     void maxPlansPerIntervalIsRespected() throws Exception {
-        // Return 3 rows but budget is 2
+        // Return 3 rows but budget is 2; only 2 plans should be fetched and emitted.
         ExplainPlanQuery q = new ExplainPlanQuery(() -> conn, "TESTDB", otelLogger, 2, 600L,
             ExplainPlanQuery.DEFAULT_PLAN_CACHE_TTL_MS, 30);
 
@@ -263,11 +290,23 @@ class ExplainPlanQueryTest {
         when(topRs.getLong("MEMBER")).thenReturn(MEMBER);
         when(topRs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
 
+        // Each plan fetch uses a separate PreparedStatement; stub two distinct plan results.
+        PreparedStatement planPs2 = mock(PreparedStatement.class);
+        ResultSet planRs2 = mock(ResultSet.class);
+        Clob clob2 = mock(Clob.class);
+        when(clob2.length()).thenReturn((long) PLAN_XML.length());
+        when(clob2.getSubString(1, PLAN_XML.length())).thenReturn(PLAN_XML);
+        when(planRs2.next()).thenReturn(true);
+        when(planRs2.getClob("SECTION_XML")).thenReturn(clob2);
+        when(planPs2.executeQuery()).thenReturn(planRs2);
+        // First call returns planPs (already in @BeforeEach), second returns planPs2
+        when(conn.prepareStatement(anyString())).thenReturn(planPs, planPs2);
+
         q.collect();
 
-        // Only 2 plan fetches despite 3 candidates (SQL uses FETCH FIRST 2 ROWS which already limits)
-        // But due to FETCH FIRST in SQL, topRs only ever returns 2 rows max for budget=2
-        verify(logBuilder, atMost(2)).emit();
+        // The Java-side budget (candidates.size() < maxPlansPerInterval) stops collection at 2
+        // even though topRs returns 3 rows — the third candidate is never processed.
+        verify(logBuilder, times(2)).emit();
     }
 
     @Test

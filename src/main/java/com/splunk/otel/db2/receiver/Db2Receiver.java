@@ -197,7 +197,7 @@ public class Db2Receiver {
         );
     }
 
-    public void startExplainPlanScheduler(long intervalSeconds) {
+    void startExplainPlanScheduler(long intervalSeconds) {
         explainPlanConnection = new Db2Connection(config, label);
         Supplier<Connection> explainPlanConnSupplier = () -> {
             try {

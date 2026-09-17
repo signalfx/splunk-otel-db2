@@ -182,11 +182,14 @@ public class ExplainPlanQuery {
             ps.setInt(2, member < 0 ? -2 : member);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    // SECTION_XML is a CLOB column; getString handles conversion.
                     java.sql.Clob clob = rs.getClob("SECTION_XML");
                     if (clob == null) return null;
-                    String xml = clob.getSubString(1, (int) Math.min(clob.length(), 2_000_000));
-                    return (xml == null || xml.isBlank()) ? null : xml;
+                    try {
+                        String xml = clob.getSubString(1, (int) Math.min(clob.length(), 2_000_000));
+                        return (xml == null || xml.isBlank()) ? null : xml;
+                    } finally {
+                        try { clob.free(); } catch (Exception ignored) {}
+                    }
                 }
             }
         } catch (Exception e) {
