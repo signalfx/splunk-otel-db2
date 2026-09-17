@@ -340,7 +340,10 @@ class Db2ReceiverIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB_NAMESPACE)).isEqualTo(config.getDatabase());
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
-        assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+        // The sampled query is in LOCKWAIT — blocking detection enriches it and emits WARN.
+        assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.WARN);
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB2_WAIT_DURATION)).isGreaterThan(0.0);
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB2_LOCK_MODE)).isNotNull();
     }
 
     @Test
