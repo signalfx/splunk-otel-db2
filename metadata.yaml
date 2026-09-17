@@ -441,10 +441,9 @@ events:
       When top_query_plan_enabled is true, each record is optionally enriched with
       db2.query_plan (compiled plan XML from MON_GET_PKG_CACHE_STMT_DETAILS) and
       db2.query_plan.hash (SHA-256 digest used as deduplication key). No query
-      re-execution occurs — the plan is read directly from the package cache.
-      A client-side LRU cache (TTL: top_query_plan_cache_ttl, default 10m) prevents
-      repeated CLOB fetches for stable plans. At most top_query_plan_max_plans plan
-      fetches are issued per interval.
+      re-execution occurs — the plan is read directly from the package cache (same
+      approach as SQL Server and Oracle receivers). At most top_query_plan_max_plans
+      CLOB fetches are issued per interval as a budget cap.
     attributes:
       - db.system.name
       - db.namespace

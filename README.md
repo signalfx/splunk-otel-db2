@@ -41,7 +41,6 @@ receivers:
     top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
     top_query_plan_enabled: false      # set true to enrich top_query events with explain plan XML
     top_query_plan_max_plans: 20       # max plan CLOB fetches per interval (budget cap)
-    top_query_plan_cache_ttl: "10m"    # how long a plan is cached before re-fetching
     query_sample_enabled: false        # set true to enable query sampling (opt-in)
     max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"       # how often to sample active queries

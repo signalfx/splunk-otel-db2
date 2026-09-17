@@ -14,7 +14,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -59,20 +58,20 @@ import java.util.function.Supplier;
  * SQL text is obfuscated via {@link SqlObfuscator} before emission. Records whose
  * obfuscation fails are dropped with a WARN log — never emitted raw.
  *
- * Plan collection (optional): when enabled, each emitted top-query record is enriched
- * with {@code db2.query_plan} (SECTION_XML from MON_GET_PKG_CACHE_STMT_DETAILS) and
- * {@code db2.query_plan.hash} (SHA-256 of the XML). A client-side LRU cache keyed on
- * {@code "member:executableId"} with a configurable TTL prevents repeated CLOB fetches
- * for stable plans. EXECUTABLE_ID is bound as bytes (BLOB) — not as a string — because
- * it is a binary token that MON_GET_PKG_CACHE_STMT returns as VARBINARY.
+ * Plan collection (optional): when {@code top_query_plan_enabled: true}, each emitted
+ * top-query record is enriched with {@code db2.query_plan} (SECTION_XML CLOB from
+ * {@code MON_GET_PKG_CACHE_STMT_DETAILS}) and {@code db2.query_plan.hash} (SHA-256).
+ * Db2 stores the compiled plan in the package cache alongside the statement — no query
+ * re-execution occurs, matching the behaviour of SQL Server and Oracle plan collection.
+ * EXECUTABLE_ID is bound as bytes (BLOB) since it is a binary token.
+ * At most {@code planMaxPerInterval} CLOB fetches are issued per interval to protect
+ * against large {@code top_query_count} values.
  */
 public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
 
     // Entries absent from the plan-cache result for this many consecutive scrapes are evicted.
     static final int MAX_STALE_CYCLES = 3;
-
-    static final long DEFAULT_PLAN_CACHE_TTL_MS = 10 * 60 * 1000L; // 10 minutes
 
     // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
     // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
@@ -118,7 +117,7 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
 
     // Reads the compiled plan XML for one section from the package cache.
-    // EXECUTABLE_ID is a binary token: EXECUTABLE_ID must be bound with setBytes(), not setString().
+    // EXECUTABLE_ID is a binary token: must be bound with setBytes(), not setString().
     // SECTION_XML is a CLOB column containing the compiled execution plan XML (Db2 10.5+).
     private static final String SQL_PLAN =
         "SELECT SECTION_XML " +
@@ -142,9 +141,8 @@ public class TopQueryQuery {
     private final String sql;
     private final int queryTimeoutSeconds;
 
-    // Plan collection settings — null planCacheTtlMs means plan collection is disabled.
+    // Plan collection settings — null means plan collection is disabled.
     private final Integer planMaxPerInterval;
-    private final Long    planCacheTtlMs;
 
     // TTL-bounded delta baseline. Single-threaded scheduler — no synchronization needed.
     private final Map<String, CacheEntry> baselineCache = new HashMap<>();
@@ -154,10 +152,6 @@ public class TopQueryQuery {
     // Stored as a server-local Timestamp so INSERT_TIMESTAMP comparison stays on the server clock.
     // Null until the first scrape completes.
     private java.sql.Timestamp lastServerScrapeInstant = null;
-
-    // Plan LRU cache: key = "member:executableIdHex", value = expiry (ms since epoch).
-    // Bounded to planMaxPerInterval * 4 to prevent unbounded growth.
-    private Map<String, Long> planCache;
 
     private static final class CacheEntry {
         long[] counters;
@@ -178,33 +172,23 @@ public class TopQueryQuery {
 
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds) {
-        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds, null, null);
+        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds, null);
     }
 
     /** Plan-collection enabled variant. */
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds,
-                         Integer planMaxPerInterval, Long planCacheTtlMs) {
-        this.connSupplier        = connSupplier;
-        this.dbName              = dbName;
-        this.otelLogger          = otelLogger;
-        this.topQueryCount       = topQueryCount;
-        this.planMaxPerInterval  = planMaxPerInterval;
-        this.planCacheTtlMs      = planCacheTtlMs;
+                         Integer planMaxPerInterval) {
+        this.connSupplier       = connSupplier;
+        this.dbName             = dbName;
+        this.otelLogger         = otelLogger;
+        this.topQueryCount      = topQueryCount;
+        this.planMaxPerInterval = planMaxPerInterval;
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
         this.sql = String.format(SQL, lookbackMinutes);
         // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
-        if (planMaxPerInterval != null && planCacheTtlMs != null) {
-            final int maxSize = planMaxPerInterval * 4;
-            this.planCache = new LinkedHashMap<>(maxSize, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
-                    return size() > maxSize;
-                }
-            };
-        }
         log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s, planEnabled={}",
             topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds,
             planMaxPerInterval != null);
@@ -238,10 +222,9 @@ public class TopQueryQuery {
                     if (thisServerNow == null) {
                         thisServerNow = rs.getTimestamp("SERVER_NOW");
                     }
-                    long   member        = rs.getLong("MEMBER");
-                    String execId        = rs.getString("EXECUTABLE_ID");
-                    byte[] execIdBytes   = rs.getBytes("EXECUTABLE_ID");
-                    String key           = member + ":" + execId;
+                    long   member      = rs.getLong("MEMBER");
+                    String execId      = rs.getString("EXECUTABLE_ID");
+                    String key         = member + ":" + execId;
                     java.sql.Timestamp insertTs = rs.getTimestamp("INSERT_TIMESTAMP");
                     long[] c = {
                         rs.getLong("STMT_EXEC_TIME"),
@@ -254,8 +237,12 @@ public class TopQueryQuery {
                         rs.getLong("SORT_OVERFLOWS")
                     };
                     curr.put(key, c);
-                    // Store execIdBytes as hex string for plan cache keying (bytes not serializable in array)
-                    String execIdHex = execIdBytes != null ? bytesToHex(execIdBytes) : execId;
+                    // execIdHex is only needed when plan collection is enabled
+                    String execIdHex = null;
+                    if (planMaxPerInterval != null) {
+                        byte[] execIdBytes = rs.getBytes("EXECUTABLE_ID");
+                        execIdHex = execIdBytes != null ? bytesToHex(execIdBytes) : execId;
+                    }
                     texts.add(new String[]{rawSql, rs.getString("SECTION_TYPE"),
                                            key, String.valueOf(member), execIdHex});
                     counters.add(c);
@@ -361,10 +348,7 @@ public class TopQueryQuery {
             return cmp != 0 ? cmp : Long.compare(b[2], a[2]);
         });
 
-        long now = System.currentTimeMillis();
-        if (planCache != null) evictExpiredPlanCache(now);
-
-        Instant nowInstant = Instant.ofEpochMilli(now);
+        Instant now = Instant.now();
         int emitCount = 0;
         int plansFetched = 0;
         for (int rank = 0; rank < Math.min(topQueryCount, deltas.size()); rank++) {
@@ -405,26 +389,19 @@ public class TopQueryQuery {
                 .sortOverflows(sortOvfDelta)
                 .stmtType(secType);
 
-            // Optionally enrich with explain plan (plan is already compiled in the package cache —
-            // MON_GET_PKG_CACHE_STMT_DETAILS reads it without re-executing the query).
-            if (planCache != null && plansFetched < planMaxPerInterval) {
-                String execIdHex  = t[4];
-                String planCacheKey = member + ":" + execIdHex;
-                Long expiry = planCache.get(planCacheKey);
-                if (expiry != null && now < expiry) {
-                    log.debug("TopQueryQuery: plan cache hit for key={}", planCacheKey);
-                } else {
-                    String planXml = fetchPlanXml(conn, execIdHex, (int) member);
-                    if (planXml != null) {
-                        String planHash = sha256Hex(planXml);
-                        event.queryPlan(planXml, planHash);
-                        planCache.put(planCacheKey, now + planCacheTtlMs);
-                        plansFetched++;
-                    }
+            // Optionally enrich with explain plan — plan is already compiled in the package cache,
+            // MON_GET_PKG_CACHE_STMT_DETAILS reads it without re-executing the query (same as SQL
+            // Server sys.dm_exec_query_plan / Oracle V$SQL_PLAN — no cache needed).
+            if (planMaxPerInterval != null && plansFetched < planMaxPerInterval) {
+                String execIdHex = t[4];
+                String planXml = fetchPlanXml(conn, execIdHex, (int) member);
+                if (planXml != null) {
+                    event.queryPlan(planXml, sha256Hex(planXml));
+                    plansFetched++;
                 }
             }
 
-            event.emit(otelLogger, nowInstant);
+            event.emit(otelLogger, now);
             emitCount++;
         }
         log.debug("TopQueryQuery: emitted {} top queries (cache size={}, plansFetched={})",
@@ -465,13 +442,6 @@ public class TopQueryQuery {
                 execIdHex, member, e.getMessage());
         }
         return null;
-    }
-
-    private void evictExpiredPlanCache(long now) {
-        Iterator<Map.Entry<String, Long>> it = planCache.entrySet().iterator();
-        while (it.hasNext()) {
-            if (now >= it.next().getValue()) it.remove();
-        }
     }
 
     public static String sha256Hex(String input) {

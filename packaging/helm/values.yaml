@@ -70,7 +70,6 @@ receivers:
     topQueryEnabled: false
     topQueryPlanEnabled: false
     topQueryPlanMaxPlans: 20
-    topQueryPlanCacheTtl: "10m"
     querySampleEnabled: false
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────

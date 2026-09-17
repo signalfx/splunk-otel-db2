@@ -475,7 +475,6 @@ class Db2ReceiverIntegrationTest {
         config.setTopQueryEnabled(false);         // we'll start the scheduler manually
         config.setTopQueryPlanEnabled(true);
         config.setTopQueryPlanMaxPlans(20);
-        config.setTopQueryPlanCacheTtl("10m");
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -553,7 +552,9 @@ class Db2ReceiverIntegrationTest {
     }
 
     @Test
-    void planCachePreventsRepeatedFetchWithinTtl() throws Exception {
+    void planPresentOnEveryTopQueryEmit() throws Exception {
+        // DB2 plan is pre-compiled in the package cache (no re-execution), so every
+        // top_query record should carry db2.query_plan when plan collection is enabled.
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
         SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
             .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
@@ -572,7 +573,6 @@ class Db2ReceiverIntegrationTest {
         config.setTopQueryEnabled(false);
         config.setTopQueryPlanEnabled(true);
         config.setTopQueryPlanMaxPlans(20);
-        config.setTopQueryPlanCacheTtl("10m"); // long TTL — same executableId won't be re-fetched
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -586,9 +586,9 @@ class Db2ReceiverIntegrationTest {
 
         Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
         try (Statement st = workConn.createStatement()) {
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < 3; i++) {
                 try (ResultSet r = st.executeQuery(
-                        "SELECT COUNT(*) AS SPLUNK_OTEL_PLAN_CACHE_PROBE " +
+                        "SELECT COUNT(*) AS SPLUNK_OTEL_PLAN_EVERY_PROBE " +
                         "FROM SYSCAT.COLUMNS")) {
                     while (r.next()) { /* drain */ }
                 }
@@ -598,31 +598,35 @@ class Db2ReceiverIntegrationTest {
         }
 
         try {
-            // Wait for first plan-enriched record
+            // Wait for at least two plan-enriched records for the same probe query.
+            // Each interval should independently fetch the plan from the package cache.
             Awaitility.await()
-                .atMost(25, TimeUnit.SECONDS)
-                .pollInterval(1, TimeUnit.SECONDS)
+                .atMost(35, TimeUnit.SECONDS)
+                .pollInterval(2, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
-                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())
+                    .filter(r -> "db.server.top_query".equals(r.getEventName())
                         && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
                         && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
-                               .toUpperCase().contains("SPLUNK_OTEL_PLAN_CACHE_PROBE")
-                        && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null));
+                               .toUpperCase().contains("SPLUNK_OTEL_PLAN_EVERY_PROBE")
+                        && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null)
+                    .count() >= 2);
 
-            // Wait two more collection cycles — plan should only be fetched once per TTL
-            Thread.sleep(8000);
-
-            // All records for the probe: count how many have a plan attached
+            // All probe records that were emitted should have the plan attached
+            long total = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> "db.server.top_query".equals(r.getEventName())
+                    && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                    && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                           .toUpperCase().contains("SPLUNK_OTEL_PLAN_EVERY_PROBE"))
+                .count();
             long withPlan = logExporter.getFinishedLogRecordItems().stream()
                 .filter(r -> "db.server.top_query".equals(r.getEventName())
                     && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
                     && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
-                           .toUpperCase().contains("SPLUNK_OTEL_PLAN_CACHE_PROBE")
+                           .toUpperCase().contains("SPLUNK_OTEL_PLAN_EVERY_PROBE")
                     && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null)
                 .count();
 
-            // The plan cache should prevent more than one plan-enriched emit per TTL window
-            assertThat(withPlan).isEqualTo(1);
+            assertThat(withPlan).isEqualTo(total);
 
         } finally {
             receiver.stop();

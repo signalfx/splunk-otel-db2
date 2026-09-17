@@ -821,10 +821,9 @@ class TopQueryQueryTest {
 
     // --- Plan collection tests ---
 
-    /** Build a plan-enabled TopQueryQuery with 2 max plans/interval and 10 min cache TTL. */
+    /** Build a plan-enabled TopQueryQuery with 2 max plans/interval. */
     private TopQueryQuery queryWithPlan() {
-        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2,
-            TopQueryQuery.DEFAULT_PLAN_CACHE_TTL_MS);
+        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2);
     }
 
     private void stubTwoCollectionCycles(String stmtText, String execId, long member,
@@ -879,7 +878,9 @@ class TopQueryQueryTest {
     }
 
     @Test
-    void planCacheHitSkipsFetch() throws Exception {
+    void planFetchedOnEveryEmitInterval() throws Exception {
+        // DB2 plan is pre-compiled in the package cache (no re-execution), so we fetch
+        // fresh every interval — no client-side TTL cache, matching SQL Server / Oracle behaviour.
         String planXml = "<plan><op type='TBSCAN'/></plan>";
         PreparedStatement planPs = mock(PreparedStatement.class);
         ResultSet planRs = mock(ResultSet.class);
@@ -899,7 +900,7 @@ class TopQueryQueryTest {
         stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
         q.collect();
 
-        // First emit — plan fetched and cached
+        // First emit
         reset(stmt, rs, otelLogger, logBuilder);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
@@ -910,19 +911,19 @@ class TopQueryQueryTest {
         q.collect();
         verify(planPs, times(1)).executeQuery();
 
-        // Second emit — same execId still within TTL; plan fetch skipped
+        // Second emit — plan fetched again (no TTL cache)
         reset(stmt, rs, otelLogger, logBuilder);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
         when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(conn.prepareStatement(anyString())).thenReturn(planPs);
         when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
         q.collect();
 
-        // prepareStatement only called for the first emit (cache hit on second)
-        verify(conn, times(1)).prepareStatement(anyString());
-        verify(logBuilder).emit(); // event still emitted, just without plan re-fetch
+        verify(planPs, times(2)).executeQuery(); // fetched on both emit cycles
+        verify(logBuilder).emit();
     }
 
     @Test

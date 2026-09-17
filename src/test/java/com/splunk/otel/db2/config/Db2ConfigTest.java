@@ -283,24 +283,6 @@ class Db2ConfigTest {
             .hasMessageContaining("top_query_plan_max_plans");
     }
 
-    @Test
-    void topQueryPlanCacheTtlIsParsed() throws Exception {
-        Path f = writeConfig(tmp,
-            "receivers:\n" +
-            "  db2:\n" +
-            "    hostname: mydb.example.com\n" +
-            "    username: db2inst1\n" +
-            "    password: secret\n" +
-            "    database: SAMPLE\n" +
-            "    top_query_plan_cache_ttl: \"5m\"\n" +
-            "exporters:\n" +
-            "  otlp:\n" +
-            "    endpoint: http://collector:4317\n"
-        );
-        Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers().get(0).getTopQueryPlanCacheTtlMs())
-            .isEqualTo(5 * 60 * 1000L);
-    }
 
     @Test
     void unsupportedReceiverTypeFailsAtLoad() throws Exception {

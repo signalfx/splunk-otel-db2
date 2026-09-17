@@ -21,7 +21,6 @@ public class Db2ReceiverConfig {
     private String topQueryInterval = "60s";
     private boolean topQueryPlanEnabled = false;
     private int topQueryPlanMaxPlans = 20;
-    private String topQueryPlanCacheTtl = "10m";
     private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
     private Map<String, String> resourceAttributes = Collections.emptyMap();
@@ -110,13 +109,6 @@ public class Db2ReceiverConfig {
         this.topQueryPlanMaxPlans = topQueryPlanMaxPlans;
     }
 
-    /** Plan cache TTL as milliseconds. Parsed from a duration string ("10m", "30s"). */
-    public long getTopQueryPlanCacheTtlMs() {
-        return parseDuration(topQueryPlanCacheTtl, 600).toMillis();
-    }
-    public void setTopQueryPlanCacheTtl(String topQueryPlanCacheTtl) {
-        this.topQueryPlanCacheTtl = topQueryPlanCacheTtl;
-    }
 
     public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
     public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {
