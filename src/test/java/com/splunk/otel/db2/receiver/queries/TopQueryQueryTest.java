@@ -1049,7 +1049,8 @@ class TopQueryQueryTest {
         String hex = TopQueryQuery.hexToBytes(null) == null ? "null ok" : "";
         assertThat(TopQueryQuery.hexToBytes(null)).isNull();
         assertThat(TopQueryQuery.hexToBytes("0d")).isEqualTo(new byte[]{0x0d});
-        assertThat(TopQueryQuery.hexToBytes("0off")).isNull(); // odd length
+        assertThat(TopQueryQuery.hexToBytes("abc")).isNull();  // odd length
+        assertThat(TopQueryQuery.hexToBytes("0off")).isNull(); // non-hex character
     }
 
     @Test

@@ -20,6 +20,8 @@ data:
           insecure: {{ .tls.insecure }}
         top_query_enabled: {{ .topQueryEnabled }}
         top_query_plan_enabled: {{ .topQueryPlanEnabled | default false }}
+        top_query_plan_max_plans: {{ .topQueryPlanMaxPlans | default 20 }}
+        top_query_plan_cache_ttl: {{ .topQueryPlanCacheTtl | default "10m" | quote }}
         query_sample_enabled: {{ .querySampleEnabled }}
     {{- end }}
 
