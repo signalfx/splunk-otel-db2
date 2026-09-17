@@ -69,7 +69,11 @@ receivers:
       insecure: true
     topQueryEnabled: false
     topQueryPlanEnabled: false
-    topQueryPlanMaxPlans: 20
+    topQueryCollection:
+      maxExplainEachInterval: 1000
+      queryPlanCacheSize: 1000
+      queryPlanCacheTtl: "1h"
+      explainSchema: ""
     querySampleEnabled: false
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────

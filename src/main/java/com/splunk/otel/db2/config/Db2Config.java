@@ -175,7 +175,23 @@ public class Db2Config {
         if (db2.get("use_snapshot_monitor")      != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
         if (db2.get("connect_timeout_seconds")!= null) rc.setConnectTimeoutSeconds(asInt(db2, "connect_timeout_seconds"));
         if (db2.get("top_query_plan_enabled")   != null) rc.setTopQueryPlanEnabled(asBool(db2, "top_query_plan_enabled"));
-        if (db2.get("top_query_plan_max_plans") != null) rc.setTopQueryPlanMaxPlans(asInt(db2, "top_query_plan_max_plans"));
+        Object tqcNode = db2.get("top_query_collection");
+        if (tqcNode != null) {
+            if (!(tqcNode instanceof Map))
+                throw new IllegalStateException(
+                    "receivers.db2.top_query_collection must be a map, got: " +
+                    tqcNode.getClass().getSimpleName());
+            Map<String, Object> tqc = (Map<String, Object>) tqcNode;
+            Db2ReceiverConfig.TopQueryCollectionConfig tqcCfg = rc.getTopQueryCollection();
+            if (tqc.get("max_explain_each_interval") != null)
+                tqcCfg.setMaxExplainEachInterval(asInt(tqc, "max_explain_each_interval"));
+            if (tqc.get("query_plan_cache_size") != null)
+                tqcCfg.setQueryPlanCacheSize(asInt(tqc, "query_plan_cache_size"));
+            if (tqc.get("query_plan_cache_ttl") != null)
+                tqcCfg.setQueryPlanCacheTtl(asString(tqc, "query_plan_cache_ttl"));
+            if (tqc.get("explain_schema") != null)
+                tqcCfg.setExplainSchema(asString(tqc, "explain_schema"));
+        }
         if (db2.get("service_name")           != null) rc.setServiceName(asString(db2, "service_name"));
         if (db2.get("service_namespace")      != null) rc.setServiceNamespace(asString(db2, "service_namespace"));
         if (db2.get("service_instance_id")    != null) rc.setServiceInstanceId(asString(db2, "service_instance_id"));
@@ -267,6 +283,10 @@ public class Db2Config {
         rc.getQuerySampleIntervalDuration();
         if (rc.isTopQueryEnabled()) {
             rc.getTopQueryIntervalDuration();
+        }
+        if (rc.isTopQueryPlanEnabled() && !rc.isTopQueryEnabled()) {
+            throw new IllegalStateException(
+                "receivers.db2.top_query_plan_enabled: true requires top_query_enabled: true");
         }
 
         String endpoint = otlp.getEndpoint();

@@ -20,7 +20,7 @@ public class Db2ReceiverConfig {
     private String querySampleInterval = "10s";
     private String topQueryInterval = "60s";
     private boolean topQueryPlanEnabled = false;
-    private int topQueryPlanMaxPlans = 20;
+    private TopQueryCollectionConfig topQueryCollection = new TopQueryCollectionConfig();
     private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
     private Map<String, String> resourceAttributes = Collections.emptyMap();
@@ -52,13 +52,14 @@ public class Db2ReceiverConfig {
     }
     public void setCollectionInterval(String collectionInterval) { this.collectionInterval = collectionInterval; }
 
-    private static Duration parseDuration(String s, long defaultSeconds) {
+    static Duration parseDuration(String s, long defaultSeconds) {
         if (s == null) return Duration.ofSeconds(defaultSeconds);
         s = s.trim();
         Duration d;
         if (s.endsWith("s")) d = Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
         else if (s.endsWith("m")) d = Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
-        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s' or '5m'");
+        else if (s.endsWith("h")) d = Duration.ofHours(Long.parseLong(s.substring(0, s.length() - 1)));
+        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s', '5m', or '1h'");
         if (d.getSeconds() <= 0) throw new IllegalArgumentException("Interval must be at least 1s, got '" + s + "'");
         return d;
     }
@@ -102,13 +103,10 @@ public class Db2ReceiverConfig {
     public boolean isTopQueryPlanEnabled() { return topQueryPlanEnabled; }
     public void setTopQueryPlanEnabled(boolean topQueryPlanEnabled) { this.topQueryPlanEnabled = topQueryPlanEnabled; }
 
-    public int getTopQueryPlanMaxPlans() { return topQueryPlanMaxPlans; }
-    public void setTopQueryPlanMaxPlans(int topQueryPlanMaxPlans) {
-        if (topQueryPlanMaxPlans <= 0)
-            throw new IllegalArgumentException("top_query_plan_max_plans must be > 0, got " + topQueryPlanMaxPlans);
-        this.topQueryPlanMaxPlans = topQueryPlanMaxPlans;
+    public TopQueryCollectionConfig getTopQueryCollection() { return topQueryCollection; }
+    public void setTopQueryCollection(TopQueryCollectionConfig topQueryCollection) {
+        this.topQueryCollection = topQueryCollection != null ? topQueryCollection : new TopQueryCollectionConfig();
     }
-
 
     public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
     public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {
@@ -149,6 +147,37 @@ public class Db2ReceiverConfig {
             return env;
         }
         return value;
+    }
+
+    public static class TopQueryCollectionConfig {
+        private int maxExplainEachInterval = 1000;
+        private int queryPlanCacheSize = 1000;
+        private String queryPlanCacheTtl = "1h";
+        // Schema where explain tables exist (created by SYSINSTALLOBJECTS).
+        // Empty string means use the DB2 runtime default (USER).
+        private String explainSchema = "";
+
+        public int getMaxExplainEachInterval() { return maxExplainEachInterval; }
+        public void setMaxExplainEachInterval(int v) {
+            if (v <= 0)
+                throw new IllegalArgumentException("top_query_collection.max_explain_each_interval must be > 0, got " + v);
+            this.maxExplainEachInterval = v;
+        }
+
+        public int getQueryPlanCacheSize() { return queryPlanCacheSize; }
+        public void setQueryPlanCacheSize(int v) {
+            if (v <= 0)
+                throw new IllegalArgumentException("top_query_collection.query_plan_cache_size must be > 0, got " + v);
+            this.queryPlanCacheSize = v;
+        }
+
+        public Duration getQueryPlanCacheTtlDuration() {
+            return Db2ReceiverConfig.parseDuration(queryPlanCacheTtl, 600);
+        }
+        public void setQueryPlanCacheTtl(String v) { this.queryPlanCacheTtl = v; }
+
+        public String getExplainSchema() { return explainSchema; }
+        public void setExplainSchema(String v) { this.explainSchema = v == null ? "" : v.trim(); }
     }
 
     public static class TlsConfig {

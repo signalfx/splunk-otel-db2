@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
-import java.sql.Clob;
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -821,33 +821,63 @@ class TopQueryQueryTest {
 
     // --- Plan collection tests ---
 
-    /** Build a plan-enabled TopQueryQuery with 2 max plans/interval. */
+    /** Build a plan-enabled query: 2 max attempts/interval, cache size 100, TTL 1h. */
     private TopQueryQuery queryWithPlan() {
-        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2);
+        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2, 100, 3600_000L);
     }
 
-    private void stubTwoCollectionCycles(String stmtText, String execId, long member,
-                                          long numExec1, long execMs1,
-                                          long numExec2, long execMs2) throws Exception {
-        // Seed cycle
-        when(rs.next()).thenReturn(true, false);
-        stubRow(stmtText, member, execId, numExec1, execMs1, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+    /** Build a plan-enabled query with 0ms TTL — cache always expires between calls. */
+    private TopQueryQuery queryWithPlanNoCache() {
+        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2, 100, 0L);
+    }
+
+    /**
+     * Stub the EXPLAIN_FROM_SECTION CallableStatement and the subsequent EXPLAIN_OPERATOR /
+     * EXPLAIN_STREAM PreparedStatements so that fetchPlanXml returns a valid JSON plan string.
+     *
+     * The mock returns one operator (TBSCAN, cost=1.0) and zero streams, producing:
+     * {"operators":[{"id":1,"type":"TBSCAN","cost":1.0}],"streams":[]}
+     *
+     * Returns the CallableStatement mock so callers can verify call counts.
+     */
+    private CallableStatement stubPlanPs(String ignoredPlanXml) throws Exception {
+        CallableStatement cs = mock(CallableStatement.class);
+        // EXPLAIN_FROM_SECTION params: (2)=MEMBER IN, (3)=EXPLAIN_SCHEMA INOUT, (4)=EXPLAIN_REQUESTER, (5)=EXPLAIN_TIME
+        when(cs.getString(3)).thenReturn("TESTUSER"); // EXPLAIN_SCHEMA INOUT — actual schema used
+        when(cs.getString(4)).thenReturn("TESTUSER"); // EXPLAIN_REQUESTER OUT
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+
+        // EXPLAIN_OPERATOR result
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        // EXPLAIN_STREAM result (empty)
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_INSTANCE DELETE
+        PreparedStatement deletePs = mock(PreparedStatement.class);
+        when(deletePs.executeUpdate()).thenReturn(1);
+
+        // Wire up: prepareCall → cs; prepareStatement (in order): opPs, streamPs, deletePs
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, deletePs);
+
+        return cs;
     }
 
     @Test
     void planXmlAttachedToTopQueryRecordOnCacheMiss() throws Exception {
-        String planXml = "<plan><op type='TBSCAN'/></plan>";
-
-        // Set up plan fetch mock
-        PreparedStatement planPs = mock(PreparedStatement.class);
-        ResultSet planRs = mock(ResultSet.class);
-        Clob clob = mock(Clob.class);
-        when(clob.length()).thenReturn((long) planXml.length());
-        when(clob.getSubString(1, planXml.length())).thenReturn(planXml);
-        when(planRs.next()).thenReturn(true);
-        when(planRs.getClob("SECTION_XML")).thenReturn(clob);
-        when(planPs.executeQuery()).thenReturn(planRs);
-        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+        stubPlanPs(null);
 
         TopQueryQuery q = queryWithPlan();
 
@@ -873,26 +903,60 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         verify(logBuilder).emit();
 
-        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isEqualTo(planXml);
+        // Plan JSON must be present and contain operator data
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).contains("TBSCAN");
         assertThat(cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH)).isNotNull().hasSize(64);
     }
 
     @Test
-    void planFetchedOnEveryEmitInterval() throws Exception {
-        // DB2 plan is pre-compiled in the package cache (no re-execution), so we fetch
-        // fresh every interval — no client-side TTL cache, matching SQL Server / Oracle behaviour.
-        String planXml = "<plan><op type='TBSCAN'/></plan>";
-        PreparedStatement planPs = mock(PreparedStatement.class);
-        ResultSet planRs = mock(ResultSet.class);
-        Clob clob = mock(Clob.class);
-        when(clob.length()).thenReturn((long) planXml.length());
-        when(clob.getSubString(1, planXml.length())).thenReturn(planXml);
-        when(planRs.next()).thenReturn(true);
-        when(planRs.getClob("SECTION_XML")).thenReturn(clob);
-        when(planPs.executeQuery()).thenReturn(planRs);
-        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+    void planServedFromCacheOnSecondEmit() throws Exception {
+        // First emit fetches the plan from DB2; second emit uses the cache (TTL=1h).
+        CallableStatement cs = stubPlanPs(null);
 
         TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // First emit — cache miss, DB2 called once
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+        verify(conn, times(1)).prepareCall(anyString());
+
+        // Second emit — cache hit, no new DB2 call
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        verify(conn, times(1)).prepareCall(anyString()); // still 1 — second emit served from cache
+        verify(logBuilder).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // Plan JSON must be present (one operator: TBSCAN)
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).contains("TBSCAN");
+    }
+
+    @Test
+    void planRefetchedAfterCacheExpiry() throws Exception {
+        // With TTL=0ms the cache always expires — DB2 is called on every emit interval.
+        CallableStatement cs = stubPlanPs(null);
+
+        TopQueryQuery q = queryWithPlanNoCache(); // TTL=0
 
         // Seed
         when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
@@ -909,28 +973,36 @@ class TopQueryQueryTest {
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
         q.collect();
-        verify(planPs, times(1)).executeQuery();
+        verify(conn, times(1)).prepareCall(anyString());
 
-        // Second emit — plan fetched again (no TTL cache)
+        // Second emit — cache expired (TTL=0), DB2 called again
         reset(stmt, rs, otelLogger, logBuilder);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
         when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
-        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+        // Re-stub prepareCall after reset
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+            PreparedStatement ps = mock(PreparedStatement.class);
+            ResultSet prs = mock(ResultSet.class);
+            when(prs.next()).thenReturn(false);
+            when(ps.executeQuery()).thenReturn(prs);
+            when(ps.executeUpdate()).thenReturn(1);
+            return ps;
+        });
         when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
         q.collect();
 
-        verify(planPs, times(2)).executeQuery(); // fetched on both emit cycles
+        // 2 total calls (first + second emit after cache expiry)
+        verify(conn, times(2)).prepareCall(anyString());
         verify(logBuilder).emit();
     }
 
     @Test
     void planFetchFailureDoesNotDropTopQueryRecord() throws Exception {
-        PreparedStatement planPs = mock(PreparedStatement.class);
-        when(planPs.executeQuery()).thenThrow(new java.sql.SQLException("access denied"));
-        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+        when(conn.prepareCall(anyString())).thenThrow(new java.sql.SQLException("access denied"));
 
         TopQueryQuery q = queryWithPlan();
 
@@ -978,28 +1050,33 @@ class TopQueryQueryTest {
         stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
         q.collect();
 
-        // prepareStatement must never be called when plan is disabled
-        verify(conn, never()).prepareStatement(anyString());
+        // prepareCall must never be called when plan is disabled
+        verify(conn, never()).prepareCall(anyString());
     }
 
     @Test
-    void planBudgetCapRespectsMaxPerInterval() throws Exception {
-        String planXml = "<plan/>";
-        // Return a plan for every fetch
+    void planBudgetCapRespectsMaxAttemptsPerInterval() throws Exception {
+        // planMaxPerInterval=2; 3 candidates; budget counts attempts before the DB2 call.
+        // The 3rd candidate must not trigger a plan lookup even when the first two succeed.
+        when(conn.prepareCall(anyString())).thenAnswer(inv -> {
+            CallableStatement cs = mock(CallableStatement.class);
+            when(cs.getString(3)).thenReturn("TESTUSER"); // EXPLAIN_SCHEMA INOUT
+            when(cs.getString(4)).thenReturn("TESTUSER"); // EXPLAIN_REQUESTER
+            when(cs.getTimestamp(5)).thenReturn(
+                Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999)));
+            return cs;
+        });
         when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
             PreparedStatement ps = mock(PreparedStatement.class);
             ResultSet prs = mock(ResultSet.class);
-            Clob c = mock(Clob.class);
-            when(c.length()).thenReturn((long) planXml.length());
-            when(c.getSubString(1, planXml.length())).thenReturn(planXml);
-            when(prs.next()).thenReturn(true);
-            when(prs.getClob("SECTION_XML")).thenReturn(c);
+            when(prs.next()).thenReturn(false);
             when(ps.executeQuery()).thenReturn(prs);
+            when(ps.executeUpdate()).thenReturn(1);
             return ps;
         });
 
-        // planMaxPerInterval = 2, but we'll have 3 candidates in the emit cycle
-        TopQueryQuery q = queryWithPlan();
+        // Use TTL=0 so no cache hits inflate attempt counts
+        TopQueryQuery q = queryWithPlanNoCache();
 
         // Seed 3 rows
         when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
@@ -1039,9 +1116,59 @@ class TopQueryQueryTest {
         when(rs.getString("SECTION_TYPE")).thenReturn("D");
         q.collect();
 
-        // All 3 top_query records emitted, but only 2 plan fetches (budget cap)
+        // All 3 top_query records emitted, but only 2 plan attempts (budget cap = max attempts)
         verify(logBuilder, times(3)).emit();
-        verify(conn, times(2)).prepareStatement(anyString());
+        verify(conn, times(2)).prepareCall(anyString());
+    }
+
+    @Test
+    void planBudgetCapCountsFailedAttemptsAgainstBudget() throws Exception {
+        // planMaxPerInterval=2; all calls fail; the 3rd candidate must still be skipped.
+        when(conn.prepareCall(anyString())).thenThrow(new java.sql.SQLException("access denied"));
+
+        TopQueryQuery q = queryWithPlanNoCache();
+
+        // Seed 3 rows
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L, 300L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // Emit cycle
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(200L, 400L, 600L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // All 3 records emitted without plans; prepareCall called exactly 2 times (not 3)
+        verify(logBuilder, times(3)).emit();
+        verify(conn, times(2)).prepareCall(anyString());
     }
 
     @Test

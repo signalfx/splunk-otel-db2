@@ -157,14 +157,21 @@ public class Db2Receiver {
                 throw new RuntimeException("[" + label + "] DB2 top-query connection failed: " + e.getMessage(), e);
             }
         };
-        Integer planMaxPlans = config.isTopQueryPlanEnabled() ? config.getTopQueryPlanMaxPlans() : null;
+        Integer planMaxPlans = config.isTopQueryPlanEnabled()
+            ? config.getTopQueryCollection().getMaxExplainEachInterval() : null;
+        int planCacheSize = config.getTopQueryCollection().getQueryPlanCacheSize();
+        long planCacheTtlMs = config.getTopQueryCollection().getQueryPlanCacheTtlDuration().toMillis();
+        String explainSchema = config.getTopQueryCollection().getExplainSchema();
         TopQueryQuery topQueryQuery = new TopQueryQuery(
             topQueryConnSupplier,
             config.getDatabase(),
             otelLogger,
             config.getTopQueryCount(),
             intervalSeconds,
-            planMaxPlans
+            planMaxPlans,
+            planCacheSize,
+            planCacheTtlMs,
+            explainSchema
         );
         topQueryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-top-query-collector[" + label + "]");

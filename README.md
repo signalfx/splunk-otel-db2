@@ -39,8 +39,12 @@ receivers:
     top_query_enabled: false           # set true to enable top query collection (opt-in)
     top_query_count: 250               # top N queries to emit per interval (must be > 0)
     top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
-    top_query_plan_enabled: false      # set true to enrich top_query events with explain plan XML
-    top_query_plan_max_plans: 20       # max plan CLOB fetches per interval (budget cap)
+    top_query_plan_enabled: false      # set true to enrich top_query events with explain plan JSON
+    top_query_collection:
+      max_explain_each_interval: 1000 # max plan explain attempts per interval (budget cap)
+      query_plan_cache_size: 1000     # max entries in the client-side plan cache
+      query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
+      explain_schema: ""              # schema where explain tables live (default: USER)
     query_sample_enabled: false        # set true to enable query sampling (opt-in)
     max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"       # how often to sample active queries
@@ -313,6 +317,22 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db2.sorts` | Sorts performed during this interval |
 | `db2.sort_overflows` | Sorts that spilled to disk during this interval |
 | `db2.stmt_type` | Statement type: `D` = dynamic SQL, `S` = static SQL |
+| `db2.query_plan` | JSON plan summary (operators + streams) — only when `top_query_plan_enabled: true` |
+| `db2.query_plan.hash` | SHA-256 of the plan JSON — only when `top_query_plan_enabled: true` |
+
+**Plan collection prerequisite** (`top_query_plan_enabled: true`): Db2 explain tables must be created once in the monitoring user's schema before enabling plan collection. Connect as the monitoring user and run:
+
+```sql
+CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
+```
+
+This creates 10 explain tables (`EXPLAIN_INSTANCE`, `EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`, etc.) in the user's schema. The tables are automatically owned by the monitoring user so no additional grants are needed. This is a one-time setup step — the tables persist across Db2 restarts.
+
+The plan JSON format:
+
+```json
+{"operators":[{"id":1,"type":"RETURN","cost":198.6},{"id":2,"type":"NLJOIN","cost":198.6}],"streams":[{"id":1,"from":-1,"to":3,"cols":477}]}
+```
 
 ## Required permissions
 
@@ -343,9 +363,13 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
 
 -- Explain plan enrichment (top_query_plan_enabled: true)
--- MON_GET_PKG_CACHE_STMT_DETAILS reads compiled plan XML from the package cache
--- (no query re-execution). Requires Db2 10.5+.
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT_DETAILS TO USER db2mon;
+-- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
+-- Requires explain tables to be created once per schema — run as the monitoring user:
+--   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
+-- Then grant the procedure and the explain tables:
+GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
+-- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
+-- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
 
 -- Query sampling (query_sample_enabled: true, default path)
 GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;

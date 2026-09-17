@@ -5,15 +5,18 @@ import io.opentelemetry.api.logs.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.security.MessageDigest;
-import java.sql.Clob;
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -59,13 +62,20 @@ import java.util.function.Supplier;
  * obfuscation fails are dropped with a WARN log — never emitted raw.
  *
  * Plan collection (optional): when {@code top_query_plan_enabled: true}, each emitted
- * top-query record is enriched with {@code db2.query_plan} (SECTION_XML CLOB from
- * {@code MON_GET_PKG_CACHE_STMT_DETAILS}) and {@code db2.query_plan.hash} (SHA-256).
- * Db2 stores the compiled plan in the package cache alongside the statement — no query
- * re-execution occurs, matching the behaviour of SQL Server and Oracle plan collection.
- * EXECUTABLE_ID is bound as bytes (BLOB) since it is a binary token.
- * At most {@code planMaxPerInterval} CLOB fetches are issued per interval to protect
- * against large {@code top_query_count} values.
+ * top-query record is enriched with {@code db2.query_plan} (JSON plan summary) and
+ * {@code db2.query_plan.hash} (SHA-256). The plan is retrieved via
+ * {@code EXPLAIN_FROM_SECTION}: the stored procedure populates the explain tables from
+ * the compiled section in the package cache (no query re-execution), then
+ * {@code EXPLAIN_OPERATOR} and {@code EXPLAIN_STREAM} are queried to build a JSON plan
+ * summary. Requires explain tables to be pre-created in the schema configured by
+ * {@code top_query_collection.explain_schema} (run
+ * {@code CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',NULL,CURRENT SCHEMA)} once).
+ * At most {@code top_query_collection.max_explain_each_interval} <em>attempts</em> are
+ * made per interval to protect against large {@code top_query_count} values.
+ * Plans are cached client-side (LRU, size and TTL from
+ * {@code top_query_collection.query_plan_cache_size} /
+ * {@code top_query_collection.query_plan_cache_ttl}) to avoid re-explaining unchanged
+ * sections on every scrape.
  */
 public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
@@ -116,13 +126,46 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
 
-    // Reads the compiled plan XML for one section from the package cache.
-    // EXECUTABLE_ID is a binary token: must be bound with setBytes(), not setString().
-    // SECTION_XML is a CLOB column containing the compiled execution plan XML (Db2 10.5+).
-    private static final String SQL_PLAN =
-        "SELECT SECTION_XML " +
-        "FROM TABLE(MON_GET_PKG_CACHE_STMT_DETAILS(CAST(? AS BLOB(100)), ?)) AS D " +
-        "FETCH FIRST 1 ROW ONLY";
+    // DB2 explain workflow — two steps (verified on DB2 11.5.8.0):
+    //
+    // 1. EXPLAIN_FROM_SECTION: populate explain tables from the executable ID.
+    //    EXECUTABLE_ID is a VARCHAR(32) FOR BIT DATA token.
+    //    SECTION_SOURCE_TYPE='M' (Memory) pulls the section from the live in-memory package
+    //    cache — always correct since our IDs come from MON_GET_PKG_CACHE_STMT.
+    //    Returns EXPLAIN_REQUESTER + EXPLAIN_TIME as OUT params (the key to the inserted rows).
+    //    Requires autocommit=true (or explicit COMMIT) — writes are transaction-scoped.
+    //    Requires explain tables to exist in EXPLAIN_SCHEMA (create once via
+    //    CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',NULL,CURRENT SCHEMA)).
+    //
+    // 2. EXPLAIN_OPERATOR + EXPLAIN_STREAM: read the inserted plan data and build JSON.
+    //    EXPLAIN_INSTANCE rows cascade-delete to all child tables, so deleting from
+    //    EXPLAIN_INSTANCE by (EXPLAIN_REQUESTER, EXPLAIN_TIME) cleans up everything.
+
+    // Step 1 — EXPLAIN_FROM_SECTION.
+    // JDBC params: (1)=EXECUTABLE_ID, (2)=MEMBER, (3)=EXPLAIN_SCHEMA INOUT, (4-8)=OUT params.
+    // SECTION_SOURCE_TYPE='M' (Memory): instructs Db2 to pull the section from the live in-memory
+    // package cache. Always correct here — our EXECUTABLE_IDs come from MON_GET_PKG_CACHE_STMT,
+    // which only returns sections currently held in memory.
+    private static final String SQL_EXPLAIN_FROM_SECTION =
+        "CALL SYSPROC.EXPLAIN_FROM_SECTION(CAST(? AS VARCHAR(32) FOR BIT DATA), 'M', '-', ?, ?, ?, ?, ?, ?, ?)";
+
+    // Step 2a — read plan operators for this explain session.
+    private static final String SQL_EXPLAIN_OPERATOR =
+        "SELECT OPERATOR_ID, RTRIM(OPERATOR_TYPE) AS OPERATOR_TYPE, TOTAL_COST " +
+        "FROM %s.EXPLAIN_OPERATOR " +
+        "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "ORDER BY OPERATOR_ID";
+
+    // Step 2b — read plan streams (operator connectivity) for this explain session.
+    private static final String SQL_EXPLAIN_STREAM =
+        "SELECT STREAM_ID, SOURCE_ID, TARGET_ID, COLUMN_COUNT " +
+        "FROM %s.EXPLAIN_STREAM " +
+        "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "ORDER BY STREAM_ID";
+
+    // Cleanup — delete explain instance; cascades to all child explain tables via FK.
+    private static final String SQL_EXPLAIN_DELETE =
+        "DELETE FROM %s.EXPLAIN_INSTANCE WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ?";
 
     // Counter array indices — I_NUM_EXEC is NUM_EXECUTIONS (total), not NUM_EXEC_WITH_METRICS
     private static final int I_EXEC_TIME = 0;
@@ -143,8 +186,26 @@ public class TopQueryQuery {
 
     // Plan collection settings — null means plan collection is disabled.
     private final Integer planMaxPerInterval;
+    private final int planCacheSize;
+    private final long planCacheTtlMs;
+    // Configured explain schema (null/empty → pass null to DB2, which chooses USER or default).
+    // The actual schema used is read back from the EXPLAIN_SCHEMA INOUT param after each call.
+    private final String explainSchema;
 
-    // TTL-bounded delta baseline. Single-threaded scheduler — no synchronization needed.
+    // Client-side LRU plan cache. Key = "member:executableIdHex". Evicted by LRU + TTL.
+    // Single-threaded scheduler — no synchronization needed.
+    private final Map<String, PlanCacheEntry> planCache;
+
+    private static final class PlanCacheEntry {
+        final String xml;
+        final String hash;
+        final long expiresMs;
+        PlanCacheEntry(String xml, String hash, long expiresMs) {
+            this.xml = xml; this.hash = hash; this.expiresMs = expiresMs;
+        }
+    }
+
+    // Delta baseline. Single-threaded scheduler — no synchronization needed.
     private final Map<String, CacheEntry> baselineCache = new HashMap<>();
     private int scrapeGen = 0;
 
@@ -172,26 +233,61 @@ public class TopQueryQuery {
 
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds) {
-        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds, null);
+        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds,
+             null, 1000, 3600_000L, "");
     }
 
     /** Plan-collection enabled variant. */
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds,
                          Integer planMaxPerInterval) {
+        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds,
+             planMaxPerInterval, 1000, 3600_000L, "");
+    }
+
+    /** Full variant — plan cache size, TTL, and explain schema configurable. */
+    public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
+                         Logger otelLogger, int topQueryCount, long intervalSeconds,
+                         Integer planMaxPerInterval, int planCacheSize, long planCacheTtlMs) {
+        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds,
+             planMaxPerInterval, planCacheSize, planCacheTtlMs, "");
+    }
+
+    /** Full variant with explainSchema. */
+    public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
+                         Logger otelLogger, int topQueryCount, long intervalSeconds,
+                         Integer planMaxPerInterval, int planCacheSize, long planCacheTtlMs,
+                         String explainSchema) {
         this.connSupplier       = connSupplier;
         this.dbName             = dbName;
         this.otelLogger         = otelLogger;
         this.topQueryCount      = topQueryCount;
         this.planMaxPerInterval = planMaxPerInterval;
+        this.planCacheSize      = planCacheSize;
+        this.planCacheTtlMs     = planCacheTtlMs;
+        // Empty/null → pass null to EXPLAIN_FROM_SECTION so DB2 selects the schema (USER/default).
+        // The INOUT param returns the actual schema used; queries are built dynamically per call.
+        this.explainSchema = (explainSchema == null || explainSchema.isBlank())
+                             ? null : explainSchema.trim().toUpperCase();
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
         this.sql = String.format(SQL, lookbackMinutes);
         // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
-        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s, planEnabled={}",
+        this.planCache = planMaxPerInterval != null ? buildLruCache(planCacheSize) : null;
+        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s, planEnabled={}, cacheSize={}, cacheTtlMs={}, explainSchema={}",
             topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds,
-            planMaxPerInterval != null);
+            planMaxPerInterval != null, planCacheSize, planCacheTtlMs,
+            this.explainSchema != null ? this.explainSchema : "(DB2 default)");
+    }
+
+    @SuppressWarnings("serial")
+    private static Map<String, PlanCacheEntry> buildLruCache(int maxSize) {
+        return new LinkedHashMap<String, PlanCacheEntry>(16, 0.75f, true) {
+            @Override protected boolean removeEldestEntry(Map.Entry<String, PlanCacheEntry> e) {
+                return size() > maxSize;
+            }
+        };
     }
 
     /** Returns {@code true} when the scrape completed (baseline seeded or deltas emitted), {@code false} on failure. */
@@ -350,7 +446,9 @@ public class TopQueryQuery {
 
         Instant now = Instant.now();
         int emitCount = 0;
-        int plansFetched = 0;
+        // planAttempts counts only EXPLAIN_FROM_SECTION calls (cache misses + failures) against the
+        // budget. Cache hits are free — the budget cap guards only DB2 round-trips.
+        int planAttempts = 0;
         for (int rank = 0; rank < Math.min(topQueryCount, deltas.size()); rank++) {
             int  idx           = (int) deltas.get(rank)[0];
             long execTimeDelta = deltas.get(rank)[1];
@@ -389,59 +487,152 @@ public class TopQueryQuery {
                 .sortOverflows(sortOvfDelta)
                 .stmtType(secType);
 
-            // Optionally enrich with explain plan — plan is already compiled in the package cache,
-            // MON_GET_PKG_CACHE_STMT_DETAILS reads it without re-executing the query (same as SQL
-            // Server sys.dm_exec_query_plan / Oracle V$SQL_PLAN — no cache needed).
-            if (planMaxPerInterval != null && plansFetched < planMaxPerInterval) {
+            if (planMaxPerInterval != null) {
                 String execIdHex = t[4];
-                String planXml = fetchPlanXml(conn, execIdHex, (int) member);
+                String cacheKey = member + ":" + execIdHex;
+                String planXml = null;
+                String planHash = null;
+
+                PlanCacheEntry cached = planCache.get(cacheKey);
+                if (cached != null && cached.expiresMs > System.currentTimeMillis()) {
+                    // Cache hit — free, no budget consumed
+                    planXml  = cached.xml;
+                    planHash = cached.hash;
+                } else if (planAttempts < planMaxPerInterval) {
+                    planAttempts++; // budget consumed only on DB2 round-trip attempts
+                    planXml = fetchPlanXml(conn, execIdHex, (int) member);
+                    if (planXml != null) {
+                        planHash = sha256Hex(planXml);
+                        planCache.put(cacheKey, new PlanCacheEntry(planXml, planHash,
+                            System.currentTimeMillis() + planCacheTtlMs));
+                    }
+                }
                 if (planXml != null) {
-                    event.queryPlan(planXml, sha256Hex(planXml));
-                    plansFetched++;
+                    event.queryPlan(planXml, planHash);
                 }
             }
 
             event.emit(otelLogger, now);
             emitCount++;
         }
-        log.debug("TopQueryQuery: emitted {} top queries (cache size={}, plansFetched={})",
-            emitCount, baselineCache.size(), plansFetched);
+        log.debug("TopQueryQuery: emitted {} top queries (baselineCacheSize={}, planAttempts={})",
+            emitCount, baselineCache.size(), planAttempts);
         return true;
     }
 
     /**
-     * Fetch the compiled plan XML for one section from the Db2 package cache.
+     * Retrieve the explain plan for one section using EXPLAIN_FROM_SECTION.
      *
-     * EXECUTABLE_ID is a binary token returned as VARBINARY by MON_GET_PKG_CACHE_STMT.
-     * The getString() result is a hex-encoded representation; we pass it back as bytes
-     * via setBytes() so the JDBC driver binds it as BLOB, matching the function signature.
+     * 1. Call {@code SYSPROC.EXPLAIN_FROM_SECTION} with EXECUTABLE_ID and SECTION_SOURCE_TYPE='M'
+     *    (empirically verified on DB2 11.5 as the correct value for dynamic SQL).
+     *    Returns EXPLAIN_REQUESTER and EXPLAIN_TIME that identify the inserted rows.
+     * 2. Read {@code EXPLAIN_OPERATOR} and {@code EXPLAIN_STREAM} in the explain schema.
+     * 3. Build a JSON plan summary string.
+     * 4. DELETE from {@code EXPLAIN_INSTANCE} (cascades to all child tables via FK).
      *
-     * SECTION_XML is a CLOB column (Db2 10.5+) containing the compiled plan XML.
+     * Requires explain tables pre-created:
+     *   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',NULL,CURRENT SCHEMA)
      */
     private String fetchPlanXml(Connection conn, String execIdHex, int member) {
         byte[] execIdBytes = hexToBytes(execIdHex);
         if (execIdBytes == null) return null;
-        try (PreparedStatement ps = conn.prepareStatement(SQL_PLAN)) {
-            ps.setQueryTimeout(queryTimeoutSeconds);
-            ps.setBytes(1, execIdBytes);
-            ps.setInt(2, member < 0 ? -2 : member);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    Clob clob = rs.getClob("SECTION_XML");
-                    if (clob == null) return null;
-                    try {
-                        String xml = clob.getSubString(1, (int) Math.min(clob.length(), 2_000_000));
-                        return (xml == null || xml.isBlank()) ? null : xml;
-                    } finally {
-                        try { clob.free(); } catch (Exception ignored) {}
+
+        String explainRequester = null;
+        Timestamp explainTime   = null;
+        String usedSchema       = null;
+
+        try {
+            // Step 1: EXPLAIN_FROM_SECTION
+            // Params: (1)=EXECUTABLE_ID, (2)=MEMBER, (3)=EXPLAIN_SCHEMA INOUT, (4-8)=OUT params
+            try (CallableStatement cs = conn.prepareCall(SQL_EXPLAIN_FROM_SECTION)) {
+                cs.setQueryTimeout(queryTimeoutSeconds);
+                cs.setBytes(1, execIdBytes);
+                cs.setInt(2, member);
+                cs.setString(3, explainSchema);          // null → DB2 selects USER/default
+                cs.registerOutParameter(3, Types.VARCHAR);  // EXPLAIN_SCHEMA INOUT — read back actual schema
+                cs.registerOutParameter(4, Types.VARCHAR);  // EXPLAIN_REQUESTER
+                cs.registerOutParameter(5, Types.TIMESTAMP); // EXPLAIN_TIME
+                cs.registerOutParameter(6, Types.VARCHAR);  // SOURCE_NAME
+                cs.registerOutParameter(7, Types.VARCHAR);  // SOURCE_SCHEMA
+                cs.registerOutParameter(8, Types.VARCHAR);  // SOURCE_VERSION
+                cs.execute();
+                usedSchema       = cs.getString(3);      // actual schema DB2 used
+                explainRequester = cs.getString(4);
+                explainTime      = cs.getTimestamp(5);
+            }
+
+            if (explainRequester == null || explainTime == null || usedSchema == null) return null;
+
+            // Step 2a: read EXPLAIN_OPERATOR using the schema DB2 confirmed
+            String sqlOp  = String.format(SQL_EXPLAIN_OPERATOR, usedSchema);
+            String sqlSt  = String.format(SQL_EXPLAIN_STREAM,   usedSchema);
+            StringBuilder sb = new StringBuilder("{\"operators\":[");
+            boolean firstOp = true;
+            try (PreparedStatement ps = conn.prepareStatement(sqlOp)) {
+                ps.setQueryTimeout(queryTimeoutSeconds);
+                ps.setString(1, explainRequester);
+                ps.setTimestamp(2, explainTime);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        if (!firstOp) sb.append(',');
+                        firstOp = false;
+                        int opId      = rs.getInt("OPERATOR_ID");
+                        String opType = rs.getString("OPERATOR_TYPE");
+                        double cost   = rs.getDouble("TOTAL_COST");
+                        sb.append("{\"id\":").append(opId)
+                          .append(",\"type\":\"").append(opType == null ? "" : opType.trim()).append('"')
+                          .append(",\"cost\":").append(cost).append('}');
                     }
                 }
             }
+            sb.append("],\"streams\":[");
+
+            // Step 2b: read EXPLAIN_STREAM
+            boolean firstSt = true;
+            try (PreparedStatement ps = conn.prepareStatement(sqlSt)) {
+                ps.setQueryTimeout(queryTimeoutSeconds);
+                ps.setString(1, explainRequester);
+                ps.setTimestamp(2, explainTime);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        if (!firstSt) sb.append(',');
+                        firstSt = false;
+                        int streamId = rs.getInt("STREAM_ID");
+                        int srcId    = rs.getInt("SOURCE_ID");
+                        int tgtId    = rs.getInt("TARGET_ID");
+                        int colCount = rs.getInt("COLUMN_COUNT");
+                        sb.append("{\"id\":").append(streamId)
+                          .append(",\"from\":").append(srcId)
+                          .append(",\"to\":").append(tgtId)
+                          .append(",\"cols\":").append(colCount).append('}');
+                    }
+                }
+            }
+            sb.append("]}");
+            String plan = sb.toString();
+            if (firstOp) return null; // no operators means nothing was explained
+
+            return plan;
+
         } catch (Exception e) {
             log.debug("TopQueryQuery: plan fetch failed for execIdHex={} member={}: {}",
                 execIdHex, member, e.getMessage());
+            return null;
+        } finally {
+            // Step 3: cleanup — delete explain rows (cascades via FK to all child tables)
+            if (explainRequester != null && explainTime != null && usedSchema != null) {
+                String sqlDel = String.format(SQL_EXPLAIN_DELETE, usedSchema);
+                try (PreparedStatement ps = conn.prepareStatement(sqlDel)) {
+                    ps.setQueryTimeout(queryTimeoutSeconds);
+                    ps.setString(1, explainRequester);
+                    ps.setTimestamp(2, explainTime);
+                    ps.executeUpdate();
+                } catch (Exception e) {
+                    log.debug("TopQueryQuery: explain cleanup failed for requester={} time={}: {}",
+                        explainRequester, explainTime, e.getMessage());
+                }
+            }
         }
-        return null;
     }
 
     public static String sha256Hex(String input) {

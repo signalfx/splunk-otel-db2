@@ -11,6 +11,7 @@ import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.testing.exporter.InMemoryMetricExporter;
 import org.awaitility.Awaitility;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.Db2Container;
@@ -50,6 +51,19 @@ class Db2ReceiverIntegrationTest {
         .withPassword("password")
         .withDatabaseName("testdb")
         .withStartupTimeout(Duration.ofMinutes(10));
+
+    @BeforeAll
+    static void createExplainTables() throws Exception {
+        // Required once per schema before top_query_plan_enabled: true can work.
+        // SYSINSTALLOBJECTS creates EXPLAIN_INSTANCE + 9 child tables in the current user's schema.
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+        try (Connection conn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+             Statement st = conn.createStatement()) {
+            st.execute("CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)");
+        }
+    }
 
     private Db2ReceiverConfig buildConfig() {
         Db2ReceiverConfig config = new Db2ReceiverConfig();
@@ -474,7 +488,7 @@ class Db2ReceiverIntegrationTest {
         Db2ReceiverConfig config = buildConfig();
         config.setTopQueryEnabled(false);         // we'll start the scheduler manually
         config.setTopQueryPlanEnabled(true);
-        config.setTopQueryPlanMaxPlans(20);
+        config.getTopQueryCollection().setMaxExplainEachInterval(20);
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -528,17 +542,20 @@ class Db2ReceiverIntegrationTest {
             assertThat(record.getAttributes().get(TopQueryEvent.DB_NAMESPACE))
                 .isEqualTo(config.getDatabase());
 
-            // Plan XML must be present and non-empty
-            String planXml = record.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN);
-            assertThat(planXml).isNotNull().isNotBlank();
+            // Plan JSON must be present and contain operator data
+            String planJson = record.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN);
+            assertThat(planJson).isNotNull().isNotBlank();
+            assertThat(planJson).startsWith("{\"operators\":[");
+            assertThat(planJson).contains("\"type\":");
+            assertThat(planJson).contains("\"cost\":");
 
             // Plan hash must be a 64-char lowercase hex SHA-256
             String planHash = record.getAttributes().get(TopQueryEvent.DB2_PLAN_HASH);
             assertThat(planHash).isNotNull().hasSize(64).matches("[0-9a-f]+");
 
-            // Hash must match SHA-256 of the plan XML
+            // Hash must match SHA-256 of the plan JSON
             assertThat(planHash).isEqualTo(
-                com.splunk.otel.db2.receiver.queries.TopQueryQuery.sha256Hex(planXml));
+                com.splunk.otel.db2.receiver.queries.TopQueryQuery.sha256Hex(planJson));
 
             // SQL text must be obfuscated (probe query has no literals — alias only)
             String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);
@@ -572,7 +589,7 @@ class Db2ReceiverIntegrationTest {
         Db2ReceiverConfig config = buildConfig();
         config.setTopQueryEnabled(false);
         config.setTopQueryPlanEnabled(true);
-        config.setTopQueryPlanMaxPlans(20);
+        config.getTopQueryCollection().setMaxExplainEachInterval(20);
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -584,6 +601,7 @@ class Db2ReceiverIntegrationTest {
 
         Thread.sleep(2000);
 
+        // Run the first batch of workload — captured by the first emit interval.
         Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
         try (Statement st = workConn.createStatement()) {
             for (int i = 0; i < 3; i++) {
@@ -598,10 +616,34 @@ class Db2ReceiverIntegrationTest {
         }
 
         try {
-            // Wait for at least two plan-enriched records for the same probe query.
-            // Each interval should independently fetch the plan from the package cache.
+            // Wait for the first plan-enriched record from interval 1.
             Awaitility.await()
-                .atMost(35, TimeUnit.SECONDS)
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(2, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_PLAN_EVERY_PROBE")
+                        && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null));
+
+            // Run the probe again so the second interval has a non-zero delta to emit.
+            Connection workConn2 = DriverManager.getConnection(db2.getJdbcUrl(), props);
+            try (Statement st = workConn2.createStatement()) {
+                for (int i = 0; i < 3; i++) {
+                    try (ResultSet r = st.executeQuery(
+                            "SELECT COUNT(*) AS SPLUNK_OTEL_PLAN_EVERY_PROBE " +
+                            "FROM SYSCAT.COLUMNS")) {
+                        while (r.next()) { /* drain */ }
+                    }
+                }
+            } finally {
+                workConn2.close();
+            }
+
+            // Wait for at least two plan-enriched records (one per interval).
+            Awaitility.await()
+                .atMost(25, TimeUnit.SECONDS)
                 .pollInterval(2, TimeUnit.SECONDS)
                 .until(() -> logExporter.getFinishedLogRecordItems().stream()
                     .filter(r -> "db.server.top_query".equals(r.getEventName())
