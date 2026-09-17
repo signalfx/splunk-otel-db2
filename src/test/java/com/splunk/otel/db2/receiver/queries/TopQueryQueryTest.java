@@ -842,11 +842,15 @@ class TopQueryQueryTest {
      */
     private CallableStatement stubPlanPs(String ignoredPlanXml) throws Exception {
         CallableStatement cs = mock(CallableStatement.class);
-        // EXPLAIN_FROM_SECTION params: (2)=MEMBER IN, (3)=EXPLAIN_SCHEMA INOUT, (4)=EXPLAIN_REQUESTER, (5)=EXPLAIN_TIME
+        // EXPLAIN_FROM_SECTION params: (3)=EXPLAIN_SCHEMA INOUT, (4)=EXPLAIN_REQUESTER, (5)=EXPLAIN_TIME,
+        //                              (6)=SOURCE_NAME, (7)=SOURCE_SCHEMA, (8)=SOURCE_VERSION
         when(cs.getString(3)).thenReturn("TESTUSER"); // EXPLAIN_SCHEMA INOUT — actual schema used
         when(cs.getString(4)).thenReturn("TESTUSER"); // EXPLAIN_REQUESTER OUT
         Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
         when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200"); // SOURCE_NAME OUT
+        when(cs.getString(7)).thenReturn("NULLID");   // SOURCE_SCHEMA OUT
+        when(cs.getString(8)).thenReturn("0100270A"); // SOURCE_VERSION OUT
 
         // EXPLAIN_OPERATOR result
         PreparedStatement opPs = mock(PreparedStatement.class);
@@ -1064,6 +1068,9 @@ class TopQueryQueryTest {
             when(cs.getString(4)).thenReturn("TESTUSER"); // EXPLAIN_REQUESTER
             when(cs.getTimestamp(5)).thenReturn(
                 Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999)));
+            when(cs.getString(6)).thenReturn("SYSSH200"); // SOURCE_NAME
+            when(cs.getString(7)).thenReturn("NULLID");   // SOURCE_SCHEMA
+            when(cs.getString(8)).thenReturn("0100270A"); // SOURCE_VERSION
             return cs;
         });
         when(conn.prepareStatement(anyString())).thenAnswer(inv -> {

@@ -150,10 +150,13 @@ public class TopQueryQuery {
         "CALL SYSPROC.EXPLAIN_FROM_SECTION(CAST(? AS VARCHAR(32) FOR BIT DATA), 'M', '-', ?, ?, ?, ?, ?, ?, ?)";
 
     // Step 2a — read plan operators for this explain session.
+    // Full 5-part EXPLAIN_INSTANCE key prevents row mixing when concurrent collectors
+    // share the same explain schema.
     private static final String SQL_EXPLAIN_OPERATOR =
         "SELECT OPERATOR_ID, RTRIM(OPERATOR_TYPE) AS OPERATOR_TYPE, TOTAL_COST " +
         "FROM %s.EXPLAIN_OPERATOR " +
         "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
         "ORDER BY OPERATOR_ID";
 
     // Step 2b — read plan streams (operator connectivity) for this explain session.
@@ -161,11 +164,14 @@ public class TopQueryQuery {
         "SELECT STREAM_ID, SOURCE_ID, TARGET_ID, COLUMN_COUNT " +
         "FROM %s.EXPLAIN_STREAM " +
         "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
         "ORDER BY STREAM_ID";
 
     // Cleanup — delete explain instance; cascades to all child explain tables via FK.
     private static final String SQL_EXPLAIN_DELETE =
-        "DELETE FROM %s.EXPLAIN_INSTANCE WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ?";
+        "DELETE FROM %s.EXPLAIN_INSTANCE " +
+        "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ?";
 
     // Counter array indices — I_NUM_EXEC is NUM_EXECUTIONS (total), not NUM_EXEC_WITH_METRICS
     private static final int I_EXEC_TIME = 0;
@@ -540,6 +546,9 @@ public class TopQueryQuery {
         String explainRequester = null;
         Timestamp explainTime   = null;
         String usedSchema       = null;
+        String sourceName       = null;
+        String sourceSchema     = null;
+        String sourceVersion    = null;
 
         try {
             // Step 1: EXPLAIN_FROM_SECTION
@@ -549,16 +558,19 @@ public class TopQueryQuery {
                 cs.setBytes(1, execIdBytes);
                 cs.setInt(2, member);
                 cs.setString(3, explainSchema);          // null → DB2 selects USER/default
-                cs.registerOutParameter(3, Types.VARCHAR);  // EXPLAIN_SCHEMA INOUT — read back actual schema
-                cs.registerOutParameter(4, Types.VARCHAR);  // EXPLAIN_REQUESTER
+                cs.registerOutParameter(3, Types.VARCHAR);   // EXPLAIN_SCHEMA INOUT — read back actual schema
+                cs.registerOutParameter(4, Types.VARCHAR);   // EXPLAIN_REQUESTER
                 cs.registerOutParameter(5, Types.TIMESTAMP); // EXPLAIN_TIME
-                cs.registerOutParameter(6, Types.VARCHAR);  // SOURCE_NAME
-                cs.registerOutParameter(7, Types.VARCHAR);  // SOURCE_SCHEMA
-                cs.registerOutParameter(8, Types.VARCHAR);  // SOURCE_VERSION
+                cs.registerOutParameter(6, Types.VARCHAR);   // SOURCE_NAME
+                cs.registerOutParameter(7, Types.VARCHAR);   // SOURCE_SCHEMA
+                cs.registerOutParameter(8, Types.VARCHAR);   // SOURCE_VERSION
                 cs.execute();
-                usedSchema       = cs.getString(3);      // actual schema DB2 used
+                usedSchema       = cs.getString(3);  // actual schema DB2 used
                 explainRequester = cs.getString(4);
                 explainTime      = cs.getTimestamp(5);
+                sourceName       = cs.getString(6);
+                sourceSchema     = cs.getString(7);
+                sourceVersion    = cs.getString(8);
             }
 
             if (explainRequester == null || explainTime == null || usedSchema == null) return null;
@@ -572,6 +584,9 @@ public class TopQueryQuery {
                 ps.setQueryTimeout(queryTimeoutSeconds);
                 ps.setString(1, explainRequester);
                 ps.setTimestamp(2, explainTime);
+                ps.setString(3, sourceName);
+                ps.setString(4, sourceSchema);
+                ps.setString(5, sourceVersion);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         if (!firstOp) sb.append(',');
@@ -593,6 +608,9 @@ public class TopQueryQuery {
                 ps.setQueryTimeout(queryTimeoutSeconds);
                 ps.setString(1, explainRequester);
                 ps.setTimestamp(2, explainTime);
+                ps.setString(3, sourceName);
+                ps.setString(4, sourceSchema);
+                ps.setString(5, sourceVersion);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         if (!firstSt) sb.append(',');
@@ -626,6 +644,9 @@ public class TopQueryQuery {
                     ps.setQueryTimeout(queryTimeoutSeconds);
                     ps.setString(1, explainRequester);
                     ps.setTimestamp(2, explainTime);
+                    ps.setString(3, sourceName);
+                    ps.setString(4, sourceSchema);
+                    ps.setString(5, sourceVersion);
                     ps.executeUpdate();
                 } catch (Exception e) {
                     log.debug("TopQueryQuery: explain cleanup failed for requester={} time={}: {}",
