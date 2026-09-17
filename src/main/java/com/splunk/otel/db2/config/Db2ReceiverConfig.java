@@ -19,6 +19,9 @@ public class Db2ReceiverConfig {
     private boolean useSnapshotMonitor = false;
     private String querySampleInterval = "10s";
     private String topQueryInterval = "60s";
+    private boolean explainPlanEnabled = false;
+    private int explainPlanMaxPlans = 20;
+    private String explainPlanInterval = "10m";
     private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
     private Map<String, String> resourceAttributes = Collections.emptyMap();
@@ -96,6 +99,24 @@ public class Db2ReceiverConfig {
         return d;
     }
     public void setTopQueryInterval(String topQueryInterval) { this.topQueryInterval = topQueryInterval; }
+
+    public boolean isExplainPlanEnabled() { return explainPlanEnabled; }
+    public void setExplainPlanEnabled(boolean explainPlanEnabled) { this.explainPlanEnabled = explainPlanEnabled; }
+
+    public int getExplainPlanMaxPlans() { return explainPlanMaxPlans; }
+    public void setExplainPlanMaxPlans(int explainPlanMaxPlans) {
+        if (explainPlanMaxPlans <= 0)
+            throw new IllegalArgumentException("explain_plan_max_plans must be > 0, got " + explainPlanMaxPlans);
+        this.explainPlanMaxPlans = explainPlanMaxPlans;
+    }
+
+    public Duration getExplainPlanIntervalDuration() {
+        Duration d = parseDuration(explainPlanInterval, 600);
+        if (d.getSeconds() < 60)
+            throw new IllegalArgumentException("explain_plan_interval must be at least 60s, got '" + explainPlanInterval + "'");
+        return d;
+    }
+    public void setExplainPlanInterval(String explainPlanInterval) { this.explainPlanInterval = explainPlanInterval; }
 
     public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
     public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {

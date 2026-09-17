@@ -3,6 +3,7 @@ package com.splunk.otel.db2.receiver;
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
 import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
+import com.splunk.otel.db2.receiver.queries.ExplainPlanQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
 import com.splunk.otel.db2.receiver.queries.TablespaceQuery;
 import com.splunk.otel.db2.receiver.queries.TopQueryQuery;
@@ -35,8 +36,10 @@ public class Db2Receiver {
     private Db2Connection querySampleConnection;
     private Db2Connection topQueryConnection;
 
+    private Db2Connection explainPlanConnection;
     private ScheduledExecutorService querySampleScheduler;
     private ScheduledExecutorService topQueryScheduler;
+    private ScheduledExecutorService explainPlanScheduler;
 
     private final AtomicBoolean stopped = new AtomicBoolean(false); // B3: idempotent stop
 
@@ -93,6 +96,11 @@ public class Db2Receiver {
         if (otelLogger != null && config.isTopQueryEnabled()) {
             long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
             startTopQueryScheduler(topQueryIntervalSeconds);
+        }
+
+        if (otelLogger != null && config.isExplainPlanEnabled()) {
+            long explainPlanIntervalSeconds = config.getExplainPlanIntervalDuration().getSeconds();
+            startExplainPlanScheduler(explainPlanIntervalSeconds);
         }
 
         log.info("[{}] DB2 receiver started", label);
@@ -189,6 +197,39 @@ public class Db2Receiver {
         );
     }
 
+    public void startExplainPlanScheduler(long intervalSeconds) {
+        explainPlanConnection = new Db2Connection(config, label);
+        Supplier<Connection> explainPlanConnSupplier = () -> {
+            try {
+                return explainPlanConnection.getOrConnect();
+            } catch (SQLException e) {
+                throw new RuntimeException("[" + label + "] DB2 explain-plan connection failed: " + e.getMessage(), e);
+            }
+        };
+        ExplainPlanQuery explainPlanQuery = new ExplainPlanQuery(
+            explainPlanConnSupplier,
+            config.getDatabase(),
+            otelLogger,
+            config.getExplainPlanMaxPlans(),
+            intervalSeconds
+        );
+        explainPlanScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "db2-explain-plan[" + label + "]");
+            t.setDaemon(true);
+            return t;
+        });
+        explainPlanScheduler.scheduleWithFixedDelay(
+            () -> {
+                try {
+                    explainPlanQuery.collect();
+                } catch (Exception e) {
+                    log.warn("[{}] Explain plan collection error: {}", label, e.getMessage());
+                }
+            },
+            0, intervalSeconds, TimeUnit.SECONDS
+        );
+    }
+
     private int detectDb2Version(Supplier<Connection> connSupplier) {
         try {
             java.sql.DatabaseMetaData meta = connSupplier.get().getMetaData();
@@ -215,8 +256,9 @@ public class Db2Receiver {
 
     public void stopScheduler() {
         // B4: graceful drain — let the current collection cycle finish, then force-stop
-        shutdownGracefully(querySampleScheduler,     "db2-query-sampler");
-        shutdownGracefully(topQueryScheduler, "db2-top-query-collector");
+        shutdownGracefully(querySampleScheduler,  "db2-query-sampler");
+        shutdownGracefully(topQueryScheduler,     "db2-top-query-collector");
+        shutdownGracefully(explainPlanScheduler,  "db2-explain-plan");
     }
 
     private void shutdownGracefully(ScheduledExecutorService scheduler, String name) {
@@ -235,8 +277,9 @@ public class Db2Receiver {
 
     public void closeConnection() {
         metricsConnection.close();
-        if (querySampleConnection != null) querySampleConnection.close();
-        if (topQueryConnection    != null) topQueryConnection.close();
+        if (querySampleConnection  != null) querySampleConnection.close();
+        if (topQueryConnection     != null) topQueryConnection.close();
+        if (explainPlanConnection  != null) explainPlanConnection.close();
         log.info("[{}] DB2 receiver stopped", label);
     }
 }
