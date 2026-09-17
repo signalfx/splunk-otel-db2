@@ -174,9 +174,9 @@ public class Db2Config {
         if (db2.get("query_sample_enabled")      != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
         if (db2.get("use_snapshot_monitor")      != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
         if (db2.get("connect_timeout_seconds")!= null) rc.setConnectTimeoutSeconds(asInt(db2, "connect_timeout_seconds"));
-        if (db2.get("explain_plan_enabled")   != null) rc.setExplainPlanEnabled(asBool(db2, "explain_plan_enabled"));
-        if (db2.get("explain_plan_max_plans") != null) rc.setExplainPlanMaxPlans(asInt(db2, "explain_plan_max_plans"));
-        if (db2.get("explain_plan_interval")  != null) rc.setExplainPlanInterval(asString(db2, "explain_plan_interval"));
+        if (db2.get("top_query_plan_enabled")    != null) rc.setTopQueryPlanEnabled(asBool(db2, "top_query_plan_enabled"));
+        if (db2.get("top_query_plan_max_plans")  != null) rc.setTopQueryPlanMaxPlans(asInt(db2, "top_query_plan_max_plans"));
+        if (db2.get("top_query_plan_cache_ttl")  != null) rc.setTopQueryPlanCacheTtl(asString(db2, "top_query_plan_cache_ttl"));
         if (db2.get("service_name")           != null) rc.setServiceName(asString(db2, "service_name"));
         if (db2.get("service_namespace")      != null) rc.setServiceNamespace(asString(db2, "service_namespace"));
         if (db2.get("service_instance_id")    != null) rc.setServiceInstanceId(asString(db2, "service_instance_id"));

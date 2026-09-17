@@ -39,6 +39,9 @@ receivers:
     top_query_enabled: false           # set true to enable top query collection (opt-in)
     top_query_count: 250               # top N queries to emit per interval (must be > 0)
     top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
+    top_query_plan_enabled: false      # set true to enrich top_query events with explain plan XML
+    top_query_plan_max_plans: 20       # max plan CLOB fetches per interval (budget cap)
+    top_query_plan_cache_ttl: "10m"    # how long a plan is cached before re-fetching
     query_sample_enabled: false        # set true to enable query sampling (opt-in)
     max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"       # how often to sample active queries
@@ -146,7 +149,9 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
 | Query sample + Blocking session (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
-| Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+| Top query + Plan (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+
+Plan collection (`top_query_plan_enabled: true`) reuses the top-query connection — it does **not** open a fourth connection.
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
 
@@ -337,6 +342,11 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
 
 -- Top query collection (top_query_enabled: true)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
+
+-- Explain plan enrichment (top_query_plan_enabled: true)
+-- MON_GET_PKG_CACHE_STMT_DETAILS reads compiled plan XML from the package cache
+-- (no query re-execution). Requires Db2 10.5+.
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT_DETAILS TO USER db2mon;
 
 -- Query sampling (query_sample_enabled: true, default path)
 GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;

@@ -19,6 +19,7 @@ data:
         tls:
           insecure: {{ .tls.insecure }}
         top_query_enabled: {{ .topQueryEnabled }}
+        top_query_plan_enabled: {{ .topQueryPlanEnabled | default false }}
         query_sample_enabled: {{ .querySampleEnabled }}
     {{- end }}
 

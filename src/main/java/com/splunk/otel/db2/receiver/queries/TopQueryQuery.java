@@ -4,13 +4,17 @@ import com.splunk.otel.db2.util.SqlObfuscator;
 import io.opentelemetry.api.logs.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.security.MessageDigest;
+import java.sql.Clob;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -54,12 +58,21 @@ import java.util.function.Supplier;
  *
  * SQL text is obfuscated via {@link SqlObfuscator} before emission. Records whose
  * obfuscation fails are dropped with a WARN log — never emitted raw.
+ *
+ * Plan collection (optional): when enabled, each emitted top-query record is enriched
+ * with {@code db2.query_plan} (SECTION_XML from MON_GET_PKG_CACHE_STMT_DETAILS) and
+ * {@code db2.query_plan.hash} (SHA-256 of the XML). A client-side LRU cache keyed on
+ * {@code "member:executableId"} with a configurable TTL prevents repeated CLOB fetches
+ * for stable plans. EXECUTABLE_ID is bound as bytes (BLOB) — not as a string — because
+ * it is a binary token that MON_GET_PKG_CACHE_STMT returns as VARBINARY.
  */
 public class TopQueryQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(TopQueryQuery.class);
 
     // Entries absent from the plan-cache result for this many consecutive scrapes are evicted.
     static final int MAX_STALE_CYCLES = 3;
+
+    static final long DEFAULT_PLAN_CACHE_TTL_MS = 10 * 60 * 1000L; // 10 minutes
 
     // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
     // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
@@ -104,6 +117,14 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
 
+    // Reads the compiled plan XML for one section from the package cache.
+    // EXECUTABLE_ID is a binary token: EXECUTABLE_ID must be bound with setBytes(), not setString().
+    // SECTION_XML is a CLOB column containing the compiled execution plan XML (Db2 10.5+).
+    private static final String SQL_PLAN =
+        "SELECT SECTION_XML " +
+        "FROM TABLE(MON_GET_PKG_CACHE_STMT_DETAILS(CAST(? AS BLOB(100)), ?)) AS D " +
+        "FETCH FIRST 1 ROW ONLY";
+
     // Counter array indices — I_NUM_EXEC is NUM_EXECUTIONS (total), not NUM_EXEC_WITH_METRICS
     private static final int I_EXEC_TIME = 0;
     private static final int I_NUM_EXEC  = 1;
@@ -121,6 +142,10 @@ public class TopQueryQuery {
     private final String sql;
     private final int queryTimeoutSeconds;
 
+    // Plan collection settings — null planCacheTtlMs means plan collection is disabled.
+    private final Integer planMaxPerInterval;
+    private final Long    planCacheTtlMs;
+
     // TTL-bounded delta baseline. Single-threaded scheduler — no synchronization needed.
     private final Map<String, CacheEntry> baselineCache = new HashMap<>();
     private int scrapeGen = 0;
@@ -129,6 +154,10 @@ public class TopQueryQuery {
     // Stored as a server-local Timestamp so INSERT_TIMESTAMP comparison stays on the server clock.
     // Null until the first scrape completes.
     private java.sql.Timestamp lastServerScrapeInstant = null;
+
+    // Plan LRU cache: key = "member:executableIdHex", value = expiry (ms since epoch).
+    // Bounded to planMaxPerInterval * 4 to prevent unbounded growth.
+    private Map<String, Long> planCache;
 
     private static final class CacheEntry {
         long[] counters;
@@ -149,63 +178,91 @@ public class TopQueryQuery {
 
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds) {
-        this.connSupplier  = connSupplier;
-        this.dbName        = dbName;
-        this.otelLogger    = otelLogger;
-        this.topQueryCount = topQueryCount;
+        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds, null, null);
+    }
+
+    /** Plan-collection enabled variant. */
+    public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
+                         Logger otelLogger, int topQueryCount, long intervalSeconds,
+                         Integer planMaxPerInterval, Long planCacheTtlMs) {
+        this.connSupplier        = connSupplier;
+        this.dbName              = dbName;
+        this.otelLogger          = otelLogger;
+        this.topQueryCount       = topQueryCount;
+        this.planMaxPerInterval  = planMaxPerInterval;
+        this.planCacheTtlMs      = planCacheTtlMs;
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
         this.sql = String.format(SQL, lookbackMinutes);
         // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
-        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s",
-            topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds);
+        if (planMaxPerInterval != null && planCacheTtlMs != null) {
+            final int maxSize = planMaxPerInterval * 4;
+            this.planCache = new LinkedHashMap<>(maxSize, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+                    return size() > maxSize;
+                }
+            };
+        }
+        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s, planEnabled={}",
+            topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds,
+            planMaxPerInterval != null);
     }
 
     /** Returns {@code true} when the scrape completed (baseline seeded or deltas emitted), {@code false} on failure. */
     public boolean collect() {
         Map<String, long[]>        curr              = new HashMap<>();
-        List<String[]>             texts             = new ArrayList<>(); // [rawSql, secType, key, member]
+        // texts[i] = [rawSql, secType, key, member, executableIdHex]
+        List<String[]>             texts             = new ArrayList<>();
         List<long[]>               counters          = new ArrayList<>();
         List<java.sql.Timestamp>   insertTimestamps  = new ArrayList<>();
         // SERVER_NOW from the first result row (same for all rows in one query).
         // Null until at least one row is processed; left null on empty result sets.
         java.sql.Timestamp thisServerNow = null;
 
+        Connection conn;
         try {
-            Connection conn = connSupplier.get();
-            try (Statement st = conn.createStatement()) {
-                st.setQueryTimeout(queryTimeoutSeconds);
-                try (ResultSet rs = st.executeQuery(sql)) {
-                    while (rs.next()) {
-                        String rawSql = rs.getString("STMT_TEXT");
-                        if (rawSql == null || rawSql.isBlank()) continue;
-                        if (thisServerNow == null) {
-                            thisServerNow = rs.getTimestamp("SERVER_NOW");
-                        }
-                        long member   = rs.getLong("MEMBER");
-                        String execId = rs.getString("EXECUTABLE_ID");
-                        String key    = member + ":" + execId;
-                        java.sql.Timestamp insertTs = rs.getTimestamp("INSERT_TIMESTAMP");
-                        long[] c = {
-                            rs.getLong("STMT_EXEC_TIME"),
-                            rs.getLong("NUM_EXECUTIONS"),
-                            rs.getLong("TOTAL_CPU_TIME"),
-                            rs.getLong("ROWS_READ"),
-                            rs.getLong("ROWS_RETURNED"),
-                            rs.getLong("ROWS_MODIFIED"),
-                            rs.getLong("TOTAL_SECTION_SORTS"),
-                            rs.getLong("SORT_OVERFLOWS")
-                        };
-                        curr.put(key, c);
-                        texts.add(new String[]{rawSql, rs.getString("SECTION_TYPE"),
-                                               key, String.valueOf(member)});
-                        counters.add(c);
-                        // Null INSERT_TIMESTAMP (unexpected) treated as Epoch — always predates
-                        // any real scrape, so the section is conservatively seeded, never inflated.
-                        insertTimestamps.add(insertTs != null ? insertTs
-                            : new java.sql.Timestamp(0));
+            conn = connSupplier.get();
+        } catch (Exception e) {
+            log.warn("TopQueryQuery collection failed (connection): {}", e.getMessage());
+            return false;
+        }
+
+        try (Statement st = conn.createStatement()) {
+            st.setQueryTimeout(queryTimeoutSeconds);
+            try (ResultSet rs = st.executeQuery(sql)) {
+                while (rs.next()) {
+                    String rawSql = rs.getString("STMT_TEXT");
+                    if (rawSql == null || rawSql.isBlank()) continue;
+                    if (thisServerNow == null) {
+                        thisServerNow = rs.getTimestamp("SERVER_NOW");
                     }
+                    long   member        = rs.getLong("MEMBER");
+                    String execId        = rs.getString("EXECUTABLE_ID");
+                    byte[] execIdBytes   = rs.getBytes("EXECUTABLE_ID");
+                    String key           = member + ":" + execId;
+                    java.sql.Timestamp insertTs = rs.getTimestamp("INSERT_TIMESTAMP");
+                    long[] c = {
+                        rs.getLong("STMT_EXEC_TIME"),
+                        rs.getLong("NUM_EXECUTIONS"),
+                        rs.getLong("TOTAL_CPU_TIME"),
+                        rs.getLong("ROWS_READ"),
+                        rs.getLong("ROWS_RETURNED"),
+                        rs.getLong("ROWS_MODIFIED"),
+                        rs.getLong("TOTAL_SECTION_SORTS"),
+                        rs.getLong("SORT_OVERFLOWS")
+                    };
+                    curr.put(key, c);
+                    // Store execIdBytes as hex string for plan cache keying (bytes not serializable in array)
+                    String execIdHex = execIdBytes != null ? bytesToHex(execIdBytes) : execId;
+                    texts.add(new String[]{rawSql, rs.getString("SECTION_TYPE"),
+                                           key, String.valueOf(member), execIdHex});
+                    counters.add(c);
+                    // Null INSERT_TIMESTAMP (unexpected) treated as Epoch — always predates
+                    // any real scrape, so the section is conservatively seeded, never inflated.
+                    insertTimestamps.add(insertTs != null ? insertTs
+                        : new java.sql.Timestamp(0));
                 }
             }
         } catch (Exception e) {
@@ -304,8 +361,12 @@ public class TopQueryQuery {
             return cmp != 0 ? cmp : Long.compare(b[2], a[2]);
         });
 
-        Instant now = Instant.now();
+        long now = System.currentTimeMillis();
+        if (planCache != null) evictExpiredPlanCache(now);
+
+        Instant nowInstant = Instant.ofEpochMilli(now);
         int emitCount = 0;
+        int plansFetched = 0;
         for (int rank = 0; rank < Math.min(topQueryCount, deltas.size()); rank++) {
             int  idx           = (int) deltas.get(rank)[0];
             long execTimeDelta = deltas.get(rank)[1];
@@ -334,7 +395,7 @@ public class TopQueryQuery {
             double totalExecSec = execTimeDelta / 1000.0;
             double avgExecSec   = numExecDelta > 0 ? totalExecSec / numExecDelta : 0.0;
 
-            TopQueryEvent.of(dbName, obfuscated, member, numExecDelta, totalExecSec)
+            TopQueryEvent event = TopQueryEvent.of(dbName, obfuscated, member, numExecDelta, totalExecSec)
                 .avgExecTimeSec(avgExecSec)
                 .totalCpuTimeMicros(cpuUsDelta)
                 .rowsRead(rowsReadDelta)
@@ -342,11 +403,106 @@ public class TopQueryQuery {
                 .rowsModified(rowsModDelta)
                 .sorts(sortsDelta)
                 .sortOverflows(sortOvfDelta)
-                .stmtType(secType)
-                .emit(otelLogger, now);
+                .stmtType(secType);
+
+            // Optionally enrich with explain plan (plan is already compiled in the package cache —
+            // MON_GET_PKG_CACHE_STMT_DETAILS reads it without re-executing the query).
+            if (planCache != null && plansFetched < planMaxPerInterval) {
+                String execIdHex  = t[4];
+                String planCacheKey = member + ":" + execIdHex;
+                Long expiry = planCache.get(planCacheKey);
+                if (expiry != null && now < expiry) {
+                    log.debug("TopQueryQuery: plan cache hit for key={}", planCacheKey);
+                } else {
+                    String planXml = fetchPlanXml(conn, execIdHex, (int) member);
+                    if (planXml != null) {
+                        String planHash = sha256Hex(planXml);
+                        event.queryPlan(planXml, planHash);
+                        planCache.put(planCacheKey, now + planCacheTtlMs);
+                        plansFetched++;
+                    }
+                }
+            }
+
+            event.emit(otelLogger, nowInstant);
             emitCount++;
         }
-        log.debug("TopQueryQuery: emitted {} top queries (cache size={})", emitCount, baselineCache.size());
+        log.debug("TopQueryQuery: emitted {} top queries (cache size={}, plansFetched={})",
+            emitCount, baselineCache.size(), plansFetched);
         return true;
+    }
+
+    /**
+     * Fetch the compiled plan XML for one section from the Db2 package cache.
+     *
+     * EXECUTABLE_ID is a binary token returned as VARBINARY by MON_GET_PKG_CACHE_STMT.
+     * The getString() result is a hex-encoded representation; we pass it back as bytes
+     * via setBytes() so the JDBC driver binds it as BLOB, matching the function signature.
+     *
+     * SECTION_XML is a CLOB column (Db2 10.5+) containing the compiled plan XML.
+     */
+    private String fetchPlanXml(Connection conn, String execIdHex, int member) {
+        byte[] execIdBytes = hexToBytes(execIdHex);
+        if (execIdBytes == null) return null;
+        try (PreparedStatement ps = conn.prepareStatement(SQL_PLAN)) {
+            ps.setQueryTimeout(queryTimeoutSeconds);
+            ps.setBytes(1, execIdBytes);
+            ps.setInt(2, member < 0 ? -2 : member);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    Clob clob = rs.getClob("SECTION_XML");
+                    if (clob == null) return null;
+                    try {
+                        String xml = clob.getSubString(1, (int) Math.min(clob.length(), 2_000_000));
+                        return (xml == null || xml.isBlank()) ? null : xml;
+                    } finally {
+                        try { clob.free(); } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("TopQueryQuery: plan fetch failed for execIdHex={} member={}: {}",
+                execIdHex, member, e.getMessage());
+        }
+        return null;
+    }
+
+    private void evictExpiredPlanCache(long now) {
+        Iterator<Map.Entry<String, Long>> it = planCache.entrySet().iterator();
+        while (it.hasNext()) {
+            if (now >= it.next().getValue()) it.remove();
+        }
+    }
+
+    public static String sha256Hex(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
+    static byte[] hexToBytes(String hex) {
+        if (hex == null || hex.length() % 2 != 0) return null;
+        int len = hex.length();
+        byte[] data = new byte[len / 2];
+        try {
+            for (int i = 0; i < len; i += 2) {
+                data[i / 2] = (byte) Integer.parseInt(hex.substring(i, i + 2), 16);
+            }
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        return data;
     }
 }

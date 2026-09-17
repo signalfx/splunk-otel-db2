@@ -455,6 +455,182 @@ class Db2ReceiverIntegrationTest {
         }
     }
 
+    @Test
+    void topQueryPlanEnrichedWithPlanXmlAndHash() throws Exception {
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build())
+            .build();
+
+        Db2ReceiverConfig config = buildConfig();
+        config.setTopQueryEnabled(false);         // we'll start the scheduler manually
+        config.setTopQueryPlanEnabled(true);
+        config.setTopQueryPlanMaxPlans(20);
+        config.setTopQueryPlanCacheTtl("10m");
+
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+        receiver.startTopQueryScheduler(4L);
+
+        // Let the seed cycle complete before generating workload.
+        Thread.sleep(2000);
+
+        // Warm the plan cache with a recognisable query.
+        Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (Statement st = workConn.createStatement()) {
+            for (int i = 0; i < 3; i++) {
+                try (ResultSet r = st.executeQuery(
+                        "SELECT COUNT(*) AS SPLUNK_OTEL_PLAN_PROBE " +
+                        "FROM SYSCAT.COLUMNS A, SYSCAT.COLUMNS B " +
+                        "WHERE A.TABSCHEMA = B.TABSCHEMA")) {
+                    while (r.next()) { /* drain */ }
+                }
+            }
+        } finally {
+            workConn.close();
+        }
+
+        try {
+            // Wait for a top_query record carrying the probe query.
+            Awaitility.await()
+                .atMost(40, TimeUnit.SECONDS)
+                .pollInterval(2, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_PLAN_PROBE")
+                        && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null));
+
+            io.opentelemetry.sdk.logs.data.LogRecordData record =
+                logExporter.getFinishedLogRecordItems().stream()
+                    .filter(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_PLAN_PROBE")
+                        && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null)
+                    .findFirst()
+                    .orElseThrow();
+
+            assertThat(record.getAttributes().get(TopQueryEvent.DB_SYSTEM)).isEqualTo("ibm.db2");
+            assertThat(record.getAttributes().get(TopQueryEvent.DB_NAMESPACE))
+                .isEqualTo(config.getDatabase());
+
+            // Plan XML must be present and non-empty
+            String planXml = record.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN);
+            assertThat(planXml).isNotNull().isNotBlank();
+
+            // Plan hash must be a 64-char lowercase hex SHA-256
+            String planHash = record.getAttributes().get(TopQueryEvent.DB2_PLAN_HASH);
+            assertThat(planHash).isNotNull().hasSize(64).matches("[0-9a-f]+");
+
+            // Hash must match SHA-256 of the plan XML
+            assertThat(planHash).isEqualTo(
+                com.splunk.otel.db2.receiver.queries.TopQueryQuery.sha256Hex(planXml));
+
+            // SQL text must be obfuscated (probe query has no literals — alias only)
+            String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);
+            assertThat(queryText).doesNotContain("'");
+
+        } finally {
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
+    }
+
+    @Test
+    void planCachePreventsRepeatedFetchWithinTtl() throws Exception {
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build())
+            .build();
+
+        Db2ReceiverConfig config = buildConfig();
+        config.setTopQueryEnabled(false);
+        config.setTopQueryPlanEnabled(true);
+        config.setTopQueryPlanMaxPlans(20);
+        config.setTopQueryPlanCacheTtl("10m"); // long TTL — same executableId won't be re-fetched
+
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+        receiver.startTopQueryScheduler(3L);
+
+        Thread.sleep(2000);
+
+        Connection workConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (Statement st = workConn.createStatement()) {
+            for (int i = 0; i < 2; i++) {
+                try (ResultSet r = st.executeQuery(
+                        "SELECT COUNT(*) AS SPLUNK_OTEL_PLAN_CACHE_PROBE " +
+                        "FROM SYSCAT.COLUMNS")) {
+                    while (r.next()) { /* drain */ }
+                }
+            }
+        } finally {
+            workConn.close();
+        }
+
+        try {
+            // Wait for first plan-enriched record
+            Awaitility.await()
+                .atMost(25, TimeUnit.SECONDS)
+                .pollInterval(1, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> "db.server.top_query".equals(r.getEventName())
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                        && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                               .toUpperCase().contains("SPLUNK_OTEL_PLAN_CACHE_PROBE")
+                        && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null));
+
+            // Wait two more collection cycles — plan should only be fetched once per TTL
+            Thread.sleep(8000);
+
+            // All records for the probe: count how many have a plan attached
+            long withPlan = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> "db.server.top_query".equals(r.getEventName())
+                    && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT) != null
+                    && r.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT)
+                           .toUpperCase().contains("SPLUNK_OTEL_PLAN_CACHE_PROBE")
+                    && r.getAttributes().get(TopQueryEvent.DB2_QUERY_PLAN) != null)
+                .count();
+
+            // The plan cache should prevent more than one plan-enriched emit per TTL window
+            assertThat(withPlan).isEqualTo(1);
+
+        } finally {
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
+    }
+
     private static List<String> metricNames(InMemoryMetricExporter exporter) {
         return exporter.getFinishedMetricItems().stream()
             .map(m -> m.getName())

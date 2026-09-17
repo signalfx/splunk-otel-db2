@@ -245,12 +245,12 @@ class Db2ConfigTest {
     }
 
     @Test
-    void explainPlanEnabledDefaultIsFalse() {
-        assertThat(new Db2ReceiverConfig().isExplainPlanEnabled()).isFalse();
+    void topQueryPlanEnabledDefaultIsFalse() {
+        assertThat(new Db2ReceiverConfig().isTopQueryPlanEnabled()).isFalse();
     }
 
     @Test
-    void explainPlanEnabledTrueIsParsed() throws Exception {
+    void topQueryPlanEnabledTrueIsParsed() throws Exception {
         Path f = writeConfig(tmp,
             "receivers:\n" +
             "  db2:\n" +
@@ -258,38 +258,48 @@ class Db2ConfigTest {
             "    username: db2inst1\n" +
             "    password: secret\n" +
             "    database: SAMPLE\n" +
-            "    explain_plan_enabled: true\n" +
+            "    top_query_plan_enabled: true\n" +
             "exporters:\n" +
             "  otlp:\n" +
             "    endpoint: http://collector:4317\n"
         );
         Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers().get(0).isExplainPlanEnabled()).isTrue();
+        assertThat(cfg.getReceivers().get(0).isTopQueryPlanEnabled()).isTrue();
     }
 
     @Test
-    void explainPlanIntervalBelowMinimumFails() {
+    void topQueryPlanMaxPlansZeroFails() {
         Db2ReceiverConfig cfg = new Db2ReceiverConfig();
-        cfg.setExplainPlanInterval("30s");
-        assertThatThrownBy(cfg::getExplainPlanIntervalDuration)
+        assertThatThrownBy(() -> cfg.setTopQueryPlanMaxPlans(0))
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("explain_plan_interval");
+            .hasMessageContaining("top_query_plan_max_plans");
     }
 
     @Test
-    void explainPlanMaxPlansZeroFails() {
+    void topQueryPlanMaxPlansNegativeFails() {
         Db2ReceiverConfig cfg = new Db2ReceiverConfig();
-        assertThatThrownBy(() -> cfg.setExplainPlanMaxPlans(0))
+        assertThatThrownBy(() -> cfg.setTopQueryPlanMaxPlans(-5))
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("explain_plan_max_plans");
+            .hasMessageContaining("top_query_plan_max_plans");
     }
 
     @Test
-    void explainPlanMaxPlansNegativeFails() {
-        Db2ReceiverConfig cfg = new Db2ReceiverConfig();
-        assertThatThrownBy(() -> cfg.setExplainPlanMaxPlans(-5))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("explain_plan_max_plans");
+    void topQueryPlanCacheTtlIsParsed() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    top_query_plan_cache_ttl: \"5m\"\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2Config cfg = Db2Config.load(f.toString());
+        assertThat(cfg.getReceivers().get(0).getTopQueryPlanCacheTtlMs())
+            .isEqualTo(5 * 60 * 1000L);
     }
 
     @Test

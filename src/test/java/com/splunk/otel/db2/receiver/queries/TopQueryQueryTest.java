@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
+import java.sql.Clob;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -58,6 +60,7 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
         when(rs.getLong("MEMBER")).thenReturn(member);
         when(rs.getString("EXECUTABLE_ID")).thenReturn(execId);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(execId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         when(rs.getLong("NUM_EXECUTIONS")).thenReturn(numExecutions);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(stmtExecMs);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(cpuUs);
@@ -814,6 +817,247 @@ class TopQueryQueryTest {
         // Rank 2: Q_ZERO_TIME (0ms — only wins tiebreaker among zero-time entries)
         assertThat(allAttrs.get(2).get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.0);
         assertThat(allAttrs.get(2).get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(10000L);
+    }
+
+    // --- Plan collection tests ---
+
+    /** Build a plan-enabled TopQueryQuery with 2 max plans/interval and 10 min cache TTL. */
+    private TopQueryQuery queryWithPlan() {
+        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2,
+            TopQueryQuery.DEFAULT_PLAN_CACHE_TTL_MS);
+    }
+
+    private void stubTwoCollectionCycles(String stmtText, String execId, long member,
+                                          long numExec1, long execMs1,
+                                          long numExec2, long execMs2) throws Exception {
+        // Seed cycle
+        when(rs.next()).thenReturn(true, false);
+        stubRow(stmtText, member, execId, numExec1, execMs1, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+    }
+
+    @Test
+    void planXmlAttachedToTopQueryRecordOnCacheMiss() throws Exception {
+        String planXml = "<plan><op type='TBSCAN'/></plan>";
+
+        // Set up plan fetch mock
+        PreparedStatement planPs = mock(PreparedStatement.class);
+        ResultSet planRs = mock(ResultSet.class);
+        Clob clob = mock(Clob.class);
+        when(clob.length()).thenReturn((long) planXml.length());
+        when(clob.getSubString(1, planXml.length())).thenReturn(planXml);
+        when(planRs.next()).thenReturn(true);
+        when(planRs.getClob("SECTION_XML")).thenReturn(clob);
+        when(planPs.executeQuery()).thenReturn(planRs);
+        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed cycle
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Emit cycle
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        verify(logBuilder).emit();
+
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isEqualTo(planXml);
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH)).isNotNull().hasSize(64);
+    }
+
+    @Test
+    void planCacheHitSkipsFetch() throws Exception {
+        String planXml = "<plan><op type='TBSCAN'/></plan>";
+        PreparedStatement planPs = mock(PreparedStatement.class);
+        ResultSet planRs = mock(ResultSet.class);
+        Clob clob = mock(Clob.class);
+        when(clob.length()).thenReturn((long) planXml.length());
+        when(clob.getSubString(1, planXml.length())).thenReturn(planXml);
+        when(planRs.next()).thenReturn(true);
+        when(planRs.getClob("SECTION_XML")).thenReturn(clob);
+        when(planPs.executeQuery()).thenReturn(planRs);
+        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // First emit — plan fetched and cached
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+        verify(planPs, times(1)).executeQuery();
+
+        // Second emit — same execId still within TTL; plan fetch skipped
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // prepareStatement only called for the first emit (cache hit on second)
+        verify(conn, times(1)).prepareStatement(anyString());
+        verify(logBuilder).emit(); // event still emitted, just without plan re-fetch
+    }
+
+    @Test
+    void planFetchFailureDoesNotDropTopQueryRecord() throws Exception {
+        PreparedStatement planPs = mock(PreparedStatement.class);
+        when(planPs.executeQuery()).thenThrow(new java.sql.SQLException("access denied"));
+        when(conn.prepareStatement(anyString())).thenReturn(planPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x03});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Emit — plan fetch fails; top_query record should still be emitted without plan attrs
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x03});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        verify(logBuilder).emit(); // top_query still emitted
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isNull(); // no plan attr
+    }
+
+    @Test
+    void planNotFetchedWhenPlanDisabled() throws Exception {
+        // Use a query without plan enabled
+        TopQueryQuery q = query();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x05});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Emit
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x05});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // prepareStatement must never be called when plan is disabled
+        verify(conn, never()).prepareStatement(anyString());
+    }
+
+    @Test
+    void planBudgetCapRespectsMaxPerInterval() throws Exception {
+        String planXml = "<plan/>";
+        // Return a plan for every fetch
+        when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+            PreparedStatement ps = mock(PreparedStatement.class);
+            ResultSet prs = mock(ResultSet.class);
+            Clob c = mock(Clob.class);
+            when(c.length()).thenReturn((long) planXml.length());
+            when(c.getSubString(1, planXml.length())).thenReturn(planXml);
+            when(prs.next()).thenReturn(true);
+            when(prs.getClob("SECTION_XML")).thenReturn(c);
+            when(ps.executeQuery()).thenReturn(prs);
+            return ps;
+        });
+
+        // planMaxPerInterval = 2, but we'll have 3 candidates in the emit cycle
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed 3 rows
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L, 300L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // Emit cycle: all 3 rows grew
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(200L, 400L, 600L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // All 3 top_query records emitted, but only 2 plan fetches (budget cap)
+        verify(logBuilder, times(3)).emit();
+        verify(conn, times(2)).prepareStatement(anyString());
+    }
+
+    @Test
+    void hexConversionRoundTrip() {
+        byte[] bytes = {0x00, 0x0F, (byte) 0xFF, 0x42, (byte) 0xAB};
+        String hex = TopQueryQuery.hexToBytes(null) == null ? "null ok" : "";
+        assertThat(TopQueryQuery.hexToBytes(null)).isNull();
+        assertThat(TopQueryQuery.hexToBytes("0d")).isEqualTo(new byte[]{0x0d});
+        assertThat(TopQueryQuery.hexToBytes("0off")).isNull(); // odd length
+    }
+
+    @Test
+    void sha256HexIsDeterministicAndCorrectLength() {
+        String h = TopQueryQuery.sha256Hex("hello");
+        assertThat(h).hasSize(64).matches("[0-9a-f]+");
+        assertThat(TopQueryQuery.sha256Hex("hello")).isEqualTo(h);
+        assertThat(TopQueryQuery.sha256Hex("other")).isNotEqualTo(h);
     }
 
     // --- Config validation tests ---

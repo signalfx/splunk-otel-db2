@@ -68,6 +68,7 @@ receivers:
     tls:
       insecure: true
     topQueryEnabled: false
+    topQueryPlanEnabled: false
     querySampleEnabled: false
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────

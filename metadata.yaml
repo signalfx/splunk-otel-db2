@@ -150,13 +150,13 @@ attributes:
       MON_LOCKWAITS.LOCK_WAIT_ELAPSED_TIME, which is an INTEGER SECONDS column on Db2 11.5.
     type: double
 
-  # --- explain plan event attributes ---
+  # --- top query plan attributes (populated only when top_query_plan_enabled: true) ---
   db2.query_plan:
     description: >
-      Compiled plan XML for the statement, fetched from
-      MON_GET_PKG_CACHE_STMT_DETAILS. Stripped by the dbmon-processor after
-      upload to object storage; consumers receive _dbmon.query_plan.object_key
-      instead.
+      Compiled plan XML for the statement, read directly from the Db2 package
+      cache via MON_GET_PKG_CACHE_STMT_DETAILS without re-executing the query.
+      Stripped by the dbmon-processor after upload to object storage; consumers
+      receive _dbmon.query_plan.object_key instead.
     type: string
   db2.query_plan.hash:
     description: SHA-256 hex digest of the raw plan XML, used as the object-store deduplication key.
@@ -386,29 +386,6 @@ metrics:
     unit: "By"
 
 events:
-  db.server.query_plan:
-    enabled: false
-    description: >
-      Compiled execution plan for a top SQL statement, fetched from the Db2 package
-      cache via MON_GET_PKG_CACHE_STMT_DETAILS. No query re-execution occurs — the
-      plan XML is read from the in-memory cache. Emitted at explain_plan_interval as
-      OTel log records with severity INFO.
-
-      Plans are cached in-process for explain_plan_cache_ttl (default 10 minutes) to
-      avoid repeated fetches of stable plans. At most explain_plan_max_plans fetches
-      are issued per interval (budget cap).
-
-      The dbmon-processor strips db2.query_plan from the event after uploading the
-      XML to object storage and injects _dbmon.query_plan.object_key in its place.
-      db2.query_plan.hash is retained on the event for deduplication.
-    attributes:
-      - db.system.name
-      - db.namespace
-      - db.query.text
-      - db2.member
-      - db2.query_plan
-      - db2.query_plan.hash
-
   db.server.query_sample:
     enabled: false
     description: >
@@ -460,6 +437,14 @@ events:
       emission — literal values are replaced with ?. Emitted at top_query_interval
       as OTel log records with severity INFO.
       The first collection after startup seeds the delta baseline and emits nothing.
+
+      When top_query_plan_enabled is true, each record is optionally enriched with
+      db2.query_plan (compiled plan XML from MON_GET_PKG_CACHE_STMT_DETAILS) and
+      db2.query_plan.hash (SHA-256 digest used as deduplication key). No query
+      re-execution occurs — the plan is read directly from the package cache.
+      A client-side LRU cache (TTL: top_query_plan_cache_ttl, default 10m) prevents
+      repeated CLOB fetches for stable plans. At most top_query_plan_max_plans plan
+      fetches are issued per interval.
     attributes:
       - db.system.name
       - db.namespace
@@ -475,3 +460,5 @@ events:
       - db2.sorts
       - db2.sort_overflows
       - db2.stmt_type
+      - db2.query_plan                              # populated only when top_query_plan_enabled: true
+      - db2.query_plan.hash                         # populated only when top_query_plan_enabled: true
