@@ -96,7 +96,9 @@ public class TopQueryQuery {
     // TOTAL_CPU_TIME: cumulative CPU time (µs).
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
     // TOTAL_SECTION_SORTS: correct column name (not STMT_SORTS).
-    // Lookback is parameterised as %d minutes, derived from the collection interval.
+    // Lookback is parameterised as %1$d minutes (derived from the collection interval).
+    // maxQuerySampleCount is parameterised as %2$d rows — limits the DB2 result set before
+    // Java-side ranking so we never pull more rows than needed.
     private static final String SQL =
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
@@ -114,7 +116,7 @@ public class TopQueryQuery {
         "       SECTION_TYPE " +
         "FROM TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, -2)) AS T " +
         "WHERE NUM_EXECUTIONS > 0 " +
-        "  AND LAST_METRICS_UPDATE > CURRENT TIMESTAMP - %d MINUTES " +
+        "  AND LAST_METRICS_UPDATE > CURRENT TIMESTAMP - %1$d MINUTES " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_DATABASE%%%%' " +
@@ -124,7 +126,8 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
-        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
+        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'" +
+        "  FETCH FIRST %2$d ROWS ONLY";
 
     // DB2 explain workflow — two steps (verified on DB2 11.5.8.0):
     //
@@ -187,6 +190,7 @@ public class TopQueryQuery {
     private final String dbName;
     private final Logger otelLogger;
     private final int topQueryCount;
+    private final int maxQuerySampleCount;
     private final String sql;
     private final int queryTimeoutSeconds;
 
@@ -240,7 +244,7 @@ public class TopQueryQuery {
 
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds) {
-        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds,
+        this(connSupplier, dbName, otelLogger, topQueryCount, 1000, intervalSeconds,
              null, 1000, 3600_000L, "");
     }
 
@@ -248,7 +252,7 @@ public class TopQueryQuery {
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds,
                          Integer planMaxPerInterval) {
-        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds,
+        this(connSupplier, dbName, otelLogger, topQueryCount, 1000, intervalSeconds,
              planMaxPerInterval, 1000, 3600_000L, "");
     }
 
@@ -256,7 +260,7 @@ public class TopQueryQuery {
     public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
                          Logger otelLogger, int topQueryCount, long intervalSeconds,
                          Integer planMaxPerInterval, int planCacheSize, long planCacheTtlMs) {
-        this(connSupplier, dbName, otelLogger, topQueryCount, intervalSeconds,
+        this(connSupplier, dbName, otelLogger, topQueryCount, 1000, intervalSeconds,
              planMaxPerInterval, planCacheSize, planCacheTtlMs, "");
     }
 
@@ -265,25 +269,36 @@ public class TopQueryQuery {
                          Logger otelLogger, int topQueryCount, long intervalSeconds,
                          Integer planMaxPerInterval, int planCacheSize, long planCacheTtlMs,
                          String explainSchema) {
-        this.connSupplier       = connSupplier;
-        this.dbName             = dbName;
-        this.otelLogger         = otelLogger;
-        this.topQueryCount      = topQueryCount;
-        this.planMaxPerInterval = planMaxPerInterval;
-        this.planCacheSize      = planCacheSize;
-        this.planCacheTtlMs     = planCacheTtlMs;
+        this(connSupplier, dbName, otelLogger, topQueryCount, 1000, intervalSeconds,
+             planMaxPerInterval, planCacheSize, planCacheTtlMs, explainSchema);
+    }
+
+    /** Full variant with maxQuerySampleCount and explainSchema. */
+    public TopQueryQuery(Supplier<Connection> connSupplier, String dbName,
+                         Logger otelLogger, int topQueryCount, int maxQuerySampleCount,
+                         long intervalSeconds,
+                         Integer planMaxPerInterval, int planCacheSize, long planCacheTtlMs,
+                         String explainSchema) {
+        this.connSupplier          = connSupplier;
+        this.dbName                = dbName;
+        this.otelLogger            = otelLogger;
+        this.topQueryCount         = topQueryCount;
+        this.maxQuerySampleCount   = maxQuerySampleCount;
+        this.planMaxPerInterval    = planMaxPerInterval;
+        this.planCacheSize         = planCacheSize;
+        this.planCacheTtlMs        = planCacheTtlMs;
         // Empty/null → pass null to EXPLAIN_FROM_SECTION so DB2 selects the schema (USER/default).
         // The INOUT param returns the actual schema used; queries are built dynamically per call.
         this.explainSchema = (explainSchema == null || explainSchema.isBlank())
                              ? null : explainSchema.trim().toUpperCase();
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
-        this.sql = String.format(SQL, lookbackMinutes);
+        this.sql = String.format(SQL, lookbackMinutes, maxQuerySampleCount);
         // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
         this.planCache = planMaxPerInterval != null ? buildLruCache(planCacheSize) : null;
-        log.info("TopQueryQuery: top={}, interval={}s, lookback={}min, timeout={}s, planEnabled={}, cacheSize={}, cacheTtlMs={}, explainSchema={}",
-            topQueryCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds,
+        log.info("TopQueryQuery: top={}, sampleLimit={}, interval={}s, lookback={}min, timeout={}s, planEnabled={}, cacheSize={}, cacheTtlMs={}, explainSchema={}",
+            topQueryCount, maxQuerySampleCount, intervalSeconds, lookbackMinutes, queryTimeoutSeconds,
             planMaxPerInterval != null, planCacheSize, planCacheTtlMs,
             this.explainSchema != null ? this.explainSchema : "(DB2 default)");
     }

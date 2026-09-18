@@ -166,6 +166,7 @@ public class Db2Receiver {
             config.getDatabase(),
             otelLogger,
             config.getTopQueryCollection().getTopQueryCount(),
+            config.getTopQueryCollection().getMaxQuerySampleCount(),
             intervalSeconds,
             planMaxPlans,
             planCacheSize,

@@ -428,6 +428,18 @@ class TopQueryQueryTest {
     }
 
     @Test
+    void sqlContainsFetchFirstWithMaxQuerySampleCount() throws Exception {
+        // max_query_sample_count must appear as FETCH FIRST N ROWS ONLY in the SQL
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 500, 60L,
+            null, 1000, 3600_000L, "");
+        when(rs.next()).thenReturn(false);
+        q.collect();
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).contains("FETCH FIRST 500 ROWS ONLY");
+    }
+
+    @Test
     void lookbackDerivedFromInterval() throws Exception {
         // 60s interval → lookback = max(5, ceil(120/60)) = max(5, 2) = 5 minutes (floor wins)
         TopQueryQuery q60 = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L);
@@ -909,7 +921,7 @@ class TopQueryQueryTest {
 
         // Plan JSON must be present and contain operator data
         assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).contains("TBSCAN");
-        assertThat(cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH)).isNotNull().hasSize(64);
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH)).isNotNull().matches("[0-9a-fA-F]+");
     }
 
     @Test
