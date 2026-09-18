@@ -494,7 +494,10 @@ public class TopQueryQuery {
                 .sortOverflows(sortOvfDelta)
                 .stmtType(secType);
 
-            if (planMaxPerInterval != null) {
+            // Plan collection: dynamic SQL only ('D'). Static SQL ('S') lives in packages
+            // on disk — SECTION_SOURCE_TYPE='M' (Memory) cannot find them and always
+            // returns SQLSTATE=55075. Skip static sections to avoid wasting budget.
+            if (planMaxPerInterval != null && "D".equals(secType)) {
                 String execIdHex = t[4];
                 String cacheKey = member + ":" + execIdHex;
                 String planXml = null;
