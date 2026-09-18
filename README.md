@@ -36,17 +36,22 @@ receivers:
     database: "SAMPLE"                 # database name (uppercase)
     collection_interval: "30s"         # metrics collection interval
     connect_timeout_seconds: 10        # JDBC login + socket timeout (default: 10)
-    top_query_enabled: false           # set true to enable top query collection (opt-in)
-    top_query_count: 250               # top N queries to emit per interval (must be > 0)
-    top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
+    events:
+      db.server.top_query:
+        enabled: false                 # set true to enable top query collection (opt-in)
+      db.server.query_sample:
+        enabled: false                 # set true to enable query sampling (opt-in)
     top_query_collection:
+      collection_interval: "60s"      # how often to collect top queries (minimum 60s)
+      top_query_count: 250            # top N queries to emit per interval (must be > 0)
       max_query_sample_count: 1000    # max rows fetched from MON_GET_PKG_CACHE_STMT before ranking (must be > 0)
       max_explain_each_interval: 250  # max EXPLAIN_FROM_SECTION calls per interval; 0 = plan disabled
       query_plan_cache_size: 1000     # max entries in the client-side plan cache
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
       explain_schema: ""              # schema where explain tables live (default: USER)
-    query_sample_enabled: false        # set true to enable query sampling (opt-in)
-    query_sample_interval: "10s"       # how often to sample active queries
+    query_sample_collection:
+      collection_interval: "10s"      # how often to sample active queries
+      max_rows_per_query: 100         # max active sessions fetched per sample
     use_snapshot_monitor: false        # set true to use SNAP_GET_STMT fallback path
     tls:
       insecure: true                   # set false to enable TLS
@@ -150,8 +155,8 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 | Collector | Connection | Always open? |
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
-| Query sample + Blocking session (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
-| Top query + Plan (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+| Query sample + Blocking session (`events.db.server.query_sample.enabled: true`) | `querySampleConnection` | Optional |
+| Top query + Plan (`events.db.server.top_query.enabled: true`) | `topQueryConnection` | Optional |
 
 Plan collection (`max_explain_each_interval > 0`) reuses the top-query connection — it does **not** open a fourth connection.
 
@@ -203,7 +208,7 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 
 ## Query samples (log records)
 
-Active statements are sampled at `query_sample_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `query_sample_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Active statements are sampled at `query_sample_collection.collection_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
 
@@ -231,8 +236,8 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 Lock contention is detected automatically whenever query sampling is enabled. When a sampled session is waiting for a lock (`LOCKWAIT`), its `db.server.query_sample` record is enriched with blocking attributes and emitted at severity WARN. No separate flag is needed.
 
-- `query_sample_enabled: true` enables both query samples and blocking detection.
-- `query_sample_interval` controls the poll cadence for both.
+- `events.db.server.query_sample.enabled: true` enables both query samples and blocking detection.
+- `query_sample_collection.collection_interval` controls the poll cadence for both.
 - Both share the same `querySampleConnection`.
 
 If the blocker is idle (holding an open transaction but not currently executing), its last statement is looked up from `MON_GET_PKG_CACHE_STMT` and attached as `db2.blocking.blocker.query_text`.
@@ -246,8 +251,11 @@ receivers:
     database: "SAMPLE"
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
-    query_sample_enabled: true    # enables query sampling and blocking detection
-    query_sample_interval: "10s"  # controls poll cadence for both
+    events:
+      db.server.query_sample:
+        enabled: true              # enables query sampling and blocking detection
+    query_sample_collection:
+      collection_interval: "10s"  # controls poll cadence for both
 ```
 
 | Attribute | Description |
@@ -292,7 +300,7 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;  -- idl
 
 ## Top queries (log records)
 
-Top SQL statements are collected from the Db2 plan cache at `top_query_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `top_query_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Top SQL statements are collected from the Db2 plan cache at `top_query_collection.collection_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.top_query.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 Statements are ranked by execution elapsed time added during the current collection interval (per-interval delta of `STMT_EXEC_TIME`). The first collection after startup seeds the delta baseline and emits nothing. The lookback window is automatically set to 2× the configured interval (minimum 5 minutes) to ensure statements executed early in a long interval are not excluded before the next collection.
 
@@ -358,7 +366,7 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
 
--- Top query collection (top_query_enabled: true)
+-- Top query collection (events.db.server.top_query.enabled: true)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
 
 -- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
@@ -370,13 +378,13 @@ GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
 -- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
 -- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
 
--- Query sampling (query_sample_enabled: true, default path)
+-- Query sampling (events.db.server.query_sample.enabled: true, default path)
 GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
 
 -- Db2 10.5+ wait time attribute (db2.wait_time)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
--- Blocking session detection (runs automatically with query_sample_enabled: true)
+-- Blocking session detection (runs automatically with events.db.server.query_sample.enabled: true)
 GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
 -- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
 
@@ -465,8 +473,11 @@ receivers:
     credentialsSecret: "my-db2-credentials"   # pre-existing Secret with DB2_USER / DB2_PASSWORD
     tls:
       insecure: true
-    topQueryEnabled: false
-    querySampleEnabled: false
+    events:
+      dbServerTopQuery:
+        enabled: false
+      dbServerQuerySample:
+        enabled: false
 
 otlp:
   # OTel Collector in the same cluster:
