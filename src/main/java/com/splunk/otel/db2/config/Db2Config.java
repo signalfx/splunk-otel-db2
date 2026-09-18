@@ -160,21 +160,26 @@ public class Db2Config {
     @SuppressWarnings("unchecked")
     private static Db2ReceiverConfig parseDb2Config(Map<String, Object> db2) {
         Db2ReceiverConfig rc = new Db2ReceiverConfig();
-        if (db2.get("hostname")              != null) rc.setHostname(asString(db2, "hostname"));
-        if (db2.get("hostport")              != null) rc.setHostport(asInt(db2, "hostport"));
-        if (db2.get("username")              != null) rc.setUsername(asString(db2, "username"));
-        if (db2.get("password")              != null) rc.setPassword(asString(db2, "password"));
-        if (db2.get("database")              != null) rc.setDatabase(asString(db2, "database"));
-        if (db2.get("collection_interval")   != null) rc.setCollectionInterval(asString(db2, "collection_interval"));
-        if (db2.get("top_query_count")       != null) rc.setTopQueryCount(asInt(db2, "top_query_count"));
-        if (db2.get("top_query_enabled")     != null) rc.setTopQueryEnabled(asBool(db2, "top_query_enabled"));
-        if (db2.get("max_query_sample_count")!= null) rc.setMaxQuerySampleCount(asInt(db2, "max_query_sample_count"));
-        if (db2.get("query_sample_interval") != null) rc.setQuerySampleInterval(asString(db2, "query_sample_interval"));
-        if (db2.get("top_query_interval")    != null) rc.setTopQueryInterval(asString(db2, "top_query_interval"));
-        if (db2.get("query_sample_enabled")      != null) rc.setQuerySampleEnabled(asBool(db2, "query_sample_enabled"));
-        if (db2.get("use_snapshot_monitor")      != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
+        if (db2.get("hostname")               != null) rc.setHostname(asString(db2, "hostname"));
+        if (db2.get("hostport")               != null) rc.setHostport(asInt(db2, "hostport"));
+        if (db2.get("username")               != null) rc.setUsername(asString(db2, "username"));
+        if (db2.get("password")               != null) rc.setPassword(asString(db2, "password"));
+        if (db2.get("database")               != null) rc.setDatabase(asString(db2, "database"));
+        if (db2.get("collection_interval")    != null) rc.setCollectionInterval(asString(db2, "collection_interval"));
+        if (db2.get("use_snapshot_monitor")   != null) rc.setUseSnapshotMonitor(asBool(db2, "use_snapshot_monitor"));
         if (db2.get("connect_timeout_seconds")!= null) rc.setConnectTimeoutSeconds(asInt(db2, "connect_timeout_seconds"));
-        if (db2.get("top_query_plan_enabled")   != null) rc.setTopQueryPlanEnabled(asBool(db2, "top_query_plan_enabled"));
+
+        // events block — mirrors OTel LogsBuilderConfig.Events pattern
+        Object eventsNode = db2.get("events");
+        if (eventsNode != null) {
+            if (!(eventsNode instanceof Map))
+                throw new IllegalStateException("receivers.db2.events must be a map");
+            Map<String, Object> evts = (Map<String, Object>) eventsNode;
+            parseEventConfig(evts, "db.server.top_query",    rc.getEvents().getDbServerTopQuery());
+            parseEventConfig(evts, "db.server.query_sample", rc.getEvents().getDbServerQuerySample());
+        }
+
+        // top_query_collection
         Object tqcNode = db2.get("top_query_collection");
         if (tqcNode != null) {
             if (!(tqcNode instanceof Map))
@@ -183,14 +188,35 @@ public class Db2Config {
                     tqcNode.getClass().getSimpleName());
             Map<String, Object> tqc = (Map<String, Object>) tqcNode;
             Db2ReceiverConfig.TopQueryCollectionConfig tqcCfg = rc.getTopQueryCollection();
+            if (tqc.get("collection_interval")    != null)
+                tqcCfg.setCollectionInterval(asString(tqc, "collection_interval"));
+            if (tqc.get("top_query_count")        != null)
+                tqcCfg.setTopQueryCount(asInt(tqc, "top_query_count"));
+            if (tqc.get("max_query_sample_count") != null)
+                tqcCfg.setMaxQuerySampleCount(asInt(tqc, "max_query_sample_count"));
             if (tqc.get("max_explain_each_interval") != null)
                 tqcCfg.setMaxExplainEachInterval(asInt(tqc, "max_explain_each_interval"));
-            if (tqc.get("query_plan_cache_size") != null)
+            if (tqc.get("query_plan_cache_size")  != null)
                 tqcCfg.setQueryPlanCacheSize(asInt(tqc, "query_plan_cache_size"));
-            if (tqc.get("query_plan_cache_ttl") != null)
+            if (tqc.get("query_plan_cache_ttl")   != null)
                 tqcCfg.setQueryPlanCacheTtl(asString(tqc, "query_plan_cache_ttl"));
-            if (tqc.get("explain_schema") != null)
+            if (tqc.get("explain_schema")         != null)
                 tqcCfg.setExplainSchema(asString(tqc, "explain_schema"));
+        }
+
+        // query_sample_collection
+        Object qscNode = db2.get("query_sample_collection");
+        if (qscNode != null) {
+            if (!(qscNode instanceof Map))
+                throw new IllegalStateException(
+                    "receivers.db2.query_sample_collection must be a map, got: " +
+                    qscNode.getClass().getSimpleName());
+            Map<String, Object> qsc = (Map<String, Object>) qscNode;
+            Db2ReceiverConfig.QuerySampleCollectionConfig qscCfg = rc.getQuerySampleCollection();
+            if (qsc.get("collection_interval") != null)
+                qscCfg.setCollectionInterval(asString(qsc, "collection_interval"));
+            if (qsc.get("max_rows_per_query")  != null)
+                qscCfg.setMaxRowsPerQuery(asInt(qsc, "max_rows_per_query"));
         }
         if (db2.get("service_name")           != null) rc.setServiceName(asString(db2, "service_name"));
         if (db2.get("service_namespace")      != null) rc.setServiceNamespace(asString(db2, "service_namespace"));
@@ -215,6 +241,17 @@ public class Db2Config {
             }
         }
         return rc;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void parseEventConfig(Map<String, Object> evts, String key,
+                                         Db2ReceiverConfig.EventConfig target) {
+        Object node = evts.get(key);
+        if (node == null) return;
+        if (!(node instanceof Map))
+            throw new IllegalStateException("receivers.db2.events." + key + " must be a map");
+        Map<String, Object> m = (Map<String, Object>) node;
+        if (m.get("enabled") != null) target.setEnabled(asBool(m, "enabled"));
     }
 
     private static String asString(Map<String, Object> map, String key) {
@@ -275,18 +312,18 @@ public class Db2Config {
             rc.setHostname("localhost");
         if (rc.getPort() <= 0 || rc.getPort() > 65535)
             throw new IllegalStateException("receivers.db2.hostport must be between 1 and 65535");
-        if (rc.getTopQueryCount() <= 0)
-            throw new IllegalStateException("receivers.db2.top_query_count must be > 0");
-        if (rc.getMaxQuerySampleCount() <= 0)
-            throw new IllegalStateException("receivers.db2.max_query_sample_count must be > 0");
         rc.getCollectionIntervalDuration();
-        rc.getQuerySampleIntervalDuration();
-        if (rc.isTopQueryEnabled()) {
-            rc.getTopQueryIntervalDuration();
+        if (rc.getEvents().getDbServerTopQuery().isEnabled()) {
+            rc.getTopQueryCollection().getCollectionIntervalDuration();
+            if (rc.getTopQueryCollection().getTopQueryCount() <= 0)
+                throw new IllegalStateException("top_query_collection.top_query_count must be > 0");
+            if (rc.getTopQueryCollection().getMaxQuerySampleCount() <= 0)
+                throw new IllegalStateException("top_query_collection.max_query_sample_count must be > 0");
         }
-        if (rc.isTopQueryPlanEnabled() && !rc.isTopQueryEnabled()) {
-            throw new IllegalStateException(
-                "receivers.db2.top_query_plan_enabled: true requires top_query_enabled: true");
+        if (rc.getEvents().getDbServerQuerySample().isEnabled()) {
+            rc.getQuerySampleCollection().getCollectionIntervalDuration();
+            if (rc.getQuerySampleCollection().getMaxRowsPerQuery() <= 0)
+                throw new IllegalStateException("query_sample_collection.max_rows_per_query must be > 0");
         }
 
         String endpoint = otlp.getEndpoint();

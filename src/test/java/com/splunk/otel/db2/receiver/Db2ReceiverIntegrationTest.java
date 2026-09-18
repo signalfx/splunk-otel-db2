@@ -256,8 +256,8 @@ class Db2ReceiverIntegrationTest {
             .build();
 
         Db2ReceiverConfig config = buildConfig();
-        config.setQuerySampleEnabled(true);
-        config.setQuerySampleInterval("1s");
+        config.getEvents().getDbServerQuerySample().setEnabled(true);
+        config.getQuerySampleCollection().setCollectionInterval("1s");
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -387,7 +387,7 @@ class Db2ReceiverIntegrationTest {
         // top_query_interval minimum is 60s in production; use startTopQueryScheduler()
         // directly to inject a 4s interval for test speed without bypassing config validation.
         Db2ReceiverConfig config = buildConfig();
-        config.setTopQueryEnabled(false); // prevent start() from also scheduling top-query
+        config.getEvents().getDbServerTopQuery().setEnabled(false); // prevent start() from also scheduling top-query
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -486,8 +486,8 @@ class Db2ReceiverIntegrationTest {
             .build();
 
         Db2ReceiverConfig config = buildConfig();
-        config.setTopQueryEnabled(false);         // we'll start the scheduler manually
-        config.setTopQueryPlanEnabled(true);
+        config.getEvents().getDbServerTopQuery().setEnabled(false);         // we'll start the scheduler manually
+        // plan enabled: max_explain_each_interval > 0
         config.getTopQueryCollection().setMaxExplainEachInterval(20);
 
         Properties props = new Properties();
@@ -587,8 +587,8 @@ class Db2ReceiverIntegrationTest {
             .build();
 
         Db2ReceiverConfig config = buildConfig();
-        config.setTopQueryEnabled(false);
-        config.setTopQueryPlanEnabled(true);
+        config.getEvents().getDbServerTopQuery().setEnabled(false);
+        // plan enabled: max_explain_each_interval > 0
         config.getTopQueryCollection().setMaxExplainEachInterval(20);
 
         Properties props = new Properties();

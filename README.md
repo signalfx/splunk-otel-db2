@@ -39,14 +39,13 @@ receivers:
     top_query_enabled: false           # set true to enable top query collection (opt-in)
     top_query_count: 250               # top N queries to emit per interval (must be > 0)
     top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
-    top_query_plan_enabled: false      # set true to enrich top_query events with explain plan JSON
     top_query_collection:
-      max_explain_each_interval: 1000 # max plan explain attempts per interval (budget cap)
+      max_query_sample_count: 1000    # max rows fetched from MON_GET_PKG_CACHE_STMT before ranking (must be > 0)
+      max_explain_each_interval: 250  # max EXPLAIN_FROM_SECTION calls per interval; 0 = plan disabled
       query_plan_cache_size: 1000     # max entries in the client-side plan cache
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
       explain_schema: ""              # schema where explain tables live (default: USER)
     query_sample_enabled: false        # set true to enable query sampling (opt-in)
-    max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
     query_sample_interval: "10s"       # how often to sample active queries
     use_snapshot_monitor: false        # set true to use SNAP_GET_STMT fallback path
     tls:
@@ -154,7 +153,7 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 | Query sample + Blocking session (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
 | Top query + Plan (`top_query_enabled: true`) | `topQueryConnection` | Optional |
 
-Plan collection (`top_query_plan_enabled: true`) reuses the top-query connection — it does **not** open a fourth connection.
+Plan collection (`max_explain_each_interval > 0`) reuses the top-query connection — it does **not** open a fourth connection.
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
 
@@ -317,10 +316,10 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db2.sorts` | Sorts performed during this interval |
 | `db2.sort_overflows` | Sorts that spilled to disk during this interval |
 | `db2.stmt_type` | Statement type: `D` = dynamic SQL, `S` = static SQL |
-| `db2.query_plan` | JSON plan summary (operators + streams) — only when `top_query_plan_enabled: true` |
-| `db2.query_plan.hash` | SHA-256 of the plan JSON — only when `top_query_plan_enabled: true` |
+| `db2.query_plan` | JSON plan summary (operators + streams) — only when `max_explain_each_interval > 0` |
+| `db2.query_plan.hash` | SHA-256 of the plan JSON — only when `max_explain_each_interval > 0` |
 
-**Plan collection prerequisite** (`top_query_plan_enabled: true`): Db2 explain tables must be created once in the monitoring user's schema before enabling plan collection. Connect as the monitoring user and run:
+**Plan collection prerequisite** (`max_explain_each_interval > 0`): Db2 explain tables must be created once in the monitoring user's schema before enabling plan collection. Connect as the monitoring user and run:
 
 ```sql
 CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
@@ -362,7 +361,7 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
 -- Top query collection (top_query_enabled: true)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
 
--- Explain plan enrichment (top_query_plan_enabled: true)
+-- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
 -- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
 -- Requires explain tables to be created once per schema — run as the monitoring user:
 --   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)

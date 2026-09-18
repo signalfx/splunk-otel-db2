@@ -248,16 +248,18 @@ class QuerySampleQueryTest {
 
     @Test
     void configRejectsZeroSampleCount() {
-        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig tqc =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setMaxQuerySampleCount(0));
+            () -> tqc.setMaxQuerySampleCount(0));
     }
 
     @Test
     void configRejectsNegativeSampleCount() {
-        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig tqc =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setMaxQuerySampleCount(-1));
+            () -> tqc.setMaxQuerySampleCount(-1));
     }
 
     @Test

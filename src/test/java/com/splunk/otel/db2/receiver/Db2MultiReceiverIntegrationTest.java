@@ -155,14 +155,14 @@ class Db2MultiReceiverIntegrationTest {
         SdkMeterProvider meterProvider2 = buildMeterProvider(metricExporter2);
 
         Db2ReceiverConfig config1 = buildConfig();
-        config1.setQuerySampleEnabled(true);
-        config1.setQuerySampleInterval("1s");
-        config1.setTopQueryEnabled(false);
+        config1.getEvents().getDbServerQuerySample().setEnabled(true);
+        config1.getQuerySampleCollection().setCollectionInterval("1s");
+        config1.getEvents().getDbServerTopQuery().setEnabled(false);
 
         Db2ReceiverConfig config2 = buildConfig();
-        config2.setQuerySampleEnabled(true);
-        config2.setQuerySampleInterval("1s");
-        config2.setTopQueryEnabled(false);
+        config2.getEvents().getDbServerQuerySample().setEnabled(true);
+        config2.getQuerySampleCollection().setCollectionInterval("1s");
+        config2.getEvents().getDbServerTopQuery().setEnabled(false);
 
         java.util.Properties props = new java.util.Properties();
         props.setProperty("user",     db2.getUsername());

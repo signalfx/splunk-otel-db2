@@ -1201,29 +1201,29 @@ class TopQueryQueryTest {
     @Test
     void configRejectsTopQueryIntervalBelowMinimum() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
-        cfg.setTopQueryInterval("30s");
+        cfg.getTopQueryCollection().setCollectionInterval("30s");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            cfg::getTopQueryIntervalDuration);
+            cfg.getTopQueryCollection()::getCollectionIntervalDuration);
     }
 
     @Test
     void configAcceptsTopQueryIntervalAtMinimum() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
-        cfg.setTopQueryInterval("60s");
-        org.junit.jupiter.api.Assertions.assertDoesNotThrow(cfg::getTopQueryIntervalDuration);
+        cfg.getTopQueryCollection().setCollectionInterval("60s");
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(cfg.getTopQueryCollection()::getCollectionIntervalDuration);
     }
 
     @Test
     void configRejectsZeroTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setTopQueryCount(0));
+            () -> cfg.getTopQueryCollection().setTopQueryCount(0));
     }
 
     @Test
     void configRejectsNegativeTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setTopQueryCount(-1));
+            () -> cfg.getTopQueryCollection().setTopQueryCount(-1));
     }
 }

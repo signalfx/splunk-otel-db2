@@ -84,14 +84,13 @@ public class Db2Receiver {
         new BufferpoolQuery(metricsConnSupplier, config.getDatabase(), meter);
         new TablespaceQuery(metricsConnSupplier, config.getDatabase(), meter);
 
-        if (otelLogger != null && config.isQuerySampleEnabled()) {
+        if (otelLogger != null && config.getEvents().getDbServerQuerySample().isEnabled()) {
             int db2Version = detectDb2Version(metricsConnSupplier);
             startQuerySampleScheduler(db2Version);
         }
 
-
-        if (otelLogger != null && config.isTopQueryEnabled()) {
-            long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
+        if (otelLogger != null && config.getEvents().getDbServerTopQuery().isEnabled()) {
+            long topQueryIntervalSeconds = config.getTopQueryCollection().getCollectionIntervalDuration().getSeconds();
             startTopQueryScheduler(topQueryIntervalSeconds);
         }
 
@@ -107,14 +106,14 @@ public class Db2Receiver {
                 throw new RuntimeException("[" + label + "] DB2 query-sample connection failed: " + e.getMessage(), e);
             }
         };
-        long intervalSeconds           = config.getQuerySampleIntervalDuration().getSeconds();
+        long intervalSeconds           = config.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds();
         int  querySampleTimeoutSeconds = (int) Math.max(5L, intervalSeconds / 2);
 
         QuerySampleQuery querySampleQuery = new QuerySampleQuery(
             querySampleConnSupplier,
             config.getDatabase(),
             otelLogger,
-            config.getMaxQuerySampleCount(),
+            config.getQuerySampleCollection().getMaxRowsPerQuery(),
             config.isUseSnapshotMonitor(),
             db2Version,
             querySampleTimeoutSeconds);
@@ -157,8 +156,8 @@ public class Db2Receiver {
                 throw new RuntimeException("[" + label + "] DB2 top-query connection failed: " + e.getMessage(), e);
             }
         };
-        Integer planMaxPlans = config.isTopQueryPlanEnabled()
-            ? config.getTopQueryCollection().getMaxExplainEachInterval() : null;
+        int maxExplain = config.getTopQueryCollection().getMaxExplainEachInterval();
+        Integer planMaxPlans = maxExplain > 0 ? maxExplain : null; // 0 = plan disabled
         int planCacheSize = config.getTopQueryCollection().getQueryPlanCacheSize();
         long planCacheTtlMs = config.getTopQueryCollection().getQueryPlanCacheTtlDuration().toMillis();
         String explainSchema = config.getTopQueryCollection().getExplainSchema();
@@ -166,7 +165,7 @@ public class Db2Receiver {
             topQueryConnSupplier,
             config.getDatabase(),
             otelLogger,
-            config.getTopQueryCount(),
+            config.getTopQueryCollection().getTopQueryCount(),
             intervalSeconds,
             planMaxPlans,
             planCacheSize,

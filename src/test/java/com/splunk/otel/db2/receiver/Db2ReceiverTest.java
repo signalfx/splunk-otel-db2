@@ -85,7 +85,7 @@ class Db2ReceiverTest {
     @Test
     void receiverConfigDefaultIntervalIsParseable() {
         assertThat(config.getCollectionIntervalDuration().getSeconds()).isGreaterThan(0);
-        assertThat(config.getQuerySampleIntervalDuration().getSeconds()).isGreaterThan(0);
+        assertThat(config.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds()).isGreaterThan(0);
     }
 
     @Test
