@@ -8,8 +8,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.sql.Timestamp;
-import java.time.Instant;
 import java.util.function.Supplier;
 
 /**
@@ -25,6 +23,8 @@ import java.util.function.Supplier;
  * Default path (useSnapshotMonitor=false, Db2 9.7+):
  *   MON_CURRENT_SQL LEFT JOIN MON_LOCKWAITS + MON_GET_CONNECTION.
  *   On Db2 10.5+ also JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
+ *   SYSIBMADM.LOCKWAITS.LOCK_WAIT_START_TIME is used directly for blocking.start_time
+ *   (server-side TIMESTAMP — avoids JVM/DB2 clock skew).
  *
  * Snapshot monitor fallback (useSnapshotMonitor=true, Db2 9.7+):
  *   SNAP_GET_APPL_INFO + SNAP_GET_STMT. Blocking detection not available on
@@ -36,10 +36,15 @@ import java.util.function.Supplier;
 public class QuerySampleQuery {
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(QuerySampleQuery.class);
 
-    // Default path (Db2 9.7) with blocking detection via LEFT JOIN MON_LOCKWAITS.
-    // LOCK_WAIT_ELAPSED_TIME is an INTEGER SECONDS column on Db2 11.5.
+    // Default path (Db2 9.7+) with blocking detection.
+    // LOCK_WAIT_ELAPSED_TIME is INTEGER SECONDS on Db2 11.5 (confirmed via SYSCAT.COLUMNS).
+    // SYSIBMADM.LOCKWAITS.LOCK_WAIT_START_TIME is a server-side TIMESTAMP that avoids
+    // JVM/DB2 clock skew for blocking.start_time. Both LOCKWAITS views are joined so we
+    // get the exact start time (LOCKWAITS) and the richer lock metadata (MON_LOCKWAITS).
     // MON_GET_CONNECTION appears twice (C for main session, BC for blocker) — each
     // wrapped in a derived table so Db2 does not raise "duplicate TVF" errors.
+    // The main session join is LEFT so sessions not yet in MON_GET_CONNECTION (race,
+    // closing connection) are not silently dropped — CLIENT_APPLNAME is COALESCE-guarded.
     private static final String SQL_MON_CURRENT =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
@@ -56,6 +61,7 @@ public class QuerySampleQuery {
         "       LW.HLD_APPLICATION_HANDLE AS BLOCKER_HANDLE, " +
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
+        "       CHAR(LKS.LOCK_WAIT_START_TIME) AS BLOCKING_START_TIME, " +
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
         "       LW.LOCK_OBJECT_TYPE AS LOCK_OBJECT_TYPE, " +
@@ -65,16 +71,20 @@ public class QuerySampleQuery {
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
         "       CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
-        "JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
-        "             TOTAL_CPU_TIME, CLIENT_APPLNAME " +
-        "      FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
+        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
+        "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_LOCKWAITS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
+        "LEFT JOIN SYSIBMADM.LOCKWAITS LKS " +
+        "  ON LKS.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        " AND LKS.REQ_MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        " AND BLOCKER_SQL.COORD_MEMBER = LW.HLD_MEMBER " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2))) AS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
@@ -82,8 +92,11 @@ public class QuerySampleQuery {
         "WHERE S.STMT_TEXT IS NOT NULL " +
         "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
-        "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
-        "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_LOCKWAITS%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "ORDER BY S.ELAPSED_TIME_SEC DESC " +
         "FETCH FIRST %d ROWS ONLY";
 
@@ -104,6 +117,7 @@ public class QuerySampleQuery {
         "       LW.HLD_APPLICATION_HANDLE AS BLOCKER_HANDLE, " +
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
+        "       CHAR(LKS.LOCK_WAIT_START_TIME) AS BLOCKING_START_TIME, " +
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
         "       LW.LOCK_OBJECT_TYPE AS LOCK_OBJECT_TYPE, " +
@@ -113,9 +127,9 @@ public class QuerySampleQuery {
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
         "       CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
-        "JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
-        "             TOTAL_CPU_TIME, CLIENT_APPLNAME " +
-        "      FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
+        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
+        "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A " +
@@ -125,8 +139,12 @@ public class QuerySampleQuery {
         "LEFT JOIN SYSIBMADM.MON_LOCKWAITS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
+        "LEFT JOIN SYSIBMADM.LOCKWAITS LKS " +
+        "  ON LKS.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
+        " AND LKS.REQ_MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        " AND BLOCKER_SQL.COORD_MEMBER = LW.HLD_MEMBER " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2))) AS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
@@ -134,12 +152,17 @@ public class QuerySampleQuery {
         "WHERE S.STMT_TEXT IS NOT NULL " +
         "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
-        "  AND S.STMT_TEXT NOT LIKE '%%MON_CURRENT_SQL%%' " +
-        "  AND S.STMT_TEXT NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_LOCKWAITS%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
+        "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "ORDER BY S.ELAPSED_TIME_SEC DESC " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Snapshot monitor fallback (Db2 9.7+). Blocking detection not available.
+    // All three dbmon-api blocking endpoints return empty on this path — see README.
     private static final String SQL_SNAP =
         "SELECT COALESCE(SS.STMT_TEXT, S.TEXT) AS STMT_TEXT, " +
         "       ( CASE WHEN SA.APPL_STATUS = 'UOWEXEC' " +
@@ -163,8 +186,8 @@ public class QuerySampleQuery {
         "  AND SA.AGENT_ID = SS.AGENT_ID " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT) IS NOT NULL " +
         "  AND COALESCE(SA.APPL_NAME, '') <> 'splunk-otel-db2' " +
-        "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%SNAP_GET_APPL_INFO%%' " +
-        "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%SNAP_GET_STMT%%' " +
+        "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
+        "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "ORDER BY TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) DESC " +
         "FETCH FIRST %d ROWS ONLY";
 
@@ -176,7 +199,7 @@ public class QuerySampleQuery {
         "JOIN TABLE(MON_GET_PKG_CACHE_STMT(NULL, NULL, NULL, CAST(? AS INTEGER))) AS P " +
         "  ON P.EXECUTABLE_ID = C.LAST_EXECUTABLE_ID " +
         "WHERE P.NUM_EXECUTIONS > 0 " +
-        "  AND P.STMT_TEXT NOT LIKE '%%MON_GET_PKG_CACHE_STMT%%' " +
+        "  AND P.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "FETCH FIRST 1 ROW ONLY";
 
     /** Encoded as {@code major * 1000 + minor}, e.g. 10005 for 10.5, 9007 for 9.7. */
@@ -212,13 +235,14 @@ public class QuerySampleQuery {
         this.useSnapshotMonitor   = useSnapshotMonitor;
         this.db2Version           = db2Version;
         this.queryTimeoutSeconds  = queryTimeoutSeconds;
-        log.info("QuerySampleQuery: using {} path{}, timeout={}s",
+        log.info("QuerySampleQuery: using {} path{}, timeout={}s{}",
             useSnapshotMonitor ? "SNAP_GET_*" : "MON_CURRENT_SQL",
             (!useSnapshotMonitor && db2Version >= DB2_VERSION_10_5) ? " with MON_GET_ACTIVITY (10.5+)" : "",
-            queryTimeoutSeconds);
+            queryTimeoutSeconds,
+            useSnapshotMonitor ? " — blocking detection disabled on snapshot monitor path" : "");
     }
 
-    public void collect() {
+    public boolean collect() {
         String sqlTemplate;
         if (useSnapshotMonitor) {
             sqlTemplate = SQL_SNAP;
@@ -234,7 +258,7 @@ public class QuerySampleQuery {
             try (Statement st = conn.createStatement()) {
                 st.setQueryTimeout(queryTimeoutSeconds);
                 try (ResultSet rs = st.executeQuery(sql)) {
-                    Instant now = Instant.now();
+                    java.time.Instant now = java.time.Instant.now();
                     int count = 0;
                     while (rs.next()) {
                         String rawSql = rs.getString("STMT_TEXT");
@@ -270,14 +294,18 @@ public class QuerySampleQuery {
                         // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
                         // HLD_APPLICATION_HANDLE is NULL (global lock or unidentified holder).
                         if (!useSnapshotMonitor && rs.getInt("IS_BLOCKED") == 1) {
-                            double waitSec      = rs.getLong("BLOCKING_WAIT_SEC");
-                            String waitStartStr = new Timestamp(now.toEpochMilli() - (long)(waitSec * 1000)).toString();
+                            double waitSec = rs.getLong("BLOCKING_WAIT_SEC");
+
+                            // Use server-side LOCK_WAIT_START_TIME from SYSIBMADM.LOCKWAITS —
+                            // same clock and timezone as query_start (DB2 server), avoiding
+                            // JVM/DB2 skew. Falls back to null when LOCKWAITS row is absent.
+                            String blockingStartTime = rs.getString("BLOCKING_START_TIME");
 
                             ev.lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
                               .lockMode(trim(rs.getString("LOCK_MODE")))
                               .lockObjectName(trim(rs.getString("LOCK_OBJECT")))
                               .lockSchema(trim(rs.getString("LOCK_SCHEMA")))
-                              .blockingStartTime(waitStartStr)
+                              .blockingStartTime(blockingStartTime)
                               .waitDurationSeconds(waitSec);
 
                             // Blocker identity is NULL for global lock waits or unknown holders.
@@ -285,8 +313,13 @@ public class QuerySampleQuery {
                             if (blockerHandleObj != null) {
                                 long    blockerHandleLong = ((Number) blockerHandleObj).longValue();
                                 long    blockerMember     = rs.getLong("BLOCKER_MEMBER");
-                                String  blockerRawSql     = rs.getString("BLOCKER_SQL");
-                                boolean isIdle            = rs.getInt("BLOCKER_IS_IDLE") == 1;
+                                String  blockerRawSql = rs.getString("BLOCKER_SQL");
+                                // BLOCKER_IS_IDLE=1 when BLOCKER_SQL join returned no active
+                                // statement — but this is ambiguous: could be a genuinely idle
+                                // holder OR a cross-member miss after the member-qualified join.
+                                // Use the pkg cache lookup result to confirm: found = truly idle;
+                                // not found = unknown, omit is_idle rather than report false data.
+                                boolean mayBeIdle = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
                                 String blockerObf = null;
                                 if (blockerRawSql != null && !blockerRawSql.isBlank()) {
@@ -294,9 +327,17 @@ public class QuerySampleQuery {
                                     if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) blockerObf = ob;
                                 }
 
-                                // Idle blocker: look up last SQL from plan cache.
-                                if (isIdle && blockerObf == null) {
+                                Boolean isIdle = null;
+                                if (!mayBeIdle) {
+                                    // Active blocker — join confirmed it has live SQL
+                                    isIdle = false;
+                                } else if (blockerObf == null) {
+                                    // No active SQL — try pkg cache to confirm idleness
                                     blockerObf = fetchIdleBlockerSql(conn, blockerHandleLong, blockerMember);
+                                    if (blockerObf != null) {
+                                        isIdle = true; // pkg cache confirms: holder is idle
+                                    }
+                                    // pkg cache miss: could be cross-member or evicted — omit is_idle
                                 }
 
                                 ev.blockerHandle(String.valueOf(blockerHandleLong))
@@ -313,8 +354,10 @@ public class QuerySampleQuery {
                     log.debug("QuerySampleQuery: emitted {} samples", count);
                 }
             }
+            return true;
         } catch (Exception e) {
-            log.warn("QuerySampleQuery collection failed: {}", e.getMessage());
+            log.warn("QuerySampleQuery collection failed: {}", e.getMessage(), e);
+            return false;
         }
     }
 

@@ -103,6 +103,7 @@ class QuerySampleQueryTest {
         when(rs.getObject("BLOCKER_HANDLE")).thenReturn(blockerHandle);
         when(rs.getLong("BLOCKER_MEMBER")).thenReturn(blockerMember);
         when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(waitElapsedSec);
+        when(rs.getString("BLOCKING_START_TIME")).thenReturn("2024-01-01-12.00.00.000000");
         when(rs.getString("BLOCKER_SQL")).thenReturn(blockerSql);
         when(rs.getString("BLOCKER_USER")).thenReturn(blockerUser);
         when(rs.getString("BLOCKER_HOST")).thenReturn(blockerHost);
@@ -388,7 +389,9 @@ class QuerySampleQueryTest {
         assertThat(attrs.get(QuerySampleEvent.DB2_LOCK_SCHEMA)).isEqualTo("DB2INST1");
         assertThat(attrs.get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isFalse();
         assertThat(attrs.get(QuerySampleEvent.DB2_WAIT_DURATION)).isGreaterThanOrEqualTo(2.9);
-        assertThat(attrs.get(QuerySampleEvent.DB2_BLOCKING_START)).isNotNull();
+        // blocking.start_time must be the server-supplied value, not a JVM-derived string
+        assertThat(attrs.get(QuerySampleEvent.DB2_BLOCKING_START))
+            .isEqualTo("2024-01-01-12.00.00.000000");
     }
 
     @Test
@@ -426,13 +429,14 @@ class QuerySampleQueryTest {
 
         query(false).collect();
 
-        // Record should still be emitted without blocker query text
+        // Record should still be emitted without blocker query text or is_idle
+        // (pkg cache lookup failed — we cannot confirm idleness, omit rather than guess)
         verify(logBuilder).emit();
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_QUERY_TEXT)).isNull();
-        assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isTrue();
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isNull();
     }
 
     @Test
@@ -478,6 +482,7 @@ class QuerySampleQueryTest {
         when(rs.getInt("IS_BLOCKED")).thenReturn(1);
         when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null); // unknown holder
         when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(2L);
+        when(rs.getString("BLOCKING_START_TIME")).thenReturn("2024-01-01-11.59.58.000000");
         when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn("TABLE");
         when(rs.getString("LOCK_MODE")).thenReturn("S");
         when(rs.getString("LOCK_OBJECT")).thenReturn("MY_TABLE");
@@ -517,5 +522,111 @@ class QuerySampleQueryTest {
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE)).isNull();
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isNull();
         verify(logBuilder).setSeverity(Severity.INFO);
+    }
+
+    @Test
+    void collectReturnsTrueOnSuccess() throws Exception {
+        when(rs.next()).thenReturn(false);
+        assertThat(query(false).collect()).isTrue();
+    }
+
+    @Test
+    void collectReturnsFalseOnException() {
+        Supplier<Connection> failing = () -> { throw new RuntimeException("refused"); };
+        assertThat(new QuerySampleQuery(failing, "TESTDB", otelLogger, 10, false).collect()).isFalse();
+    }
+
+    @Test
+    void defaultPathSqlUsesLeftJoinForMonGetConnection() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue().toUpperCase();
+        // MON_GET_CONNECTION must be a LEFT JOIN so sessions not yet in the connection
+        // table are not silently dropped
+        int leftJoinPos = sql.indexOf("LEFT JOIN");
+        int innerJoinPos = sql.indexOf("JOIN (SELECT");
+        // first JOIN involving MON_GET_CONNECTION must be preceded by LEFT
+        assertThat(sql).containsIgnoringCase("LEFT JOIN (SELECT");
+        assertThat(sql).doesNotContainIgnoringCase("INNER JOIN (SELECT");
+    }
+
+    @Test
+    void defaultPathSqlMemberQualifiesBlockerSqlJoin() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        // BLOCKER_SQL join must be member-qualified to avoid cross-member misclassification
+        assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKER_SQL.COORD_MEMBER");
+    }
+
+    @Test
+    void defaultPathSqlJoinsLockwaitsForServerSideStartTime() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("SYSIBMADM.LOCKWAITS");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_START_TIME");
+    }
+
+    @Test
+    void defaultPathSqlExcludesAllCollectorPatterns() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+        assertThat(sql).containsIgnoringCase("MON_CURRENT_SQL");
+        assertThat(sql).containsIgnoringCase("MON_LOCKWAITS");
+        assertThat(sql).containsIgnoringCase("MON_GET_CONNECTION");
+        assertThat(sql).containsIgnoringCase("MON_GET_PKG_CACHE_STMT");
+    }
+
+    @Test
+    void missingBlockerSqlJoinDoesNotReportIsIdle() throws Exception {
+        // When BLOCKER_SQL join misses (cross-member blocker), BLOCKER_SQL is null and
+        // BLOCKER_IS_IDLE=1 is set by the CASE expression. The receiver must not emit
+        // is_idle=true in this ambiguous case.
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T");
+        when(rs.getString("ACTIVITY_STATE")).thenReturn("LOCKWAIT DML");
+        when(rs.getString("OPERATION_NAME")).thenReturn("READ");
+        when(rs.getString("LOCAL_START_TIME")).thenReturn(null);
+        when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(5L);
+        when(rs.getString("CLIENT_USERID")).thenReturn("user1");
+        when(rs.getString("CLIENT_WRKSTNNAME")).thenReturn("host1");
+        when(rs.getString("APPLICATION_HANDLE")).thenReturn("100");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getLong("CPU_US")).thenReturn(0L);
+        when(rs.getLong("LOCK_WAIT_TIME_MS")).thenReturn(-1L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(200L);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(1L);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(5L);
+        when(rs.getString("BLOCKING_START_TIME")).thenReturn(null);
+        // BLOCKER_SQL null + BLOCKER_IS_IDLE=1 = join miss, not confirmed idle
+        when(rs.getString("BLOCKER_SQL")).thenReturn(null);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKER_USER")).thenReturn(null);
+        when(rs.getString("BLOCKER_HOST")).thenReturn(null);
+        when(rs.getString("LOCK_OBJECT_TYPE")).thenReturn("ROW");
+        when(rs.getString("LOCK_MODE")).thenReturn("X");
+        when(rs.getString("LOCK_OBJECT")).thenReturn("T");
+        when(rs.getString("LOCK_SCHEMA")).thenReturn("DB2INST1");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // is_idle must be omitted when we can't distinguish join miss from real idle
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isNull();
     }
 }

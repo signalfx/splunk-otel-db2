@@ -86,8 +86,9 @@ public class Db2Connection {
             props.setProperty("sslConnection", "true");
         }
         connection = DriverManager.getConnection(url, props);
-        // clientProgramName in the Properties already sets CLIENT_APPLNAME for self-filtering.
-        // WLM_SET_CLIENT_INFO additionally sets CLIENT_ACCTNG for richer WLM tracking.
+        // clientProgramName in the Properties sets CLIENT_APPLNAME for self-filtering.
+        // WLM_SET_CLIENT_INFO redundantly sets CLIENT_APPLNAME via the procedure (3rd param),
+        // complementing the property and enabling WLM workload matching on installs that use it.
         // Not all DB2 installs grant EXECUTE on this procedure, so failure is non-fatal.
         try (Statement st = connection.createStatement()) {
             st.execute("CALL WLM_SET_CLIENT_INFO(NULL, NULL, 'splunk-otel-db2', NULL, NULL)");
