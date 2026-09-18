@@ -23,8 +23,8 @@ import java.util.function.Supplier;
  * Default path (useSnapshotMonitor=false, Db2 9.7+):
  *   MON_CURRENT_SQL LEFT JOIN MON_LOCKWAITS + MON_GET_CONNECTION.
  *   On Db2 10.5+ also JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
- *   SYSIBMADM.LOCKWAITS.LOCK_WAIT_START_TIME is used directly for blocking.start_time
- *   (server-side TIMESTAMP — avoids JVM/DB2 clock skew).
+ *   blocking.start_time is computed as CURRENT TIMESTAMP - LOCK_WAIT_ELAPSED_TIME SECONDS
+ *   (server-side arithmetic — avoids JVM/DB2 clock skew).
  *
  * Snapshot monitor fallback (useSnapshotMonitor=true, Db2 9.7+):
  *   SNAP_GET_APPL_INFO + SNAP_GET_STMT. Blocking detection not available on
@@ -38,9 +38,11 @@ public class QuerySampleQuery {
 
     // Default path (Db2 9.7+) with blocking detection.
     // LOCK_WAIT_ELAPSED_TIME is INTEGER SECONDS on Db2 11.5 (confirmed via SYSCAT.COLUMNS).
-    // SYSIBMADM.LOCKWAITS.LOCK_WAIT_START_TIME is a server-side TIMESTAMP that avoids
-    // JVM/DB2 clock skew for blocking.start_time. Both LOCKWAITS views are joined so we
-    // get the exact start time (LOCKWAITS) and the richer lock metadata (MON_LOCKWAITS).
+    // BLOCKING_START_TIME is computed server-side as CURRENT TIMESTAMP - LOCK_WAIT_ELAPSED_TIME
+    // SECONDS (from MON_LOCKWAITS), avoiding JVM/DB2 clock skew. SYSIBMADM.LOCKWAITS is NOT
+    // joined here — its column names differ between DB2 versions (REQ_APPLICATION_HANDLE in
+    // MON_LOCKWAITS vs AGENT_ID_WAITING_FOR_LK in the old snapshot view) and it adds no
+    // columns we don't already have from MON_LOCKWAITS.
     // MON_GET_CONNECTION appears twice (C for main session, BC for blocker) — each
     // wrapped in a derived table so Db2 does not raise "duplicate TVF" errors.
     // The main session join is LEFT so sessions not yet in MON_GET_CONNECTION (race,
@@ -61,7 +63,9 @@ public class QuerySampleQuery {
         "       LW.HLD_APPLICATION_HANDLE AS BLOCKER_HANDLE, " +
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
-        "       CHAR(LKS.LOCK_WAIT_START_TIME) AS BLOCKING_START_TIME, " +
+        "       CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL " +
+        "            THEN CHAR(CURRENT TIMESTAMP - LW.LOCK_WAIT_ELAPSED_TIME SECONDS) " +
+        "            ELSE NULL END AS BLOCKING_START_TIME, " +
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
         "       LW.LOCK_OBJECT_TYPE AS LOCK_OBJECT_TYPE, " +
@@ -79,9 +83,6 @@ public class QuerySampleQuery {
         "LEFT JOIN SYSIBMADM.MON_LOCKWAITS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN SYSIBMADM.LOCKWAITS LKS " +
-        "  ON LKS.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
-        " AND LKS.REQ_MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_SQL.COORD_MEMBER = LW.HLD_MEMBER " +
@@ -117,7 +118,9 @@ public class QuerySampleQuery {
         "       LW.HLD_APPLICATION_HANDLE AS BLOCKER_HANDLE, " +
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
-        "       CHAR(LKS.LOCK_WAIT_START_TIME) AS BLOCKING_START_TIME, " +
+        "       CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL " +
+        "            THEN CHAR(CURRENT TIMESTAMP - LW.LOCK_WAIT_ELAPSED_TIME SECONDS) " +
+        "            ELSE NULL END AS BLOCKING_START_TIME, " +
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
         "       LW.LOCK_OBJECT_TYPE AS LOCK_OBJECT_TYPE, " +
@@ -139,9 +142,6 @@ public class QuerySampleQuery {
         "LEFT JOIN SYSIBMADM.MON_LOCKWAITS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN SYSIBMADM.LOCKWAITS LKS " +
-        "  ON LKS.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
-        " AND LKS.REQ_MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_SQL.COORD_MEMBER = LW.HLD_MEMBER " +
