@@ -202,9 +202,6 @@ public class TopQueryQuery {
     // Single-threaded scheduler — no synchronization needed.
     private final Map<String, PlanCacheEntry> planCache;
 
-    // Transient: structural JSON from the most recent fetchPlanXml call, used to compute
-    // a cost-independent hash. Reset to null before each call, read immediately after.
-    private String lastPlanStructJson = null;
 
     private static final class PlanCacheEntry {
         final String xml;
@@ -510,12 +507,9 @@ public class TopQueryQuery {
                     planHash = cached.hash;
                 } else if (planAttempts < planMaxPerInterval) {
                     planAttempts++; // budget consumed only on DB2 round-trip attempts
-                    lastPlanStructJson = null;
                     planXml = fetchPlanXml(conn, execIdHex, (int) member);
                     if (planXml != null) {
-                        // Hash the structural JSON (no cost) so RUNSTATS-only changes
-                        // don't appear as plan changes in the dbmon processor.
-                        planHash = sha256Hex(lastPlanStructJson != null ? lastPlanStructJson : planXml);
+                        planHash = sha256Hex(planXml);
                         planCache.put(cacheKey, new PlanCacheEntry(planXml, planHash,
                             System.currentTimeMillis() + planCacheTtlMs));
                     }
@@ -586,13 +580,7 @@ public class TopQueryQuery {
             String sqlOp  = String.format(SQL_EXPLAIN_OPERATOR, usedSchema);
             String sqlSt  = String.format(SQL_EXPLAIN_STREAM,   usedSchema);
 
-            // Two parallel builders:
-            //   sb       — full JSON (operators with cost) stored in db2.query_plan
-            //   sbStruct — structural-only JSON (no cost) used for plan hash
-            // Cost is excluded from the hash because RUNSTATS changes optimizer estimates
-            // without changing the plan shape, which would cause false plan-change alerts.
-            StringBuilder sb       = new StringBuilder("{\"operators\":[");
-            StringBuilder sbStruct = new StringBuilder("{\"operators\":[");
+            StringBuilder sb = new StringBuilder("{\"operators\":[");
             boolean firstOp = true;
             try (PreparedStatement ps = conn.prepareStatement(sqlOp)) {
                 ps.setQueryTimeout(queryTimeoutSeconds);
@@ -603,22 +591,18 @@ public class TopQueryQuery {
                 ps.setString(5, sourceVersion);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        if (!firstOp) { sb.append(','); sbStruct.append(','); }
+                        if (!firstOp) sb.append(',');
                         firstOp = false;
                         int opId      = rs.getInt("OPERATOR_ID");
                         String opType = rs.getString("OPERATOR_TYPE");
                         double cost   = rs.getDouble("TOTAL_COST");
-                        String opTypeStr = opType == null ? "" : opType.trim();
                         sb.append("{\"id\":").append(opId)
-                          .append(",\"type\":\"").append(opTypeStr).append('"')
+                          .append(",\"type\":\"").append(opType == null ? "" : opType.trim()).append('"')
                           .append(",\"cost\":").append(cost).append('}');
-                        sbStruct.append("{\"id\":").append(opId)
-                                .append(",\"type\":\"").append(opTypeStr).append('"').append('}');
                     }
                 }
             }
             sb.append("],\"streams\":[");
-            sbStruct.append("],\"streams\":[");
 
             // Step 2b: read EXPLAIN_STREAM
             boolean firstSt = true;
@@ -631,29 +615,22 @@ public class TopQueryQuery {
                 ps.setString(5, sourceVersion);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        if (!firstSt) { sb.append(','); sbStruct.append(','); }
+                        if (!firstSt) sb.append(',');
                         firstSt = false;
                         int streamId = rs.getInt("STREAM_ID");
                         int srcId    = rs.getInt("SOURCE_ID");
                         int tgtId    = rs.getInt("TARGET_ID");
                         int colCount = rs.getInt("COLUMN_COUNT");
-                        String streamJson = "{\"id\":" + streamId +
-                            ",\"from\":" + srcId +
-                            ",\"to\":"   + tgtId +
-                            ",\"cols\":" + colCount + '}';
-                        sb.append(streamJson);
-                        sbStruct.append(streamJson);
+                        sb.append("{\"id\":").append(streamId)
+                          .append(",\"from\":").append(srcId)
+                          .append(",\"to\":").append(tgtId)
+                          .append(",\"cols\":").append(colCount).append('}');
                     }
                 }
             }
             sb.append("]}");
-            sbStruct.append("]}");
             String plan = sb.toString();
             if (firstOp) return null; // no operators means nothing was explained
-
-            // Store the structural JSON on the instance so the caller can compute
-            // a cost-independent hash without re-parsing the full plan.
-            this.lastPlanStructJson = sbStruct.toString();
 
             return plan;
 
