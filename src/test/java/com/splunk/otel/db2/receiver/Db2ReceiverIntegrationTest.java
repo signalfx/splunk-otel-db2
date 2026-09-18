@@ -549,13 +549,9 @@ class Db2ReceiverIntegrationTest {
             assertThat(planJson).contains("\"type\":");
             assertThat(planJson).contains("\"cost\":");
 
-            // Plan hash must be a 64-char lowercase hex SHA-256
+            // Plan hash is the EXECUTABLE_ID hex (32-char, changes on recompile)
             String planHash = record.getAttributes().get(TopQueryEvent.DB2_PLAN_HASH);
-            assertThat(planHash).isNotNull().hasSize(64).matches("[0-9a-f]+");
-
-            // Hash must match SHA-256 of the plan JSON
-            assertThat(planHash).isEqualTo(
-                com.splunk.otel.db2.receiver.queries.TopQueryQuery.sha256Hex(planJson));
+            assertThat(planHash).isNotNull().matches("[0-9a-fA-F]+");
 
             // SQL text must be obfuscated (probe query has no literals — alias only)
             String queryText = record.getAttributes().get(TopQueryEvent.DB_QUERY_TEXT);

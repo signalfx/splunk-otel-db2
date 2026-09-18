@@ -512,7 +512,8 @@ public class TopQueryQuery {
                     planAttempts++; // budget consumed only on DB2 round-trip attempts
                     planXml = fetchPlanXml(conn, execIdHex, (int) member);
                     if (planXml != null) {
-                        planHash = sha256Hex(planXml);
+                        // EXECUTABLE_ID is the plan hash — changes on recompile, same semantics as SQL Server plan_handle.
+                        planHash = execIdHex;
                         planCache.put(cacheKey, new PlanCacheEntry(planXml, planHash,
                             System.currentTimeMillis() + planCacheTtlMs));
                     }
