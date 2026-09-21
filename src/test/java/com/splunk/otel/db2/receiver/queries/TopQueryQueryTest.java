@@ -428,73 +428,28 @@ class TopQueryQueryTest {
     }
 
     @Test
-    void sqlDoesNotApplyFetchFirstLimit() throws Exception {
-        // All eligible rows are fetched — Java ranks interval deltas over the complete set
-        // so a newly hot query cannot be displaced by a historically expensive idle one.
+    void sqlAppliesFetchFirstWithMaxQuerySampleCount() throws Exception {
+        // FETCH FIRST %maxQuerySampleCount% ROWS ONLY bounds rows fetched at the DB layer.
         TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 500, 60L,
             null, 1000, 3600_000L, "");
         when(rs.next()).thenReturn(false);
         q.collect();
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
-        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("FETCH FIRST");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("FETCH FIRST 500 ROWS ONLY");
     }
 
     @Test
-    void postFetchTruncationRespectsMaxQuerySampleCount() throws Exception {
-        // maxQuerySampleCount=1; DB returns 3 rows with different deltas (300 > 200 > 100).
-        // Truncation must happen AFTER delta ranking so the hottest query (e3, delta=300)
-        // is the one emitted — not the first row in DB order.
-        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 1, 60L,
+    void sqlContainsFetchFirstWithMaxQuerySampleCount() throws Exception {
+        // maxQuerySampleCount=2 → SQL must contain FETCH FIRST 2 ROWS ONLY so the DB
+        // enforces the row cap before any data is transferred or stored.
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 2, 60L,
             null, 1000, 3600_000L, "");
-
-        // Seed cycle: 3 rows, DB-order e1/e2/e3 with ascending exec times
-        when(rs.next()).thenReturn(true, true, true, false);
-        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
-        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
-        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L, 300L);
-        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
-        when(rs.getLong("ROWS_READ")).thenReturn(0L);
-        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
-        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
-        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
-        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
-        when(rs.getString("SECTION_TYPE")).thenReturn("D");
-        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null);
+        when(rs.next()).thenReturn(false);
         q.collect();
-
-        // Cycle 2: all 3 rows grew by ascending deltas (e1+100, e2+200, e3+300)
-        reset(stmt, rs, otelLogger, logBuilder);
-        when(conn.createStatement()).thenReturn(stmt);
-        when(stmt.executeQuery(anyString())).thenReturn(rs);
-        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
-        when(logBuilder.setAllAttributes(any())).thenReturn(logBuilder);
-        when(rs.next()).thenReturn(true, true, true, false);
-        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
-        when(rs.getLong("MEMBER")).thenReturn(0L);
-        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
-        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L);
-        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(200L, 400L, 600L);
-        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
-        when(rs.getLong("ROWS_READ")).thenReturn(0L);
-        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
-        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
-        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
-        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
-        when(rs.getString("SECTION_TYPE")).thenReturn("D");
-        when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null);
-        q.collect();
-
-        // Only 1 record emitted (maxQuerySampleCount=1), and it must be the hottest query
-        // (e3, exec time delta=300ms), not the first DB-order row (e1, delta=100ms).
-        verify(logBuilder, times(1)).emit();
-        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
-            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
-        verify(logBuilder).setAllAttributes(cap.capture());
-        // e3 delta = 600-300 = 300ms = 0.3s
-        assertThat(cap.getValue().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.3);
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("FETCH FIRST 2 ROWS ONLY");
     }
 
     @Test
@@ -1430,6 +1385,16 @@ class TopQueryQueryTest {
     }
 
     @Test
+    void isXQueryDetectsVariableRefsAndPathSteps() {
+        // $ and // are XQuery markers; neither appears in SQL predicates
+        assertThat(TopQueryQuery.isXQuery("$customer/ssn[. = \"123-45-6789\"]")).isTrue();
+        assertThat(TopQueryQuery.isXQuery("//order[amount > 100]")).isTrue();
+        assertThat(TopQueryQuery.isXQuery("$x = 1")).isTrue();
+        assertThat(TopQueryQuery.isXQuery("Q1.COL1 = 'value'")).isFalse();
+        assertThat(TopQueryQuery.isXQuery("T.ID > 42")).isFalse();
+    }
+
+    @Test
     void configRejectsNegativeTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
@@ -1590,12 +1555,12 @@ class TopQueryQueryTest {
         assertThat(plan).doesNotContain("some value");
     }
 
-    // --- P1-2: ORDER BY before FETCH FIRST ---
+    // --- P1-2: no ORDER BY in SQL; FETCH FIRST uses maxQuerySampleCount ---
 
     @Test
-    void sqlHasNoOrderByOrFetchFirst() throws Exception {
-        // No ORDER BY or FETCH FIRST in the DB query — Java ranks interval deltas over
-        // the full eligible set after computing per-interval deltas.
+    void sqlHasNoOrderByButHasFetchFirst() throws Exception {
+        // No ORDER BY — Java ranks interval deltas after fetch.
+        // FETCH FIRST bounds DB rows to maxQuerySampleCount (default 1000 via query()).
         when(rs.next()).thenReturn(false);
         query().collect();
 
@@ -1603,7 +1568,7 @@ class TopQueryQueryTest {
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
         assertThat(sql).doesNotContainIgnoringCase("ORDER BY STMT_EXEC_TIME");
-        assertThat(sql).doesNotContainIgnoringCase("FETCH FIRST");
+        assertThat(sql).containsIgnoringCase("FETCH FIRST");
     }
 
     // --- P1-3: maxExplainEachInterval defaults to 0 ---

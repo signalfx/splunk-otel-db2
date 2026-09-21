@@ -44,7 +44,7 @@ receivers:
     top_query_collection:
       collection_interval: "60s"      # how often to collect top queries (minimum 60s)
       top_query_count: 250            # top N queries to emit per interval (must be > 0)
-      max_query_sample_count: 1000    # max rows fetched from MON_GET_PKG_CACHE_STMT before ranking (must be > 0)
+      max_query_sample_count: 1000    # max rows fetched from MON_GET_PKG_CACHE_STMT (must be > 0)
       max_explain_each_interval: 0    # max EXPLAIN_FROM_SECTION calls per interval; 0 = plan disabled (default)
       query_plan_cache_size: 1000     # max entries in the client-side plan cache
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining

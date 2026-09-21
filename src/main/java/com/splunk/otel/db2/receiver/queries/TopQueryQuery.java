@@ -62,7 +62,7 @@ import java.util.function.Supplier;
  * SQL text is obfuscated via {@link SqlObfuscator} before emission. Records whose
  * obfuscation fails are dropped with a WARN log — never emitted raw.
  *
- * Plan collection (optional): when {@code top_query_plan_enabled: true}, each emitted
+ * Plan collection (optional): when {@code top_query_collection.max_explain_each_interval > 0}, each emitted
  * top-query record is enriched with {@code db2.query_plan} (JSON plan summary) and
  * {@code db2.query_plan.hash} (EXECUTABLE_ID hex string, changes on recompile). The plan is retrieved via
  * {@code EXPLAIN_FROM_SECTION}: the stored procedure populates the explain tables from
@@ -103,9 +103,9 @@ public class TopQueryQuery {
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
     // TOTAL_SECTION_SORTS: correct column name (not STMT_SORTS).
     // Lookback is parameterised as %1$d minutes (derived from the collection interval).
-    // No FETCH FIRST limit is applied — all eligible rows are fetched; rows are
-    // post-fetch truncated to maxQuerySampleCount before delta ranking so Java-side
-    // delta ranking sees the complete set and cannot miss a newly hot query.
+    // FETCH FIRST %2$d ROWS ONLY bounds the result set to maxQuerySampleCount rows so
+    // memory, network, and sort cost are proportional to that limit.
+    // Delta ranking then selects the hottest topQueryCount rows from the fetched set.
     private static final String SQL =
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
@@ -133,7 +133,8 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
-        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
+        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%' " +
+        "FETCH FIRST %2$d ROWS ONLY";
 
     // DB2 explain workflow — two steps (verified on DB2 11.5.8.0):
     //
@@ -332,7 +333,7 @@ public class TopQueryQuery {
                              ? null : explainSchema.trim().toUpperCase();
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
-        this.sql = String.format(SQL, lookbackMinutes);
+        this.sql = String.format(SQL, lookbackMinutes, maxQuerySampleCount);
         // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
         this.planCache = planMaxPerInterval != null ? buildLruCache(planCacheSize) : null;
@@ -504,13 +505,6 @@ public class TopQueryQuery {
             int cmp = Long.compare(b[1], a[1]);
             return cmp != 0 ? cmp : Long.compare(b[2], a[2]);
         });
-
-        // Apply maxQuerySampleCount cap after ranking so the true hottest queries are kept.
-        if (deltas.size() > maxQuerySampleCount) {
-            log.debug("TopQueryQuery: capping {} ranked candidates to maxQuerySampleCount={}",
-                deltas.size(), maxQuerySampleCount);
-            deltas = deltas.subList(0, maxQuerySampleCount);
-        }
 
         Instant now = Instant.now();
         int emitCount = 0;
@@ -846,8 +840,15 @@ public class TopQueryQuery {
                             String rawText    = rs.getString("PREDICATE_TEXT");
                             String obfText    = null;
                             if (rawText != null && !rawText.isBlank()) {
-                                String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
-                                if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
+                                String trimmed = rawText.trim();
+                                // XQuery predicates use $ (variable refs) or // (path steps).
+                                // The SQL obfuscator preserves double-quoted text as identifiers,
+                                // which would leak XQuery string literals (e.g. [. = "secret"]).
+                                // Omit the text entirely when XQuery syntax is detected.
+                                if (!isXQuery(trimmed)) {
+                                    String ob = SqlObfuscator.obfuscateFragment(trimmed);
+                                    if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
+                                }
                             }
                             StringBuilder frag = new StringBuilder();
                             frag.append("{\"op\":").append(opId)
@@ -908,6 +909,15 @@ public class TopQueryQuery {
                 }
             }
         }
+    }
+
+    // XQuery predicates use $ (variable references) or // (path steps), neither of
+    // which appears in SQL predicates. The SQL obfuscator preserves double-quoted text
+    // as identifiers, so an XQuery string literal like [. = "secret"] would leak.
+    // Treating the text as XQuery when either marker is present is conservative: if
+    // we misidentify a SQL predicate we merely omit its text, which is safe.
+    static boolean isXQuery(String text) {
+        return text.contains("$") || text.contains("//");
     }
 
     // Explicit allowlist: default false so unknown future ARGUMENT_TYPE values are

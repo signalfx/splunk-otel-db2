@@ -150,7 +150,7 @@ attributes:
       MON_LOCKWAITS.LOCK_WAIT_ELAPSED_TIME, which is an INTEGER SECONDS column on Db2 11.5.
     type: double
 
-  # --- top query plan attributes (populated only when top_query_plan_enabled: true) ---
+  # --- top query plan attributes (populated only when top_query_collection.max_explain_each_interval > 0) ---
   db2.query_plan:
     description: >
       JSON plan summary for the statement, produced by EXPLAIN_FROM_SECTION which reads
@@ -472,5 +472,5 @@ events:
       - db2.sorts
       - db2.sort_overflows
       - db2.stmt_type
-      - db2.query_plan                              # populated only when top_query_plan_enabled: true
-      - db2.query_plan.hash                         # populated only when top_query_plan_enabled: true
+      - db2.query_plan                              # populated only when max_explain_each_interval > 0
+      - db2.query_plan.hash                         # populated only when max_explain_each_interval > 0
