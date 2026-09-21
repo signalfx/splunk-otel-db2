@@ -145,7 +145,7 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 | Collector | Connection | Always open? |
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
-| Query sample (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
+| Query sample + Blocking session (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
 | Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
@@ -206,7 +206,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
-| `db2.application_handle` | Application handle / agent ID |
+| `db2.session_id` | Session identifier (DB2 application handle) |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
@@ -219,6 +219,69 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 **Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `SYSIBMADM.MON_CURRENT_SQL` view + `MON_GET_CONNECTION` TVF JOIN. No `DFT_MON_STMT` requirement. Filters out IDLE sessions and the receiver's own queries.
 
 **Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
+
+## Blocking sessions (log records)
+
+Lock contention is detected automatically whenever query sampling is enabled. When a sampled session is waiting for a lock (`LOCKWAIT`), its `db.server.query_sample` record is enriched with blocking attributes and emitted at severity WARN. No separate flag is needed.
+
+- `query_sample_enabled: true` enables both query samples and blocking detection.
+- `query_sample_interval` controls the poll cadence for both.
+- Both share the same `querySampleConnection`.
+
+If the blocker is idle (holding an open transaction but not currently executing), its last statement is looked up from `MON_GET_PKG_CACHE_STMT` and attached as `db2.blocking.blocker.query_text`.
+
+Blocking detection is available on the **default path only** (`use_snapshot_monitor: false`). The snapshot path emits query samples at INFO severity without blocking attributes.
+
+```yaml
+receivers:
+  db2:
+    hostname: "localhost"
+    database: "SAMPLE"
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    query_sample_enabled: true    # enables query sampling and blocking detection
+    query_sample_interval: "10s"  # controls poll cadence for both
+```
+
+| Attribute | Description |
+|---|---|
+| `db.system.name` | Always `ibm.db2` |
+| `db.namespace` | Database name |
+| `db.query.text` | Obfuscated SQL of the **blocked** session |
+| `db2.session_id` | Session identifier of the blocked session (DB2 application handle) |
+| `db2.activity_state` | Activity state of the blocked session (e.g. `LOCK_WAIT READ_DML`) |
+| `db2.member` | Db2 member number |
+| `user.name` | Authenticated user of the blocked session |
+| `client.address` | Client workstation of the blocked session |
+| `db2.blocking.blocker.session_id` | Session identifier of the blocking session (DB2 application handle) |
+| `db2.blocking.blocker.user` | Authenticated user of the blocker |
+| `db2.blocking.blocker.client_address` | Client workstation of the blocker |
+| `db2.blocking.blocker.query_text` | Obfuscated SQL of the blocker (from `MON_CURRENT_SQL`; idle blockers fall back to `MON_GET_PKG_CACHE_STMT`; omitted if unavailable) |
+| `db2.blocking.blocker.is_idle` | `true` when the blocker has no active statement — it holds an open transaction but is not currently executing (omitted on snapshot path) |
+| `db2.blocking.lock.object_type` | DB2 lock object type (`ROW`, `TABLE`, `TABLESPACE`, `PLAN`, `INTERNAL`, …) |
+| `db2.blocking.lock.mode` | DB2 lock mode (`S`, `X`, `IX`, `IS`, `SIX`, `U`, `NS`, `NX`, …) |
+| `db2.blocking.lock.object_name` | Name of the locked table or object |
+| `db2.blocking.lock.schema` | Schema of the locked object |
+| `db2.blocking.start_time` | Timestamp when the lock wait began |
+| `db2.blocking.wait_duration` | Elapsed time since the lock wait began, in seconds |
+
+**DB2-specific lock types** not present in SQL Server or PostgreSQL blocking detectors:
+
+| Type | Meaning |
+|---|---|
+| `PLAN` | Package compile lock — acquired when DB2 compiles a static SQL package; can block concurrent compilations |
+| `INTERNAL` | Internal latch — low-level engine synchronisation; rarely visible but can appear under high concurrency |
+| `TABLESPACE` | Tablespace-level lock — acquired during backup, restore, or `REORG` operations |
+| `NS` / `NX` modes | Next-key share/exclusive locks — used by range scans under `RR` isolation to prevent phantom reads |
+
+**Required permissions** (blocking session detection):
+
+```sql
+GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
+GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;  -- idle-blocker lookup
+```
 
 ## Top queries (log records)
 
@@ -236,8 +299,8 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db.namespace` | Database name |
 | `db.query.text` | Obfuscated SQL statement |
 | `db2.member` | Db2 member number |
-| `db2.executions` | Total executions added during this interval |
-| `db2.total_exec_time` | Interval execution elapsed time in seconds |
+| `db2.num_executions` | Total executions added during this interval |
+| `db2.total_elapsed_time` | Interval execution elapsed time in seconds |
 | `db2.avg_exec_time` | Average execution time per execution this interval, in seconds |
 | `db2.total_cpu_time` | Interval CPU time in seconds |
 | `db2.rows_read` | Rows read during this interval |
@@ -281,14 +344,19 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
 -- Db2 10.5+ wait time attribute (db2.wait_time)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
+-- Blocking session detection (runs automatically with query_sample_enabled: true)
+GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
+-- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
+
 -- Snapshot monitor path (use_snapshot_monitor: true)
+-- Note: blocking detection is NOT available on this path.
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
 -- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
--- Also requires DFT_MON_STMT ON. Run the following as SYSADM, then restart the instance:
+-- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
 --   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
 --   db2stop force && db2start
--- DFT_MON_STMT ON takes effect only after the instance is cycled; without the restart
+-- This setting takes effect only after the instance is cycled; without the restart
 -- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
 ```
 

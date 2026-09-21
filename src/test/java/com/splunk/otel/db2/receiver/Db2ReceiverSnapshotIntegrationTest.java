@@ -73,11 +73,27 @@ class Db2ReceiverSnapshotIntegrationTest {
         return config;
     }
 
+    private void recycleWithMonitorSwitches() throws Exception {
+        // DFT_MON_STMT takes effect only after instance recycle.
+        // DFT_MON_LOCK is not needed: snapshot path does not query MON_LOCKWAITS.
+        String script =
+            "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
+            "db2stop force && " +
+            "db2start";
+        org.testcontainers.containers.Container.ExecResult result = db2.execInContainer(
+            "su", "-", "db2inst1", "-c", script
+        );
+        if (result.getExitCode() != 0) {
+            throw new IllegalStateException(
+                "Failed to recycle DB2 instance: exit=" + result.getExitCode() +
+                " stdout=" + result.getStdout() +
+                " stderr=" + result.getStderr());
+        }
+        Thread.sleep(5000);
+    }
+
     @Test
     void snapshotPathEmitsObfuscatedRecordForActiveQuery() throws Exception {
-        // DFT_MON_STMT ON takes effect only at next database activation (IBM docs).
-        // db2stop force + db2start recycles the instance so the new default is
-        // active for every subsequent JDBC connection. Run as db2inst1 (SYSADM).
         String script =
             "db2 UPDATE DBM CFG USING DFT_MON_STMT ON && " +
             "db2stop force && " +
@@ -91,7 +107,6 @@ class Db2ReceiverSnapshotIntegrationTest {
                 " stdout=" + result.getStdout() +
                 " stderr=" + result.getStderr());
         }
-        // Give the freshly started instance a moment before opening JDBC connections
         Thread.sleep(5000);
 
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
@@ -111,8 +126,6 @@ class Db2ReceiverSnapshotIntegrationTest {
 
         Db2ReceiverConfig config = buildSnapshotConfig();
 
-        // Lock-based background query — same pattern as the default-path test.
-        // DDL via its own autoCommit connection, INSERT held in ownerConn.
         Connection ddlConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
         try (Statement st = ddlConn.createStatement()) {
             try { st.execute("DROP TABLE SPLUNK_SNAP_LOCK_TEST"); } catch (Exception ignored) {}
@@ -138,7 +151,6 @@ class Db2ReceiverSnapshotIntegrationTest {
 
         Thread.sleep(3000);
 
-        // Diagnostic: capture what SNAP_GET_STMT sees; include in assertion failure message
         StringBuilder snapDiag = new StringBuilder();
         try (Connection diagConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
              java.sql.Statement diagSt = diagConn.createStatement();
@@ -214,5 +226,103 @@ class Db2ReceiverSnapshotIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_DURATION)).isNotNull();
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_MEMBER)).isNotNull();
         assertThat(record.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+        // Snapshot path: blocking detection not available, so no blocker handle
+        assertThat(record.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE)).isNull();
+    }
+
+    @Test
+    void snapshotPathDoesNotEmitBlockingAttributes() throws Exception {
+        // SYSIBMADM.LOCKWAITS requires DFT_MON_LOCK ON but on snapshot path we don't
+        // join MON_LOCKWAITS — confirm no blocking attributes appear even with DFT_MON_LOCK ON.
+        recycleWithMonitorSwitches();
+
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Connection ddlConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        try (Statement st = ddlConn.createStatement()) {
+            try { st.execute("DROP TABLE SPLUNK_SNAP_BLOCK_TEST"); } catch (Exception ignored) {}
+            st.execute("CREATE TABLE SPLUNK_SNAP_BLOCK_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
+            st.execute("INSERT INTO SPLUNK_SNAP_BLOCK_TEST VALUES (1, 1)");
+        }
+        ddlConn.setAutoCommit(false);
+        ddlConn.commit();
+        ddlConn.close();
+
+        Connection blockerConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        blockerConn.setAutoCommit(false);
+        try (Statement st = blockerConn.createStatement()) {
+            st.execute("UPDATE SPLUNK_SNAP_BLOCK_TEST SET VAL = 2 WHERE ID = 1");
+        }
+
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Connection blockedConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        blockedConn.setAutoCommit(false);
+        Statement blockedStmt = blockedConn.createStatement();
+        exec.submit(() -> {
+            try { blockedStmt.executeQuery("SELECT VAL FROM SPLUNK_SNAP_BLOCK_TEST WITH RR"); }
+            catch (Exception ignored) {}
+        });
+
+        Thread.sleep(2000);
+
+        Db2ReceiverConfig config = buildSnapshotConfig();
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        io.opentelemetry.sdk.logs.data.LogRecordData snapRecord;
+        try {
+            try {
+                Awaitility.await()
+                    .atMost(60, TimeUnit.SECONDS)
+                    .pollInterval(1, TimeUnit.SECONDS)
+                    .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                        .anyMatch(r -> {
+                            String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                            return text != null && text.toUpperCase().contains("SPLUNK_SNAP_BLOCK_TEST");
+                        }));
+            } catch (org.awaitility.core.ConditionTimeoutException cte) {
+                throw new AssertionError("No query sample found for SPLUNK_SNAP_BLOCK_TEST after 60s", cte);
+            }
+
+            snapRecord = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> {
+                    String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                    return text != null && text.toUpperCase().contains("SPLUNK_SNAP_BLOCK_TEST");
+                })
+                .findFirst()
+                .orElseThrow();
+
+            // Snapshot path: blocking detection not available — always INFO, no blocking attributes.
+            assertThat(snapRecord.getSeverity()).isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+            assertThat(snapRecord.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE)).isNull();
+            assertThat(snapRecord.getAttributes().get(QuerySampleEvent.DB2_WAIT_DURATION)).isNull();
+        } finally {
+            blockerConn.rollback();
+            blockerConn.close();
+            blockedStmt.cancel();
+            blockedConn.rollback();
+            blockedConn.close();
+            exec.shutdownNow();
+            Connection cleanupConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+            try (Statement st = cleanupConn.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_SNAP_BLOCK_TEST");
+            } finally { cleanupConn.close(); }
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
     }
 }

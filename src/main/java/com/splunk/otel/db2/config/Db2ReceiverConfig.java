@@ -71,6 +71,7 @@ public class Db2ReceiverConfig {
     public boolean isTopQueryEnabled() { return topQueryEnabled; }
     public void setTopQueryEnabled(boolean topQueryEnabled) { this.topQueryEnabled = topQueryEnabled; }
 
+
     public int getMaxQuerySampleCount() { return maxQuerySampleCount; }
     public void setMaxQuerySampleCount(int maxQuerySampleCount) {
         if (maxQuerySampleCount <= 0) {

@@ -29,7 +29,7 @@ public class Db2Receiver {
 
     // Each collector has its own connection so they never contend:
     //   metricsConnection     — DatabaseQuery, BufferpoolQuery, TablespaceQuery (OTel SDK reader thread)
-    //   querySampleConnection — QuerySampleQuery (db2-query-sampler thread)
+    //   querySampleConnection — QuerySampleQuery (includes blocking detection) (db2-query-sampler thread)
     //   topQueryConnection    — TopQueryQuery (db2-top-query-collector thread)
     private final Db2Connection metricsConnection;
     private Db2Connection querySampleConnection;
@@ -89,6 +89,7 @@ public class Db2Receiver {
             startQuerySampleScheduler(db2Version);
         }
 
+
         if (otelLogger != null && config.isTopQueryEnabled()) {
             long topQueryIntervalSeconds = config.getTopQueryIntervalDuration().getSeconds();
             startTopQueryScheduler(topQueryIntervalSeconds);
@@ -106,8 +107,9 @@ public class Db2Receiver {
                 throw new RuntimeException("[" + label + "] DB2 query-sample connection failed: " + e.getMessage(), e);
             }
         };
-        long intervalSeconds          = config.getQuerySampleIntervalDuration().getSeconds();
+        long intervalSeconds           = config.getQuerySampleIntervalDuration().getSeconds();
         int  querySampleTimeoutSeconds = (int) Math.max(5L, intervalSeconds / 2);
+
         QuerySampleQuery querySampleQuery = new QuerySampleQuery(
             querySampleConnSupplier,
             config.getDatabase(),
@@ -115,8 +117,8 @@ public class Db2Receiver {
             config.getMaxQuerySampleCount(),
             config.isUseSnapshotMonitor(),
             db2Version,
-            querySampleTimeoutSeconds
-        );
+            querySampleTimeoutSeconds);
+
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
             t.setDaemon(true);
@@ -133,6 +135,7 @@ public class Db2Receiver {
             0, intervalSeconds, TimeUnit.SECONDS
         );
     }
+
 
     // Package-private: allows integration tests to inject a short interval without violating the
     // production minimum. Production code always calls start() which enforces the 60s minimum
@@ -212,8 +215,8 @@ public class Db2Receiver {
 
     public void stopScheduler() {
         // B4: graceful drain — let the current collection cycle finish, then force-stop
-        shutdownGracefully(querySampleScheduler, "db2-query-sampler");
-        shutdownGracefully(topQueryScheduler,    "db2-top-query-collector");
+        shutdownGracefully(querySampleScheduler,     "db2-query-sampler");
+        shutdownGracefully(topQueryScheduler, "db2-top-query-collector");
     }
 
     private void shutdownGracefully(ScheduledExecutorService scheduler, String name) {

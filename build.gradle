@@ -64,6 +64,11 @@ task integrationTest(type: Test) {
     includes = ['**/*IntegrationTest*']
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
 
 // Snapshot monitor path — requires DFT_MON_STMT ON on the DB2 instance.

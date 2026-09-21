@@ -11,7 +11,7 @@ resource_attributes:
     type: string
     enabled: true
   db.system.name:
-    description: The database management system. Always db2 for this receiver.
+    description: The database management system. Always ibm.db2 for this receiver.
     type: string
     enabled: true
   server.address:
@@ -65,10 +65,10 @@ attributes:
     enum: [capacity, used, free]
 
   # --- top query event attributes ---
-  db2.executions:
+  db2.num_executions:
     description: Number of times the statement has been executed.
     type: int
-  db2.total_exec_time:
+  db2.total_elapsed_time:
     description: >
       Interval delta of statement execution elapsed time, in seconds.
       Computed as the difference in STMT_EXEC_TIME between two consecutive collections.
@@ -101,12 +101,61 @@ attributes:
       Statement type from the package cache. D = dynamic SQL, S = static (package) SQL.
     type: string
 
+  # --- blocking session event attributes ---
+  db2.blocking.blocker.session_id:
+    description: Session identifier (application handle) of the session holding the lock (blocker).
+    type: string
+  db2.blocking.blocker.user:
+    description: Authenticated user ID of the blocker.
+    type: string
+  db2.blocking.blocker.client_address:
+    description: Client workstation name of the blocker.
+    type: string
+  db2.blocking.blocker.query_text:
+    description: >
+      Obfuscated SQL text of the blocker's active statement (from MON_CURRENT_SQL).
+      For idle blockers, the last statement from MON_GET_PKG_CACHE_STMT is used.
+      Omitted if unavailable or if obfuscation fails.
+    type: string
+  db2.blocking.blocker.is_idle:
+    description: >
+      True when the blocker has no active statement in MON_CURRENT_SQL —
+      i.e. it is holding an open transaction but not currently executing.
+    type: bool
+  db2.blocking.lock.object_type:
+    description: >
+      DB2 lock object type (ROW, TABLE, PLAN, INTERNAL, TABLESPACE, etc.)
+      from MON_LOCKWAITS.LOCK_OBJECT_TYPE.
+    type: string
+  db2.blocking.lock.mode:
+    description: >
+      Lock mode requested by the blocked session (S, X, IX, IS, SIX, Z, U, NS, NX, etc.)
+      from MON_LOCKWAITS.LOCK_MODE_REQUESTED.
+    type: string
+  db2.blocking.lock.object_name:
+    description: Name of the locked table or object from MON_LOCKWAITS.TABNAME.
+    type: string
+  db2.blocking.lock.schema:
+    description: Schema of the locked object from MON_LOCKWAITS.TABSCHEMA.
+    type: string
+  db2.blocking.start_time:
+    description: >
+      Timestamp when the lock wait began. Approximated as now minus LOCK_WAIT_ELAPSED_TIME
+      on the default MON_LOCKWAITS path; not available on the snapshot path (blocking
+      detection is default-path only).
+    type: string
+  db2.blocking.wait_duration:
+    description: >
+      Elapsed time since the lock wait began, in seconds. Read directly from
+      MON_LOCKWAITS.LOCK_WAIT_ELAPSED_TIME, which is an INTEGER SECONDS column on Db2 11.5.
+    type: double
+
   # --- query sample event attributes ---
   db.query.text:
     description: Obfuscated SQL statement text. Literal values replaced with ?.
     type: string
-  db2.application_handle:
-    description: Application handle / agent ID.
+  db2.session_id:
+    description: Session identifier (application handle) of the active connection.
     type: string
   db2.activity_state:
     description: >
@@ -332,19 +381,41 @@ events:
       or SNAP_GET_STMT (snapshot monitor path). SQL text is obfuscated before emission —
       literal values are replaced with ?. Emitted at query_sample_interval as OTel log
       records with severity INFO.
+
+      When the sampled session is waiting for a lock (LOCKWAIT), the record is enriched
+      with blocking attributes and emitted at severity WARN — same convention as the
+      SQL Server, Oracle, and PostgreSQL OTel receivers. Blocking detection is available
+      on the default path only (use_snapshot_monitor: false); the snapshot path emits
+      INFO records without blocking attributes.
+
+      Idle blockers (holding an open transaction but not currently executing) have their
+      last SQL looked up from MON_GET_PKG_CACHE_STMT and included as
+      db2.blocking.blocker.query_text on the blocked session's record.
     attributes:
       - db.system.name
       - db.namespace
       - db.query.text
-      - db2.application_handle
+      - db2.session_id
       - db2.activity_state
       - db2.query_start
       - db2.session.duration
       - db2.member
-      - db2.cpu_time       # default path only; omitted on snapshot path
-      - db2.wait_time      # Db2 10.5+ default path only; omitted otherwise
+      - db2.cpu_time                           # default path only; omitted on snapshot path
+      - db2.wait_time                          # Db2 10.5+ default path only; omitted otherwise
       - user.name
       - client.address
+      # Blocking attributes — populated only when this session is in LOCKWAIT (default path)
+      - db2.blocking.blocker.session_id        # omitted when not blocked
+      - db2.blocking.blocker.user              # omitted when not blocked
+      - db2.blocking.blocker.client_address    # omitted when not blocked
+      - db2.blocking.blocker.query_text        # omitted when unavailable or obfuscation fails
+      - db2.blocking.blocker.is_idle           # omitted on snapshot path
+      - db2.blocking.lock.object_type          # omitted when not blocked
+      - db2.blocking.lock.mode                 # omitted when not blocked
+      - db2.blocking.lock.object_name          # omitted when not blocked
+      - db2.blocking.lock.schema               # omitted when not blocked
+      - db2.blocking.start_time                # omitted when not blocked
+      - db2.blocking.wait_duration             # omitted when not blocked
 
   db.server.top_query:
     enabled: false
@@ -359,8 +430,8 @@ events:
       - db.namespace
       - db.query.text
       - db2.member
-      - db2.executions
-      - db2.total_exec_time
+      - db2.num_executions
+      - db2.total_elapsed_time
       - db2.avg_exec_time
       - db2.total_cpu_time
       - db2.rows_read

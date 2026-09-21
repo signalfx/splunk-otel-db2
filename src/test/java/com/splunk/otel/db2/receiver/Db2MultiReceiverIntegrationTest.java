@@ -243,8 +243,15 @@ class Db2MultiReceiverIntegrationTest {
             assertThat(record.getAttributes().get(
                 com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB2_MEMBER))
                 .isNotNull();
+            // The sampled query is in LOCKWAIT — blocking detection enriches it and emits WARN.
             assertThat(record.getSeverity())
-                .isEqualTo(io.opentelemetry.api.logs.Severity.INFO);
+                .isEqualTo(io.opentelemetry.api.logs.Severity.WARN);
+            assertThat(record.getAttributes().get(
+                com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB2_WAIT_DURATION))
+                .isGreaterThan(0.0);
+            assertThat(record.getAttributes().get(
+                com.splunk.otel.db2.receiver.queries.QuerySampleEvent.DB2_LOCK_MODE))
+                .isNotNull();
         } finally {
             ownerConn.rollback();
             ownerConn.close();
