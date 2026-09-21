@@ -170,6 +170,35 @@ public class TopQueryQuery {
         "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
         "ORDER BY STREAM_ID";
 
+    // Step 2c — operator arguments (configuration: join type, prefetch, sort columns, etc.).
+    // COST_DETAIL arguments are omitted — they are verbose cost-breakdown strings that
+    // duplicate TOTAL_COST already captured in EXPLAIN_OPERATOR.
+    private static final String SQL_EXPLAIN_ARGUMENT =
+        "SELECT OPERATOR_ID, RTRIM(ARGUMENT_TYPE) AS ARGUMENT_TYPE, RTRIM(ARGUMENT_VALUE) AS ARGUMENT_VALUE " +
+        "FROM %s.EXPLAIN_ARGUMENT " +
+        "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
+        "  AND ARGUMENT_TYPE <> 'COST_DETAIL' " +
+        "ORDER BY OPERATOR_ID, ARGUMENT_TYPE";
+
+    // Step 2d — objects (tables and indexes) accessed, matched via STREAM.SOURCE_ID = -1 streams.
+    private static final String SQL_EXPLAIN_OBJECT =
+        "SELECT RTRIM(OBJECT_SCHEMA) AS OBJECT_SCHEMA, RTRIM(OBJECT_NAME) AS OBJECT_NAME, " +
+        "       RTRIM(OBJECT_TYPE) AS OBJECT_TYPE, STREAM_ID " +
+        "FROM %s.EXPLAIN_OBJECT " +
+        "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
+        "ORDER BY STREAM_ID";
+
+    // Step 2e — predicates (filter/join conditions with PREDICATE_TEXT containing literals).
+    // PREDICATE_TEXT is obfuscated via SqlObfuscator.obfuscateFragment before emission.
+    private static final String SQL_EXPLAIN_PREDICATE =
+        "SELECT OPERATOR_ID, PREDICATE_ID, RTRIM(HOW_APPLIED) AS HOW_APPLIED, PREDICATE_TEXT " +
+        "FROM %s.EXPLAIN_PREDICATE " +
+        "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
+        "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
+        "ORDER BY OPERATOR_ID, PREDICATE_ID";
+
     // Cleanup — delete explain instance; cascades to all child explain tables via FK.
     private static final String SQL_EXPLAIN_DELETE =
         "DELETE FROM %s.EXPLAIN_INSTANCE " +
@@ -596,8 +625,11 @@ public class TopQueryQuery {
             if (explainRequester == null || explainTime == null || usedSchema == null) return null;
 
             // Step 2a: read EXPLAIN_OPERATOR using the schema DB2 confirmed
-            String sqlOp  = String.format(SQL_EXPLAIN_OPERATOR, usedSchema);
-            String sqlSt  = String.format(SQL_EXPLAIN_STREAM,   usedSchema);
+            String sqlOp   = String.format(SQL_EXPLAIN_OPERATOR,  usedSchema);
+            String sqlSt   = String.format(SQL_EXPLAIN_STREAM,    usedSchema);
+            String sqlArg  = String.format(SQL_EXPLAIN_ARGUMENT,  usedSchema);
+            String sqlObj  = String.format(SQL_EXPLAIN_OBJECT,    usedSchema);
+            String sqlPred = String.format(SQL_EXPLAIN_PREDICATE, usedSchema);
 
             StringBuilder sb = new StringBuilder("{\"operators\":[");
             boolean firstOp = true;
@@ -621,9 +653,10 @@ public class TopQueryQuery {
                     }
                 }
             }
-            sb.append("],\"streams\":[");
+            if (firstOp) return null; // no operators means nothing was explained
 
             // Step 2b: read EXPLAIN_STREAM
+            sb.append("],\"streams\":[");
             boolean firstSt = true;
             try (PreparedStatement ps = conn.prepareStatement(sqlSt)) {
                 ps.setQueryTimeout(queryTimeoutSeconds);
@@ -647,11 +680,94 @@ public class TopQueryQuery {
                     }
                 }
             }
-            sb.append("]}");
-            String plan = sb.toString();
-            if (firstOp) return null; // no operators means nothing was explained
 
-            return plan;
+            // Step 2c: read EXPLAIN_ARGUMENT (operator config — join type, prefetch, sort, etc.)
+            sb.append("],\"arguments\":[");
+            boolean firstArg = true;
+            try (PreparedStatement ps = conn.prepareStatement(sqlArg)) {
+                ps.setQueryTimeout(queryTimeoutSeconds);
+                ps.setString(1, explainRequester);
+                ps.setTimestamp(2, explainTime);
+                ps.setString(3, sourceName);
+                ps.setString(4, sourceSchema);
+                ps.setString(5, sourceVersion);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        if (!firstArg) sb.append(',');
+                        firstArg = false;
+                        int opId    = rs.getInt("OPERATOR_ID");
+                        String type = rs.getString("ARGUMENT_TYPE");
+                        String val  = rs.getString("ARGUMENT_VALUE");
+                        sb.append("{\"op\":").append(opId)
+                          .append(",\"type\":\"").append(jsonEscape(type)).append('"')
+                          .append(",\"value\":\"").append(jsonEscape(val)).append("\"}");
+                    }
+                }
+            }
+
+            // Step 2d: read EXPLAIN_OBJECT (tables/indexes accessed)
+            sb.append("],\"objects\":[");
+            boolean firstObj = true;
+            try (PreparedStatement ps = conn.prepareStatement(sqlObj)) {
+                ps.setQueryTimeout(queryTimeoutSeconds);
+                ps.setString(1, explainRequester);
+                ps.setTimestamp(2, explainTime);
+                ps.setString(3, sourceName);
+                ps.setString(4, sourceSchema);
+                ps.setString(5, sourceVersion);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        if (!firstObj) sb.append(',');
+                        firstObj = false;
+                        String schema   = rs.getString("OBJECT_SCHEMA");
+                        String name     = rs.getString("OBJECT_NAME");
+                        String type     = rs.getString("OBJECT_TYPE");
+                        int    streamId = rs.getInt("STREAM_ID");
+                        sb.append("{\"schema\":\"").append(jsonEscape(schema)).append('"')
+                          .append(",\"name\":\"").append(jsonEscape(name)).append('"')
+                          .append(",\"type\":\"").append(jsonEscape(type)).append('"')
+                          .append(",\"stream\":").append(streamId).append('}');
+                    }
+                }
+            }
+
+            // Step 2e: read EXPLAIN_PREDICATE (filter/join conditions).
+            // PREDICATE_TEXT contains literal values — obfuscated before emission.
+            sb.append("],\"predicates\":[");
+            boolean firstPred = true;
+            try (PreparedStatement ps = conn.prepareStatement(sqlPred)) {
+                ps.setQueryTimeout(queryTimeoutSeconds);
+                ps.setString(1, explainRequester);
+                ps.setTimestamp(2, explainTime);
+                ps.setString(3, sourceName);
+                ps.setString(4, sourceSchema);
+                ps.setString(5, sourceVersion);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        int    opId      = rs.getInt("OPERATOR_ID");
+                        int    predId    = rs.getInt("PREDICATE_ID");
+                        String howApplied = rs.getString("HOW_APPLIED");
+                        String rawText   = rs.getString("PREDICATE_TEXT");
+                        String obfText   = null;
+                        if (rawText != null && !rawText.isBlank()) {
+                            String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
+                            if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
+                            // if obfuscation fails, omit predicate_text but keep the row
+                        }
+                        if (!firstPred) sb.append(',');
+                        firstPred = false;
+                        sb.append("{\"op\":").append(opId)
+                          .append(",\"id\":").append(predId)
+                          .append(",\"how\":\"").append(jsonEscape(howApplied)).append('"');
+                        if (obfText != null) {
+                            sb.append(",\"text\":\"").append(jsonEscape(obfText)).append('"');
+                        }
+                        sb.append('}');
+                    }
+                }
+            }
+            sb.append("]}");
+            return sb.toString();
 
         } catch (Exception e) {
             log.debug("TopQueryQuery: plan fetch failed for execIdHex={} member={}: {}",
@@ -687,6 +803,23 @@ public class TopQueryQuery {
         } catch (Exception e) {
             return "unknown";
         }
+    }
+
+    // Escapes a string value for embedding inside a JSON string literal.
+    // Covers the characters required by RFC 8259 §7: backslash, double-quote,
+    // and the C0 control range (U+0000–U+001F). DB2 explain values are plain
+    // ASCII identifiers and keywords — this handles any edge case defensively.
+    static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"')       sb.append("\\\"");
+            else if (c == '\\') sb.append("\\\\");
+            else if (c < 0x20)  sb.append(String.format("\\u%04x", (int) c));
+            else                sb.append(c);
+        }
+        return sb.toString();
     }
 
     private static String bytesToHex(byte[] bytes) {

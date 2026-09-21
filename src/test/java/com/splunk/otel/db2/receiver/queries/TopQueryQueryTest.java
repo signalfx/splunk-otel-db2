@@ -844,11 +844,12 @@ class TopQueryQueryTest {
     }
 
     /**
-     * Stub the EXPLAIN_FROM_SECTION CallableStatement and the subsequent EXPLAIN_OPERATOR /
-     * EXPLAIN_STREAM PreparedStatements so that fetchPlanXml returns a valid JSON plan string.
+     * Stub the EXPLAIN_FROM_SECTION CallableStatement and subsequent explain table
+     * PreparedStatements so that fetchPlanXml returns a full JSON plan string.
      *
-     * The mock returns one operator (TBSCAN, cost=1.0) and zero streams, producing:
-     * {"operators":[{"id":1,"type":"TBSCAN","cost":1.0}],"streams":[]}
+     * Produces one operator (TBSCAN, cost=1.0), one stream (id=1, from=-1, to=1, cols=3),
+     * one argument (PREFETCHTYPE=NONE), one object (DB2INST1.ORDERS TABLE stream=1),
+     * and one predicate (SARG on op=1, text="Q1.ID = ?").
      *
      * Returns the CallableStatement mock so callers can verify call counts.
      */
@@ -864,7 +865,7 @@ class TopQueryQueryTest {
         when(cs.getString(7)).thenReturn("NULLID");   // SOURCE_SCHEMA OUT
         when(cs.getString(8)).thenReturn("0100270A"); // SOURCE_VERSION OUT
 
-        // EXPLAIN_OPERATOR result
+        // EXPLAIN_OPERATOR — one row: TBSCAN cost=1.0
         PreparedStatement opPs = mock(PreparedStatement.class);
         ResultSet opRs = mock(ResultSet.class);
         when(opRs.next()).thenReturn(true, false);
@@ -873,20 +874,53 @@ class TopQueryQueryTest {
         when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
         when(opPs.executeQuery()).thenReturn(opRs);
 
-        // EXPLAIN_STREAM result (empty)
+        // EXPLAIN_STREAM — one row: id=1 from=-1 to=1 cols=3
         PreparedStatement streamPs = mock(PreparedStatement.class);
         ResultSet streamRs = mock(ResultSet.class);
-        when(streamRs.next()).thenReturn(false);
+        when(streamRs.next()).thenReturn(true, false);
+        when(streamRs.getInt("STREAM_ID")).thenReturn(1);
+        when(streamRs.getInt("SOURCE_ID")).thenReturn(-1);
+        when(streamRs.getInt("TARGET_ID")).thenReturn(1);
+        when(streamRs.getInt("COLUMN_COUNT")).thenReturn(3);
         when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT — one row: op=1 PREFETCHTYPE=NONE
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        // EXPLAIN_OBJECT — one row: DB2INST1.ORDERS TABLE stream=1
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(true, false);
+        when(objRs.getString("OBJECT_SCHEMA")).thenReturn("DB2INST1");
+        when(objRs.getString("OBJECT_NAME")).thenReturn("ORDERS");
+        when(objRs.getString("OBJECT_TYPE")).thenReturn("TABLE");
+        when(objRs.getInt("STREAM_ID")).thenReturn(1);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE — one row: op=1 predId=1 SARG "Q1.ID = 42" (raw, obfuscated to "Q1.ID = ?")
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn("Q1.ID = 42");
+        when(predPs.executeQuery()).thenReturn(predRs);
 
         // EXPLAIN_INSTANCE DELETE
         PreparedStatement deletePs = mock(PreparedStatement.class);
         when(deletePs.executeUpdate()).thenReturn(1);
 
-        // Wire up: prepareCall → cs; prepareStatement (in order): opPs, streamPs, deletePs
+        // Wire: prepareCall → cs; prepareStatement in order: op, stream, arg, obj, pred, delete
         when(conn.prepareCall(anyString())).thenReturn(cs);
         when(conn.prepareStatement(anyString()))
-            .thenReturn(opPs, streamPs, deletePs);
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, deletePs);
 
         return cs;
     }
@@ -919,8 +953,15 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         verify(logBuilder).emit();
 
-        // Plan JSON must be present and contain operator data
-        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).contains("TBSCAN");
+        // Plan JSON must contain all 5 explain sections with obfuscated predicate text
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).contains("\"operators\"").contains("TBSCAN");
+        assertThat(plan).contains("\"streams\"").contains("\"from\":-1");
+        assertThat(plan).contains("\"arguments\"").contains("PREFETCHTYPE").contains("NONE");
+        assertThat(plan).contains("\"objects\"").contains("ORDERS").contains("TABLE");
+        assertThat(plan).contains("\"predicates\"").contains("SARG");
+        // Literal in predicate text must be obfuscated: "Q1.ID = 42" → "Q1.ID = ?"
+        assertThat(plan).contains("Q1.ID = ?").doesNotContain("42");
         assertThat(cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH)).isNotNull().matches("[0-9a-fA-F]+");
     }
 
@@ -1230,6 +1271,97 @@ class TopQueryQueryTest {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
             () -> cfg.getTopQueryCollection().setTopQueryCount(0));
+    }
+
+    @Test
+    void jsonEscapeHandlesSpecialCharacters() {
+        assertThat(TopQueryQuery.jsonEscape(null)).isEmpty();
+        assertThat(TopQueryQuery.jsonEscape("plain")).isEqualTo("plain");
+        assertThat(TopQueryQuery.jsonEscape("say \"hi\"")).isEqualTo("say \\\"hi\\\"");
+        assertThat(TopQueryQuery.jsonEscape("a\\b")).isEqualTo("a\\\\b");
+        assertThat(TopQueryQuery.jsonEscape("tab\there")).isEqualTo("tab\\u0009here");
+    }
+
+    @Test
+    void predicateTextObfuscationFailureOmitsTextButKeepsRow() throws Exception {
+        // When PREDICATE_TEXT cannot be obfuscated the row is still emitted without "text"
+        stubPlanPs(null); // sets up normal mocks first, then we override predicate
+        CallableStatement cs2 = mock(CallableStatement.class);
+        when(cs2.getString(3)).thenReturn("TESTUSER");
+        when(cs2.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs2.getTimestamp(5)).thenReturn(ts);
+        when(cs2.getString(6)).thenReturn("SYSSH200");
+        when(cs2.getString(7)).thenReturn("NULLID");
+        when(cs2.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs2 = mock(PreparedStatement.class);
+        ResultSet opRs2 = mock(ResultSet.class);
+        when(opRs2.next()).thenReturn(true, false);
+        when(opRs2.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs2.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs2.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs2.executeQuery()).thenReturn(opRs2);
+
+        PreparedStatement streamPs2 = mock(PreparedStatement.class);
+        ResultSet streamRs2 = mock(ResultSet.class);
+        when(streamRs2.next()).thenReturn(false);
+        when(streamPs2.executeQuery()).thenReturn(streamRs2);
+
+        PreparedStatement argPs2 = mock(PreparedStatement.class);
+        ResultSet argRs2 = mock(ResultSet.class);
+        when(argRs2.next()).thenReturn(false);
+        when(argPs2.executeQuery()).thenReturn(argRs2);
+
+        PreparedStatement objPs2 = mock(PreparedStatement.class);
+        ResultSet objRs2 = mock(ResultSet.class);
+        when(objRs2.next()).thenReturn(false);
+        when(objPs2.executeQuery()).thenReturn(objRs2);
+
+        // Predicate with unterminated string literal — obfuscation will fail
+        PreparedStatement predPs2 = mock(PreparedStatement.class);
+        ResultSet predRs2 = mock(ResultSet.class);
+        when(predRs2.next()).thenReturn(true, false);
+        when(predRs2.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs2.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs2.getString("HOW_APPLIED")).thenReturn("SARG");
+        when(predRs2.getString("PREDICATE_TEXT")).thenReturn("Q1.NAME = 'unterminated");
+        when(predPs2.executeQuery()).thenReturn(predRs2);
+
+        PreparedStatement delPs2 = mock(PreparedStatement.class);
+        when(delPs2.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0A});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execA", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs2);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs2, streamPs2, argPs2, objPs2, predPs2, delPs2);
+        q.collect();
+
+        // Emit
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0A});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execA", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull().contains("SARG");
+        // text field must be absent — obfuscation failed, literal must not leak
+        assertThat(plan).doesNotContain("unterminated").doesNotContain("Q1.NAME");
     }
 
     @Test
