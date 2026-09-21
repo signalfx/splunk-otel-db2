@@ -282,6 +282,7 @@ public class QuerySampleQuery {
                         QuerySampleEvent ev = QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
                             .appHandle(appHandle)
                             .activityState(state)
+                            .sessionStatus(deriveSessionStatus(state))
                             .operationName(opName)
                             .queryStart(startTime)
                             .userName(authId)
@@ -399,5 +400,19 @@ public class QuerySampleQuery {
         c[13] = ':';
         c[16] = ':';
         return new String(c) + "Z";
+    }
+
+    // Derives a coarse session status from the composite ACTIVITY_STATE column
+    // (e.g. "LOCK WAIT DML", "EXECUTING READ"). Follows the same pattern as
+    // MongoDB's deriveOperationState(): map raw DB flags to canonical values.
+    // Returns null for unknown values so the attribute is omitted rather than
+    // emitting a wrong value.
+    static String deriveSessionStatus(String activityState) {
+        if (activityState == null) return null;
+        String s = activityState.trim();
+        if (s.startsWith("EXECUTING") || s.startsWith("RECOMP")) return "active";
+        if (s.startsWith("LOCK WAIT") || s.startsWith("CLIENT WAIT")) return "waiting";
+        if (s.startsWith("IDLE")) return "idle";
+        return null;
     }
 }

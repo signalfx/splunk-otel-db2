@@ -646,8 +646,6 @@ class QuerySampleQueryTest {
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
-        // BLOCKER_IS_IDLE must use APPLICATION_HANDLE IS NULL — not STMT_TEXT IS NULL —
-        // so that a blocker with an active but unreadable statement is not misclassified.
         assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKER_SQL.APPLICATION_HANDLE IS NULL");
         assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("BLOCKER_SQL.STMT_TEXT IS NULL");
     }
@@ -674,8 +672,33 @@ class QuerySampleQueryTest {
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
-        // stubBlockedRow stubs BLOCKING_START_TIME = "2024-01-01-12.00.00.000000"
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKING_START))
             .isEqualTo("2024-01-01T12:00:00.000000Z");
+    }
+
+    @Test
+    void deriveSessionStatusMapsAllKnownActivityStates() {
+        assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING DML")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING READ")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("RECOMP READ")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("LOCK WAIT DML")).isEqualTo("waiting");
+        assertThat(QuerySampleQuery.deriveSessionStatus("CLIENT WAIT ")).isEqualTo("waiting");
+        assertThat(QuerySampleQuery.deriveSessionStatus("IDLE ")).isEqualTo("idle");
+        assertThat(QuerySampleQuery.deriveSessionStatus(null)).isNull();
+        assertThat(QuerySampleQuery.deriveSessionStatus("UNKNOWN STATE")).isNull();
+    }
+
+    @Test
+    void sessionStatusEmittedOnRecord() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("active");
     }
 }
