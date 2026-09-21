@@ -389,9 +389,9 @@ class QuerySampleQueryTest {
         assertThat(attrs.get(QuerySampleEvent.DB2_LOCK_SCHEMA)).isEqualTo("DB2INST1");
         assertThat(attrs.get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isFalse();
         assertThat(attrs.get(QuerySampleEvent.DB2_WAIT_DURATION)).isGreaterThanOrEqualTo(2.9);
-        // blocking.start_time must be the server-supplied value, not a JVM-derived string
+        // blocking.start_time must be RFC3339 UTC, not the raw Db2 CHAR(TIMESTAMP) format
         assertThat(attrs.get(QuerySampleEvent.DB2_BLOCKING_START))
-            .isEqualTo("2024-01-01-12.00.00.000000");
+            .isEqualTo("2024-01-01T12:00:00.000000Z");
     }
 
     @Test
@@ -554,14 +554,17 @@ class QuerySampleQueryTest {
     }
 
     @Test
-    void defaultPathSqlMemberQualifiesBlockerSqlJoin() throws Exception {
+    void defaultPathSqlBlockerSqlJoinsByHandleOnly() throws Exception {
         when(rs.next()).thenReturn(false);
         query(false).collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
-        // BLOCKER_SQL join must be member-qualified to avoid cross-member misclassification
-        assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKER_SQL.COORD_MEMBER");
+        // APPLICATION_HANDLE is system-wide unique in DB2 — the BLOCKER_SQL join must
+        // not add a member predicate that would silently drop valid distributed blockers.
+        String sql = sqlCap.getValue();
+        assertThat(sql).containsIgnoringCase("BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE");
+        assertThat(sql).doesNotContain("BLOCKER_SQL.COORD_MEMBER");
     }
 
     @Test
@@ -631,5 +634,45 @@ class QuerySampleQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         // is_idle must be omitted when we can't distinguish join miss from real idle
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKER_IS_IDLE)).isNull();
+    }
+
+    @Test
+    void defaultPathSqlDetectsIdleViaApplicationHandle() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        // BLOCKER_IS_IDLE must use APPLICATION_HANDLE IS NULL — not STMT_TEXT IS NULL —
+        // so that a blocker with an active but unreadable statement is not misclassified.
+        assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKER_SQL.APPLICATION_HANDLE IS NULL");
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("BLOCKER_SQL.STMT_TEXT IS NULL");
+    }
+
+    @Test
+    void toRfc3339ConvertsDb2TimestampFormat() {
+        assertThat(QuerySampleQuery.toRfc3339("2024-01-15-12.30.45.123456"))
+            .isEqualTo("2024-01-15T12:30:45.123456Z");
+        assertThat(QuerySampleQuery.toRfc3339("2024-01-01-00.00.00.000000"))
+            .isEqualTo("2024-01-01T00:00:00.000000Z");
+        assertThat(QuerySampleQuery.toRfc3339(null)).isNull();
+    }
+
+    @Test
+    void blockingStartTimeIsEmittedAsRfc3339() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubBlockedRow(
+            "SELECT 1 FROM T", "111", 0L, 222L, 0L,
+            "UPDATE T SET X = 1", "user2", "host2",
+            "S1", "T1", "ROW", "X", 5L, false);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // stubBlockedRow stubs BLOCKING_START_TIME = "2024-01-01-12.00.00.000000"
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKING_START))
+            .isEqualTo("2024-01-01T12:00:00.000000Z");
     }
 }

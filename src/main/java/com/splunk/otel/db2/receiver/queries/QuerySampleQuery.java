@@ -73,7 +73,7 @@ public class QuerySampleQuery {
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
-        "       CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
         "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
@@ -85,7 +85,6 @@ public class QuerySampleQuery {
         " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
-        " AND BLOCKER_SQL.COORD_MEMBER = LW.HLD_MEMBER " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2))) AS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
@@ -128,7 +127,7 @@ public class QuerySampleQuery {
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
-        "       CASE WHEN BLOCKER_SQL.STMT_TEXT IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
         "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
@@ -144,7 +143,6 @@ public class QuerySampleQuery {
         " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
         "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
-        " AND BLOCKER_SQL.COORD_MEMBER = LW.HLD_MEMBER " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2))) AS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
@@ -296,10 +294,7 @@ public class QuerySampleQuery {
                         if (!useSnapshotMonitor && rs.getInt("IS_BLOCKED") == 1) {
                             double waitSec = rs.getLong("BLOCKING_WAIT_SEC");
 
-                            // Use server-side LOCK_WAIT_START_TIME from SYSIBMADM.LOCKWAITS —
-                            // same clock and timezone as query_start (DB2 server), avoiding
-                            // JVM/DB2 skew. Falls back to null when LOCKWAITS row is absent.
-                            String blockingStartTime = rs.getString("BLOCKING_START_TIME");
+                            String blockingStartTime = toRfc3339(rs.getString("BLOCKING_START_TIME"));
 
                             ev.lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
                               .lockMode(trim(rs.getString("LOCK_MODE")))
@@ -386,5 +381,24 @@ public class QuerySampleQuery {
 
     private static String trim(String s) {
         return s != null ? s.trim() : null;
+    }
+
+    // Converts Db2's timezone-less CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN"
+    // to RFC3339 UTC "YYYY-MM-DDTHH:MM:SS.NNNNNNZ" so that blocking.start_time aligns
+    // with the format used by Oracle, PostgreSQL, and SQL Server OTel contrib receivers.
+    // DB2 CURRENT TIMESTAMP is always local server time; we label it Z (UTC-equivalent
+    // wall-clock) because the offset is unknown here — same assumption as query_start.
+    static String toRfc3339(String db2Timestamp) {
+        if (db2Timestamp == null) return null;
+        // "2024-01-15-12.30.45.123456" → "2024-01-15T12:30:45.123456Z"
+        String s = db2Timestamp.trim();
+        if (s.length() < 19) return s;
+        // Replace the date-time separator '-' (position 10) with 'T'
+        // and the first two ':'-equivalent '.' separators in the time part
+        char[] c = s.toCharArray();
+        c[10] = 'T';
+        c[13] = ':';
+        c[16] = ':';
+        return new String(c) + "Z";
     }
 }
