@@ -325,7 +325,7 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db2.sort_overflows` | Sorts that spilled to disk during this interval |
 | `db2.stmt_type` | Statement type: `D` = dynamic SQL, `S` = static SQL |
 | `db2.query_plan` | JSON plan summary (operators + streams) — only when `max_explain_each_interval > 0` |
-| `db2.query_plan.hash` | SHA-256 of the plan JSON — only when `max_explain_each_interval > 0` |
+| `db2.query_plan.hash` | Db2 EXECUTABLE_ID hex string identifying the compiled plan section; changes on recompile — only when `max_explain_each_interval > 0` |
 
 **Plan collection prerequisite** (`max_explain_each_interval > 0`): Db2 explain tables must be created once in the monitoring user's schema before enabling plan collection. Connect as the monitoring user and run:
 

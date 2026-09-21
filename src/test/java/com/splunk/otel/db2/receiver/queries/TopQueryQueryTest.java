@@ -428,15 +428,16 @@ class TopQueryQueryTest {
     }
 
     @Test
-    void sqlContainsFetchFirstWithMaxQuerySampleCount() throws Exception {
-        // max_query_sample_count must appear as FETCH FIRST N ROWS ONLY in the SQL
+    void sqlDoesNotApplyFetchFirstLimit() throws Exception {
+        // All eligible rows are fetched — Java ranks interval deltas over the complete set
+        // so a newly hot query cannot be displaced by a historically expensive idle one.
         TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 500, 60L,
             null, 1000, 3600_000L, "");
         when(rs.next()).thenReturn(false);
         q.collect();
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
-        assertThat(sqlCap.getValue()).contains("FETCH FIRST 500 ROWS ONLY");
+        assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("FETCH FIRST");
     }
 
     @Test
@@ -1452,26 +1453,25 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
         assertThat(plan).isNotNull().contains("XPATH");
-        // Literal "42" must have been obfuscated to "?"
-        assertThat(plan).contains("col = ?").doesNotContain("= 42");
+        // XPATH values use non-SQL syntax (double-quoted string literals) — omitted entirely
+        // so that XPath expressions containing sensitive data cannot leak.
+        assertThat(plan).doesNotContain("col = ?").doesNotContain("col =");
     }
 
     // --- P1-2: ORDER BY before FETCH FIRST ---
 
     @Test
-    void sqlContainsOrderByBeforeFetchFirst() throws Exception {
+    void sqlHasNoOrderByOrFetchFirst() throws Exception {
+        // No ORDER BY or FETCH FIRST in the DB query — Java ranks interval deltas over
+        // the full eligible set after computing per-interval deltas.
         when(rs.next()).thenReturn(false);
         query().collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
-        assertThat(sql).containsIgnoringCase("ORDER BY STMT_EXEC_TIME DESC");
-        // ORDER BY must appear before FETCH FIRST
-        int orderByIdx   = sql.toUpperCase().indexOf("ORDER BY");
-        int fetchFirstIdx = sql.toUpperCase().indexOf("FETCH FIRST");
-        assertThat(orderByIdx).isGreaterThan(0);
-        assertThat(fetchFirstIdx).isGreaterThan(orderByIdx);
+        assertThat(sql).doesNotContainIgnoringCase("ORDER BY STMT_EXEC_TIME");
+        assertThat(sql).doesNotContainIgnoringCase("FETCH FIRST");
     }
 
     // --- P1-3: maxExplainEachInterval defaults to 0 ---

@@ -103,8 +103,8 @@ public class TopQueryQuery {
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
     // TOTAL_SECTION_SORTS: correct column name (not STMT_SORTS).
     // Lookback is parameterised as %1$d minutes (derived from the collection interval).
-    // maxQuerySampleCount is parameterised as %2$d rows — limits the DB2 result set before
-    // Java-side ranking so we never pull more rows than needed.
+    // No FETCH FIRST limit is applied — all eligible rows are fetched so Java-side delta
+    // ranking sees the complete set and cannot miss a newly hot query.
     private static final String SQL =
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
@@ -132,9 +132,7 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
-        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'" +
-        "  ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC" +
-        "  FETCH FIRST %2$d ROWS ONLY";
+        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%'";
 
     // DB2 explain workflow — two steps (verified on DB2 11.5.8.0):
     //
@@ -333,7 +331,7 @@ public class TopQueryQuery {
                              ? null : explainSchema.trim().toUpperCase();
         // Lookback = 2x interval, minimum 5 minutes
         long lookbackMinutes = Math.max(5L, (intervalSeconds * 2 + 59) / 60);
-        this.sql = String.format(SQL, lookbackMinutes, maxQuerySampleCount);
+        this.sql = String.format(SQL, lookbackMinutes);
         // Timeout = half the interval; with the enforced 60s minimum that is always >= 30s.
         this.queryTimeoutSeconds = (int) Math.max(30L, intervalSeconds / 2);
         this.planCache = planMaxPerInterval != null ? buildLruCache(planCacheSize) : null;
@@ -642,8 +640,9 @@ public class TopQueryQuery {
             String sqlObj  = String.format(SQL_EXPLAIN_OBJECT,    usedSchema);
             String sqlPred = String.format(SQL_EXPLAIN_PREDICATE, usedSchema);
 
-            // Track whether any table loop exceeded the per-plan byte budget.
-            // When true, fetchPlanXml returns null at the end (not cached, not emitted).
+            // planBudgetExceeded is set when the UTF-8 encoded size of the plan JSON
+            // exceeds PLAN_MAX_BYTES. sb.length() counts UTF-16 code units which can
+            // under-count for non-ASCII content; utf8Len(sb) gives the true wire size.
             boolean planBudgetExceeded = false;
 
             StringBuilder sb = new StringBuilder("{\"operators\":[");
@@ -665,7 +664,7 @@ public class TopQueryQuery {
                         sb.append("{\"id\":").append(opId)
                           .append(",\"type\":\"").append(opType == null ? "" : opType.trim()).append('"')
                           .append(",\"cost\":").append(cost).append('}');
-                        if (sb.length() > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                        if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                     }
                 }
             }
@@ -707,7 +706,7 @@ public class TopQueryQuery {
                         if (objName != null && !objName.isEmpty())
                             sb.append(",\"obj_name\":\"").append(jsonEscape(objName)).append('"');
                         sb.append('}');
-                        if (sb.length() > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                        if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                     }
                 }
             }
@@ -733,11 +732,18 @@ public class TopQueryQuery {
                         while (rs.next()) {
                             if (!firstArg) sb.append(',');
                             firstArg = false;
-                            String rawVal = rs.getString("ARGUMENT_VALUE");
+                            String argType = rs.getString("ARGUMENT_TYPE");
+                            String rawVal  = rs.getString("ARGUMENT_VALUE");
                             sb.append("{\"op\":").append(rs.getInt("OPERATOR_ID"))
-                              .append(",\"type\":\"").append(jsonEscape(rs.getString("ARGUMENT_TYPE"))).append('"');
-                            // ARGUMENT_VALUE may contain literals; obfuscate fail-closed.
-                            if (rawVal != null) {
+                              .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
+                            // ARGUMENT_VALUE may contain literals. For types that use SQL
+                            // syntax (e.g. SORTKEY, PREDICATE) use the SQL obfuscator.
+                            // Types that use non-SQL syntax (XPATH) are omitted entirely
+                            // because the SQL lexer cannot safely redact XPath string literals
+                            // (double-quoted in XPath, identifier-quoted in SQL).
+                            if (rawVal != null && !isSafeArgumentType(argType)) {
+                                // non-SQL type — omit value to avoid leaking literals
+                            } else if (rawVal != null) {
                                 String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
                                 if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
                                     sb.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
@@ -745,7 +751,7 @@ public class TopQueryQuery {
                                 // else: obfuscation failed — omit "value" key but keep op+type
                             }
                             sb.append('}');
-                            if (sb.length() > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                         }
                     }
                 }
@@ -777,7 +783,7 @@ public class TopQueryQuery {
                               .append(",\"type\":\"").append(jsonEscape(rs.getString("OBJECT_TYPE"))).append('"')
                               .append(",\"rows\":").append(rs.getDouble("ROW_COUNT"))
                               .append(",\"cols\":").append(rs.getInt("COLUMN_COUNT")).append('}');
-                            if (sb.length() > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                         }
                     }
                 }
@@ -820,7 +826,7 @@ public class TopQueryQuery {
                                 sb.append(",\"text\":\"").append(jsonEscape(obfText)).append('"');
                             }
                             sb.append('}');
-                            if (sb.length() > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                         }
                     }
                 }
@@ -877,11 +883,32 @@ public class TopQueryQuery {
      * All other exceptions (timeouts, permission errors) are operational and should
      * be re-thrown so the outer catch in fetchPlanXml returns null (uncached).
      */
+    // Returns true for EXPLAIN_ARGUMENT types whose values use SQL syntax and can
+    // be safely processed by the SQL obfuscator. Types that use non-SQL syntax
+    // (e.g. XPATH uses double-quoted string literals, which the SQL lexer treats as
+    // identifiers) are excluded so their values are omitted rather than leaked.
+    // Returns the UTF-8 encoded byte length of the current StringBuilder content.
+    // Used for plan budget checks — sb.length() counts UTF-16 code units, not bytes.
+    private static int utf8Len(StringBuilder sb) {
+        return sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    private static boolean isSafeArgumentType(String argType) {
+        if (argType == null) return false;
+        switch (argType.trim().toUpperCase()) {
+            case "XPATH": return false;
+            default:      return true;
+        }
+    }
+
+    // Only SQLFeatureNotSupportedException is a safe compatibility signal — it means
+    // the JDBC driver explicitly reports the feature as unsupported for this DB version.
+    // SQLCODE=-206 (column not found) is NOT treated as compatibility: the same error
+    // fires on a genuine column-name regression in our own queries, and suppressing it
+    // would cache a permanently incomplete plan. Operational errors (timeout, permissions,
+    // syntax) re-throw to the outer catch so fetchPlanXml returns null (uncached).
     private static boolean isCompatibilityException(Exception e) {
-        if (e instanceof SQLFeatureNotSupportedException) return true;
-        String msg = e.getMessage();
-        if (msg != null && (msg.contains("SQLCODE=-206") || msg.contains("SQL0206"))) return true;
-        return false;
+        return e instanceof SQLFeatureNotSupportedException;
     }
 
     public static String sha256Hex(String input) {

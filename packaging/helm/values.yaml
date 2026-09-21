@@ -76,7 +76,7 @@ receivers:
       collectionInterval: "60s"
       topQueryCount: 250
       maxQuerySampleCount: 1000
-      maxExplainEachInterval: 250
+      maxExplainEachInterval: 0
       queryPlanCacheSize: 1000
       queryPlanCacheTtl: "1h"
       explainSchema: ""
