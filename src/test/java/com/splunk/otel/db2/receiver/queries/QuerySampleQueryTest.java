@@ -577,6 +577,7 @@ class QuerySampleQueryTest {
         // BLOCKING_START_TIME is derived from MON_LOCKWAITS arithmetic so that
         // SYSIBMADM.LOCKWAITS (snapshot view with incompatible column names) is never joined.
         assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("SYSIBMADM.LOCKWAITS");
+        assertThat(sqlCap.getValue()).containsIgnoringCase("CURRENT TIMEZONE");
         assertThat(sqlCap.getValue()).containsIgnoringCase("LOCK_WAIT_ELAPSED_TIME SECONDS");
         assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKING_START_TIME");
     }

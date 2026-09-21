@@ -23,8 +23,8 @@ import java.util.function.Supplier;
  * Default path (useSnapshotMonitor=false, Db2 9.7+):
  *   MON_CURRENT_SQL LEFT JOIN MON_LOCKWAITS + MON_GET_CONNECTION.
  *   On Db2 10.5+ also JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
- *   blocking.start_time is computed as CURRENT TIMESTAMP - LOCK_WAIT_ELAPSED_TIME SECONDS
- *   (server-side arithmetic — avoids JVM/DB2 clock skew).
+ *   blocking.start_time is computed as CURRENT TIMESTAMP - CURRENT TIMEZONE - LOCK_WAIT_ELAPSED_TIME SECONDS
+ *   (server-side arithmetic — converts to UTC and avoids JVM/DB2 clock skew).
  *
  * Snapshot monitor fallback (useSnapshotMonitor=true, Db2 9.7+):
  *   SNAP_GET_APPL_INFO + SNAP_GET_STMT. Blocking detection not available on
@@ -38,8 +38,9 @@ public class QuerySampleQuery {
 
     // Default path (Db2 9.7+) with blocking detection.
     // LOCK_WAIT_ELAPSED_TIME is INTEGER SECONDS on Db2 11.5 (confirmed via SYSCAT.COLUMNS).
-    // BLOCKING_START_TIME is computed server-side as CURRENT TIMESTAMP - LOCK_WAIT_ELAPSED_TIME
-    // SECONDS (from MON_LOCKWAITS), avoiding JVM/DB2 clock skew. SYSIBMADM.LOCKWAITS is NOT
+    // BLOCKING_START_TIME is computed server-side as CURRENT TIMESTAMP - CURRENT TIMEZONE -
+    // LOCK_WAIT_ELAPSED_TIME SECONDS (from MON_LOCKWAITS), converting local time to UTC and
+    // avoiding JVM/DB2 clock skew. SYSIBMADM.LOCKWAITS is NOT
     // joined here — its column names differ between DB2 versions (REQ_APPLICATION_HANDLE in
     // MON_LOCKWAITS vs AGENT_ID_WAITING_FOR_LK in the old snapshot view) and it adds no
     // columns we don't already have from MON_LOCKWAITS.
@@ -64,7 +65,7 @@ public class QuerySampleQuery {
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
         "       CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL " +
-        "            THEN CHAR(CURRENT TIMESTAMP - LW.LOCK_WAIT_ELAPSED_TIME SECONDS) " +
+        "            THEN CHAR(CURRENT TIMESTAMP - CURRENT TIMEZONE - LW.LOCK_WAIT_ELAPSED_TIME SECONDS) " +
         "            ELSE NULL END AS BLOCKING_START_TIME, " +
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
@@ -118,7 +119,7 @@ public class QuerySampleQuery {
         "       LW.HLD_MEMBER AS BLOCKER_MEMBER, " +
         "       LW.LOCK_WAIT_ELAPSED_TIME AS BLOCKING_WAIT_SEC, " +
         "       CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL " +
-        "            THEN CHAR(CURRENT TIMESTAMP - LW.LOCK_WAIT_ELAPSED_TIME SECONDS) " +
+        "            THEN CHAR(CURRENT TIMESTAMP - CURRENT TIMEZONE - LW.LOCK_WAIT_ELAPSED_TIME SECONDS) " +
         "            ELSE NULL END AS BLOCKING_START_TIME, " +
         "       LW.TABSCHEMA AS LOCK_SCHEMA, " +
         "       LW.TABNAME AS LOCK_OBJECT, " +
@@ -383,11 +384,9 @@ public class QuerySampleQuery {
         return s != null ? s.trim() : null;
     }
 
-    // Converts Db2's timezone-less CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN"
-    // to RFC3339 UTC "YYYY-MM-DDTHH:MM:SS.NNNNNNZ" so that blocking.start_time aligns
-    // with the format used by Oracle, PostgreSQL, and SQL Server OTel contrib receivers.
-    // DB2 CURRENT TIMESTAMP is always local server time; we label it Z (UTC-equivalent
-    // wall-clock) because the offset is unknown here — same assumption as query_start.
+    // Converts Db2's CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN" to RFC3339 UTC
+    // "YYYY-MM-DDTHH:MM:SS.NNNNNNZ". The SQL expression already subtracts CURRENT TIMEZONE
+    // (DB2's UTC offset) so the value is true UTC before it reaches this method.
     static String toRfc3339(String db2Timestamp) {
         if (db2Timestamp == null) return null;
         // "2024-01-15-12.30.45.123456" → "2024-01-15T12:30:45.123456Z"
