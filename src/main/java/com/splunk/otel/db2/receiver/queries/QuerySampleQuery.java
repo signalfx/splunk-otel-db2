@@ -411,7 +411,7 @@ public class QuerySampleQuery {
         if (activityState == null) return null;
         String s = activityState.trim();
         if (s.startsWith("EXECUTING") || s.startsWith("RECOMP")) return "active";
-        if (s.startsWith("LOCK WAIT") || s.startsWith("CLIENT WAIT")) return "waiting";
+        if (s.startsWith("LOCKWAIT") || s.startsWith("LOCK WAIT") || s.startsWith("CLIENT WAIT")) return "waiting";
         if (s.startsWith("IDLE")) return "idle";
         return null;
     }

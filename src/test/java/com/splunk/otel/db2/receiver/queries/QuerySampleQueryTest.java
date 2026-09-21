@@ -681,11 +681,32 @@ class QuerySampleQueryTest {
         assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING DML")).isEqualTo("active");
         assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING READ")).isEqualTo("active");
         assertThat(QuerySampleQuery.deriveSessionStatus("RECOMP READ")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("LOCKWAIT DML")).isEqualTo("waiting");
         assertThat(QuerySampleQuery.deriveSessionStatus("LOCK WAIT DML")).isEqualTo("waiting");
         assertThat(QuerySampleQuery.deriveSessionStatus("CLIENT WAIT ")).isEqualTo("waiting");
         assertThat(QuerySampleQuery.deriveSessionStatus("IDLE ")).isEqualTo("idle");
         assertThat(QuerySampleQuery.deriveSessionStatus(null)).isNull();
         assertThat(QuerySampleQuery.deriveSessionStatus("UNKNOWN STATE")).isNull();
+    }
+
+    @Test
+    void blockedSessionHasWaitingSessionStatus() throws Exception {
+        // stubBlockedRow uses ACTIVITY_STATE "LOCKWAIT DML" — deriveSessionStatus must map it to "waiting".
+        when(rs.next()).thenReturn(true, false);
+        stubBlockedRow(
+            "SELECT ID FROM ORDERS WHERE ID = 1",
+            "111", 0L, 222L, 0L,
+            "UPDATE ORDERS SET STATUS = 'X' WHERE ID = 1",
+            "user2", "host2",
+            "DB2INST1", "ORDERS", "ROW", "X",
+            3L, false);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("waiting");
     }
 
     @Test

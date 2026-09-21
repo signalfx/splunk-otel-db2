@@ -45,7 +45,7 @@ receivers:
       collection_interval: "60s"      # how often to collect top queries (minimum 60s)
       top_query_count: 250            # top N queries to emit per interval (must be > 0)
       max_query_sample_count: 1000    # max rows fetched from MON_GET_PKG_CACHE_STMT before ranking (must be > 0)
-      max_explain_each_interval: 250  # max EXPLAIN_FROM_SECTION calls per interval; 0 = plan disabled
+      max_explain_each_interval: 0    # max EXPLAIN_FROM_SECTION calls per interval; 0 = plan disabled (default)
       query_plan_cache_size: 1000     # max entries in the client-side plan cache
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
       explain_schema: ""              # schema where explain tables live (default: USER)
@@ -220,6 +220,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
 | `db2.session_id` | Session identifier (DB2 application handle) |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
+| `db2.session_status` | Coarse session lifecycle state derived from `ACTIVITY_STATE`: `active`, `waiting`, or `idle` |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |

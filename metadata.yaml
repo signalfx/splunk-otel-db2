@@ -177,6 +177,10 @@ attributes:
       Activity state concatenated with type, e.g. "EXECUTING SELECT", "LOCKWAIT DML".
       Values from MON_CURRENT_SQL.ACTIVITY_STATE + ACTIVITY_TYPE.
     type: string
+  db2.session_status:
+    description: "Coarse session lifecycle state derived from ACTIVITY_STATE: active, waiting, or idle."
+    type: string
+    enum: [active, waiting, idle]
   db2.query_start:
     description: Statement start timestamp (DB2 LOCAL_START_TIME format).
     type: string
@@ -412,6 +416,7 @@ events:
       - db.query.text
       - db2.session_id
       - db2.activity_state
+      - db2.session_status
       - db2.query_start
       - db2.session.duration
       - db2.member

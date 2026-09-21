@@ -103,8 +103,9 @@ public class TopQueryQuery {
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
     // TOTAL_SECTION_SORTS: correct column name (not STMT_SORTS).
     // Lookback is parameterised as %1$d minutes (derived from the collection interval).
-    // No FETCH FIRST limit is applied — all eligible rows are fetched so Java-side delta
-    // ranking sees the complete set and cannot miss a newly hot query.
+    // No FETCH FIRST limit is applied — all eligible rows are fetched; rows are
+    // post-fetch truncated to maxQuerySampleCount before delta ranking so Java-side
+    // delta ranking sees the complete set and cannot miss a newly hot query.
     private static final String SQL =
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
@@ -416,6 +417,17 @@ public class TopQueryQuery {
             log.warn("TopQueryQuery: plan cache returned {} rows — consider tuning LAST_METRICS_UPDATE lookback", curr.size());
         }
 
+        // Post-fetch resource guard: truncate to maxQuerySampleCount before delta ranking.
+        // All rows were fetched so Java-side ranking sees the complete eligible set;
+        // this cap prevents unbounded memory use when the plan cache is very large.
+        if (texts.size() > maxQuerySampleCount) {
+            log.debug("TopQueryQuery: truncating {} rows to maxQuerySampleCount={} before delta ranking",
+                texts.size(), maxQuerySampleCount);
+            texts            = texts.subList(0, maxQuerySampleCount);
+            counters         = counters.subList(0, maxQuerySampleCount);
+            insertTimestamps = insertTimestamps.subList(0, maxQuerySampleCount);
+        }
+
         scrapeGen++;
         boolean isFirstCollection = (scrapeGen == 1);
 
@@ -640,12 +652,13 @@ public class TopQueryQuery {
             String sqlObj  = String.format(SQL_EXPLAIN_OBJECT,    usedSchema);
             String sqlPred = String.format(SQL_EXPLAIN_PREDICATE, usedSchema);
 
-            // planBudgetExceeded is set when the UTF-8 encoded size of the plan JSON
-            // exceeds PLAN_MAX_BYTES. sb.length() counts UTF-16 code units which can
-            // under-count for non-ASCII content; utf8Len(sb) gives the true wire size.
+            // planBudgetExceeded is set when the incremental UTF-8 byte count of the plan
+            // JSON exceeds PLAN_MAX_BYTES. A running byte counter avoids the O(n²) cost of
+            // re-encoding the entire StringBuilder on every row.
             boolean planBudgetExceeded = false;
 
             StringBuilder sb = new StringBuilder("{\"operators\":[");
+            int planByteCount = sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             boolean firstOp = true;
             try (PreparedStatement ps = conn.prepareStatement(sqlOp)) {
                 ps.setQueryTimeout(queryTimeoutSeconds);
@@ -656,15 +669,19 @@ public class TopQueryQuery {
                 ps.setString(5, sourceVersion);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        if (!firstOp) sb.append(',');
-                        firstOp = false;
                         int opId      = rs.getInt("OPERATOR_ID");
                         String opType = rs.getString("OPERATOR_TYPE");
                         double cost   = rs.getDouble("TOTAL_COST");
-                        sb.append("{\"id\":").append(opId)
-                          .append(",\"type\":\"").append(opType == null ? "" : opType.trim()).append('"')
-                          .append(",\"cost\":").append(cost).append('}');
-                        if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                        String fragment = "{\"id\":" + opId
+                            + ",\"type\":\"" + (opType == null ? "" : opType.trim()) + '"'
+                            + ",\"cost\":" + cost + '}';
+                        int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                        if (!firstOp) fragBytes += 1; // comma separator
+                        planByteCount += fragBytes;
+                        if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                        if (!firstOp) sb.append(',');
+                        firstOp = false;
+                        sb.append(fragment);
                     }
                 }
             }
@@ -672,6 +689,7 @@ public class TopQueryQuery {
 
             // Step 2b: read EXPLAIN_STREAM
             sb.append("],\"streams\":[");
+            planByteCount += "],\"streams\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             boolean firstSt = true;
             if (!planBudgetExceeded) {
             try (PreparedStatement ps = conn.prepareStatement(sqlSt)) {
@@ -683,8 +701,6 @@ public class TopQueryQuery {
                 ps.setString(5, sourceVersion);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        if (!firstSt) sb.append(',');
-                        firstSt = false;
                         int streamId     = rs.getInt("STREAM_ID");
                         int srcId        = rs.getInt("SOURCE_ID");
                         int tgtId        = rs.getInt("TARGET_ID");
@@ -693,20 +709,28 @@ public class TopQueryQuery {
                         String tgtType   = rs.getString("TARGET_TYPE");
                         String objSchema = rs.getString("OBJECT_SCHEMA");
                         String objName   = rs.getString("OBJECT_NAME");
-                        sb.append("{\"id\":").append(streamId)
-                          .append(",\"from\":").append(srcId)
-                          .append(",\"to\":").append(tgtId)
-                          .append(",\"cols\":").append(colCount);
+                        StringBuilder frag = new StringBuilder();
+                        frag.append("{\"id\":").append(streamId)
+                            .append(",\"from\":").append(srcId)
+                            .append(",\"to\":").append(tgtId)
+                            .append(",\"cols\":").append(colCount);
                         if (srcType != null && !srcType.isEmpty())
-                            sb.append(",\"src_type\":\"").append(jsonEscape(srcType)).append('"');
+                            frag.append(",\"src_type\":\"").append(jsonEscape(srcType)).append('"');
                         if (tgtType != null && !tgtType.isEmpty())
-                            sb.append(",\"tgt_type\":\"").append(jsonEscape(tgtType)).append('"');
+                            frag.append(",\"tgt_type\":\"").append(jsonEscape(tgtType)).append('"');
                         if (objSchema != null && !objSchema.isEmpty())
-                            sb.append(",\"obj_schema\":\"").append(jsonEscape(objSchema)).append('"');
+                            frag.append(",\"obj_schema\":\"").append(jsonEscape(objSchema)).append('"');
                         if (objName != null && !objName.isEmpty())
-                            sb.append(",\"obj_name\":\"").append(jsonEscape(objName)).append('"');
-                        sb.append('}');
-                        if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            frag.append(",\"obj_name\":\"").append(jsonEscape(objName)).append('"');
+                        frag.append('}');
+                        String fragment = frag.toString();
+                        int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                        if (!firstSt) fragBytes += 1; // comma separator
+                        planByteCount += fragBytes;
+                        if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                        if (!firstSt) sb.append(',');
+                        firstSt = false;
+                        sb.append(fragment);
                     }
                 }
             }
@@ -720,6 +744,7 @@ public class TopQueryQuery {
 
             // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
             sb.append("],\"arguments\":[");
+            planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             if (!planBudgetExceeded) {
             try {
                 boolean firstArg = true;
@@ -730,28 +755,33 @@ public class TopQueryQuery {
                     ps.setString(5, sourceVersion);
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
-                            if (!firstArg) sb.append(',');
-                            firstArg = false;
                             String argType = rs.getString("ARGUMENT_TYPE");
                             String rawVal  = rs.getString("ARGUMENT_VALUE");
-                            sb.append("{\"op\":").append(rs.getInt("OPERATOR_ID"))
-                              .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
+                            StringBuilder frag = new StringBuilder();
+                            frag.append("{\"op\":").append(rs.getInt("OPERATOR_ID"))
+                                .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
                             // ARGUMENT_VALUE may contain literals. For types that use SQL
                             // syntax (e.g. SORTKEY, PREDICATE) use the SQL obfuscator.
-                            // Types that use non-SQL syntax (XPATH) are omitted entirely
-                            // because the SQL lexer cannot safely redact XPath string literals
-                            // (double-quoted in XPath, identifier-quoted in SQL).
+                            // Unknown or non-SQL types (XPATH) are omitted entirely
+                            // because the SQL lexer cannot safely redact their string literals.
                             if (rawVal != null && !isSafeArgumentType(argType)) {
                                 // non-SQL type — omit value to avoid leaking literals
                             } else if (rawVal != null) {
                                 String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
                                 if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
-                                    sb.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
+                                    frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
                                 }
                                 // else: obfuscation failed — omit "value" key but keep op+type
                             }
-                            sb.append('}');
-                            if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            frag.append('}');
+                            String fragment = frag.toString();
+                            int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                            if (!firstArg) fragBytes += 1; // comma separator
+                            planByteCount += fragBytes;
+                            if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            if (!firstArg) sb.append(',');
+                            firstArg = false;
+                            sb.append(fragment);
                         }
                     }
                 }
@@ -766,6 +796,7 @@ public class TopQueryQuery {
 
             // Step 2d: EXPLAIN_OBJECT — tables and indexes accessed
             sb.append("],\"objects\":[");
+            planByteCount += "],\"objects\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             if (!planBudgetExceeded) {
             try {
                 boolean firstObj = true;
@@ -776,14 +807,18 @@ public class TopQueryQuery {
                     ps.setString(5, sourceVersion);
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
+                            String fragment = "{\"schema\":\"" + jsonEscape(rs.getString("OBJECT_SCHEMA")) + '"'
+                                + ",\"name\":\"" + jsonEscape(rs.getString("OBJECT_NAME")) + '"'
+                                + ",\"type\":\"" + jsonEscape(rs.getString("OBJECT_TYPE")) + '"'
+                                + ",\"rows\":" + rs.getDouble("ROW_COUNT")
+                                + ",\"cols\":" + rs.getInt("COLUMN_COUNT") + '}';
+                            int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                            if (!firstObj) fragBytes += 1; // comma separator
+                            planByteCount += fragBytes;
+                            if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                             if (!firstObj) sb.append(',');
                             firstObj = false;
-                            sb.append("{\"schema\":\"").append(jsonEscape(rs.getString("OBJECT_SCHEMA"))).append('"')
-                              .append(",\"name\":\"").append(jsonEscape(rs.getString("OBJECT_NAME"))).append('"')
-                              .append(",\"type\":\"").append(jsonEscape(rs.getString("OBJECT_TYPE"))).append('"')
-                              .append(",\"rows\":").append(rs.getDouble("ROW_COUNT"))
-                              .append(",\"cols\":").append(rs.getInt("COLUMN_COUNT")).append('}');
-                            if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            sb.append(fragment);
                         }
                     }
                 }
@@ -798,6 +833,7 @@ public class TopQueryQuery {
 
             // Step 2e: EXPLAIN_PREDICATE — filter/join conditions; PREDICATE_TEXT is obfuscated
             sb.append("],\"predicates\":[");
+            planByteCount += "],\"predicates\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             if (!planBudgetExceeded) {
             try {
                 boolean firstPred = true;
@@ -817,16 +853,22 @@ public class TopQueryQuery {
                                 String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
                                 if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
                             }
+                            StringBuilder frag = new StringBuilder();
+                            frag.append("{\"op\":").append(opId)
+                                .append(",\"id\":").append(predId)
+                                .append(",\"how\":\"").append(jsonEscape(howApplied)).append('"');
+                            if (obfText != null) {
+                                frag.append(",\"text\":\"").append(jsonEscape(obfText)).append('"');
+                            }
+                            frag.append('}');
+                            String fragment = frag.toString();
+                            int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                            if (!firstPred) fragBytes += 1; // comma separator
+                            planByteCount += fragBytes;
+                            if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
                             if (!firstPred) sb.append(',');
                             firstPred = false;
-                            sb.append("{\"op\":").append(opId)
-                              .append(",\"id\":").append(predId)
-                              .append(",\"how\":\"").append(jsonEscape(howApplied)).append('"');
-                            if (obfText != null) {
-                                sb.append(",\"text\":\"").append(jsonEscape(obfText)).append('"');
-                            }
-                            sb.append('}');
-                            if (utf8Len(sb) > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            sb.append(fragment);
                         }
                     }
                 }
@@ -883,21 +925,27 @@ public class TopQueryQuery {
      * All other exceptions (timeouts, permission errors) are operational and should
      * be re-thrown so the outer catch in fetchPlanXml returns null (uncached).
      */
-    // Returns true for EXPLAIN_ARGUMENT types whose values use SQL syntax and can
-    // be safely processed by the SQL obfuscator. Types that use non-SQL syntax
-    // (e.g. XPATH uses double-quoted string literals, which the SQL lexer treats as
-    // identifiers) are excluded so their values are omitted rather than leaked.
-    // Returns the UTF-8 encoded byte length of the current StringBuilder content.
-    // Used for plan budget checks — sb.length() counts UTF-16 code units, not bytes.
-    private static int utf8Len(StringBuilder sb) {
-        return sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-    }
-
     private static boolean isSafeArgumentType(String argType) {
         if (argType == null) return false;
         switch (argType.trim().toUpperCase()) {
-            case "XPATH": return false;
-            default:      return true;
+            // These argument types contain SQL expressions or plain identifiers/keywords
+            // that the SQL obfuscator can safely process.
+            case "SORTKEY":
+            case "PREDICATE":
+            case "PREFETCHTYPE":
+            case "SCANTYPE":
+            case "JOINTYPE":
+            case "UNIQUEKEY":
+            case "ROWCOUNT":
+            case "NUMROWS":
+            case "INDEXONLY":
+            case "MAXPAGES":
+            case "TBSPACEID":
+            case "BIDI":
+                return true;
+            default:
+                // Unknown or non-SQL types (e.g. XPATH) — omit value rather than risk leaking literals.
+                return false;
         }
     }
 
