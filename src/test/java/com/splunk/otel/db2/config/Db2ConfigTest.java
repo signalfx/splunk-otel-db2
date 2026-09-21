@@ -247,8 +247,8 @@ class Db2ConfigTest {
     }
 
     @Test
-    void topQueryCollectionMaxExplainDefaultIsTwoFifty() {
-        assertThat(new Db2ReceiverConfig().getTopQueryCollection().getMaxExplainEachInterval()).isEqualTo(250);
+    void topQueryCollectionMaxExplainDefaultIsZero() {
+        assertThat(new Db2ReceiverConfig().getTopQueryCollection().getMaxExplainEachInterval()).isEqualTo(0);
     }
 
     @Test

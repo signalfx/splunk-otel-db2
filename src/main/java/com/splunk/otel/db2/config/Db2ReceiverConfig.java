@@ -146,8 +146,9 @@ public class Db2ReceiverConfig {
         private String collectionInterval = "60s";
         private int topQueryCount = 250;
         private int maxQuerySampleCount = 1000;
-        // 0 = plan collection disabled (no EXPLAIN_FROM_SECTION calls). Default 250 mirrors MongoDB receiver.
-        private int maxExplainEachInterval = 250;
+        // 0 = plan collection disabled (no EXPLAIN_FROM_SECTION calls). Default 0 keeps plan collection
+        // opt-in; set to a positive value to enable (e.g. 250 to match MongoDB receiver default).
+        private int maxExplainEachInterval = 0;
         private int queryPlanCacheSize = 1000;
         private String queryPlanCacheTtl = "1h";
         // Schema where explain tables exist (created by SYSINSTALLOBJECTS).
