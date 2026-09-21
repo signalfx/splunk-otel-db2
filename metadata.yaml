@@ -446,12 +446,12 @@ events:
       as OTel log records with severity INFO.
       The first collection after startup seeds the delta baseline and emits nothing.
 
-      When top_query_plan_enabled is true, each record is optionally enriched with
-      db2.query_plan (JSON plan summary from EXPLAIN_FROM_SECTION) and
-      db2.query_plan.hash (EXECUTABLE_ID hex string, changes on recompile). No query
-      re-execution occurs — EXPLAIN_FROM_SECTION reads the compiled section from the
-      in-memory package cache (SECTION_SOURCE_TYPE='M'). At most
-      top_query_collection.max_explain_each_interval explain calls are issued per
+      When top_query_collection.max_explain_each_interval is greater than zero, each
+      record is optionally enriched with db2.query_plan (JSON plan summary from
+      EXPLAIN_FROM_SECTION) and db2.query_plan.hash (EXECUTABLE_ID hex string, changes
+      on recompile). No query re-execution occurs — EXPLAIN_FROM_SECTION reads the
+      compiled section from the in-memory package cache (SECTION_SOURCE_TYPE='M'). At
+      most top_query_collection.max_explain_each_interval explain calls are issued per
       interval as a budget cap. Plans are cached client-side (up to
       top_query_collection.query_plan_cache_size entries, TTL controlled by
       top_query_collection.query_plan_cache_ttl) to avoid re-explaining the same

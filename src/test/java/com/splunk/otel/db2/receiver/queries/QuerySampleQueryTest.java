@@ -150,7 +150,9 @@ class QuerySampleQueryTest {
     @Test
     void snapshotPathNoCpuAttribute() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC SELECT",
+        // Snapshot SQL now emits APPL_STATUS directly as ACTIVITY_STATE (e.g. UOWEXEC)
+        // rather than substituting STMT_OPERATION for UOWEXEC rows.
+        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC",
                 "2024-01-01-12.00.00.000000", 2L,
                 "db2inst1", "host1", "99", 0L, -1L);
 
@@ -161,6 +163,8 @@ class QuerySampleQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
 
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_CPU_TIME)).isNull();
+        // UOWEXEC (snapshot executing state) must map to "active"
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("active");
     }
 
     @Test
@@ -681,6 +685,7 @@ class QuerySampleQueryTest {
         assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING DML")).isEqualTo("active");
         assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING READ")).isEqualTo("active");
         assertThat(QuerySampleQuery.deriveSessionStatus("RECOMP READ")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("UOWEXEC")).isEqualTo("active");
         assertThat(QuerySampleQuery.deriveSessionStatus("LOCKWAIT DML")).isEqualTo("waiting");
         assertThat(QuerySampleQuery.deriveSessionStatus("LOCK WAIT DML")).isEqualTo("waiting");
         assertThat(QuerySampleQuery.deriveSessionStatus("CLIENT WAIT ")).isEqualTo("waiting");

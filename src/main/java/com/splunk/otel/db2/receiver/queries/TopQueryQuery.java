@@ -417,17 +417,6 @@ public class TopQueryQuery {
             log.warn("TopQueryQuery: plan cache returned {} rows — consider tuning LAST_METRICS_UPDATE lookback", curr.size());
         }
 
-        // Post-fetch resource guard: truncate to maxQuerySampleCount before delta ranking.
-        // All rows were fetched so Java-side ranking sees the complete eligible set;
-        // this cap prevents unbounded memory use when the plan cache is very large.
-        if (texts.size() > maxQuerySampleCount) {
-            log.debug("TopQueryQuery: truncating {} rows to maxQuerySampleCount={} before delta ranking",
-                texts.size(), maxQuerySampleCount);
-            texts            = texts.subList(0, maxQuerySampleCount);
-            counters         = counters.subList(0, maxQuerySampleCount);
-            insertTimestamps = insertTimestamps.subList(0, maxQuerySampleCount);
-        }
-
         scrapeGen++;
         boolean isFirstCollection = (scrapeGen == 1);
 
@@ -515,6 +504,13 @@ public class TopQueryQuery {
             int cmp = Long.compare(b[1], a[1]);
             return cmp != 0 ? cmp : Long.compare(b[2], a[2]);
         });
+
+        // Apply maxQuerySampleCount cap after ranking so the true hottest queries are kept.
+        if (deltas.size() > maxQuerySampleCount) {
+            log.debug("TopQueryQuery: capping {} ranked candidates to maxQuerySampleCount={}",
+                deltas.size(), maxQuerySampleCount);
+            deltas = deltas.subList(0, maxQuerySampleCount);
+        }
 
         Instant now = Instant.now();
         int emitCount = 0;
@@ -738,9 +734,9 @@ public class TopQueryQuery {
 
             // Steps 2c-2e: argument, object, predicate tables are standard in all supported
             // DB2 versions but each is queried in its own try/catch.
-            // Compatibility signals (SQLFeatureNotSupportedException or SQLCODE -206 column-not-found)
-            // degrade silently to an empty array. All other exceptions (timeouts, permissions) are
-            // re-thrown so the outer catch returns null (keeping the entry uncached).
+            // SQLFeatureNotSupportedException degrades silently to an empty array.
+            // All other exceptions (timeouts, permissions) are re-thrown so the outer
+            // catch returns null (keeping the entry uncached).
 
             // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
             sb.append("],\"arguments\":[");
@@ -881,11 +877,13 @@ public class TopQueryQuery {
             }
             } // end if (!planBudgetExceeded)
 
-            sb.append("]}");
+            planByteCount += "]}".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (planByteCount > PLAN_MAX_BYTES) planBudgetExceeded = true;
             if (planBudgetExceeded) {
                 log.debug("TopQueryQuery: plan for execIdHex={} exceeded {} byte budget — discarding", execIdHex, PLAN_MAX_BYTES);
                 return null;
             }
+            sb.append("]}");
             return sb.toString();
 
         } catch (Exception e) {
@@ -912,19 +910,8 @@ public class TopQueryQuery {
         }
     }
 
-    /**
-     * Returns true if the exception is a compatibility signal that indicates the
-     * explain table or column is unavailable on this Db2 version/configuration.
-     * These should silently degrade to an empty array rather than aborting the plan.
-     *
-     * True for:
-     *  - {@link SQLFeatureNotSupportedException}: JDBC-level feature not supported.
-     *  - SQLCODE -206 (column not found): column missing on older Db2 schemas.
-     *    Detected by message substring "SQLCODE=-206" or "SQL0206".
-     *
-     * All other exceptions (timeouts, permission errors) are operational and should
-     * be re-thrown so the outer catch in fetchPlanXml returns null (uncached).
-     */
+    // Explicit allowlist: default false so unknown future ARGUMENT_TYPE values are
+    // omitted rather than risking literal leakage through an unrecognised type.
     private static boolean isSafeArgumentType(String argType) {
         if (argType == null) return false;
         switch (argType.trim().toUpperCase()) {
@@ -951,10 +938,8 @@ public class TopQueryQuery {
 
     // Only SQLFeatureNotSupportedException is a safe compatibility signal — it means
     // the JDBC driver explicitly reports the feature as unsupported for this DB version.
-    // SQLCODE=-206 (column not found) is NOT treated as compatibility: the same error
-    // fires on a genuine column-name regression in our own queries, and suppressing it
-    // would cache a permanently incomplete plan. Operational errors (timeout, permissions,
-    // syntax) re-throw to the outer catch so fetchPlanXml returns null (uncached).
+    // Operational errors (timeout, permissions, syntax) re-throw to the outer catch
+    // so fetchPlanXml returns null (uncached).
     private static boolean isCompatibilityException(Exception e) {
         return e instanceof SQLFeatureNotSupportedException;
     }

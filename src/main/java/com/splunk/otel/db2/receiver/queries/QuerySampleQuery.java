@@ -164,11 +164,8 @@ public class QuerySampleQuery {
     // All three dbmon-api blocking endpoints return empty on this path — see README.
     private static final String SQL_SNAP =
         "SELECT COALESCE(SS.STMT_TEXT, S.TEXT) AS STMT_TEXT, " +
-        "       ( CASE WHEN SA.APPL_STATUS = 'UOWEXEC' " +
-        "              THEN CAST(SS.STMT_OPERATION AS VARCHAR(22)) " +
-        "              ELSE CAST(SA.APPL_STATUS AS VARCHAR(22)) " +
-        "         END ) AS ACTIVITY_STATE, " +
-        "       CAST(NULL AS VARCHAR(22)) AS OPERATION_NAME, " +
+        "       CAST(SA.APPL_STATUS AS VARCHAR(22)) AS ACTIVITY_STATE, " +
+        "       CAST(SS.STMT_OPERATION AS VARCHAR(22)) AS OPERATION_NAME, " +
         "       CHAR(SS.STMT_START) AS LOCAL_START_TIME, " +
         "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) AS WALL_ELAPSED_SEC, " +
         "       COALESCE(NULLIF(SA.EXECUTION_ID, ''), SA.PRIMARY_AUTH_ID) AS CLIENT_USERID, " +
@@ -410,9 +407,13 @@ public class QuerySampleQuery {
     static String deriveSessionStatus(String activityState) {
         if (activityState == null) return null;
         String s = activityState.trim();
+        // MON_CURRENT_SQL composite: "EXECUTING READ", "RECOMP DML", etc.
         if (s.startsWith("EXECUTING") || s.startsWith("RECOMP")) return "active";
+        // MON_CURRENT_SQL composite: "LOCKWAIT DML"; snapshot APPL_STATUS: "LOCKWAIT" or "LOCK WAIT"
         if (s.startsWith("LOCKWAIT") || s.startsWith("LOCK WAIT") || s.startsWith("CLIENT WAIT")) return "waiting";
         if (s.startsWith("IDLE")) return "idle";
+        // Snapshot monitor APPL_STATUS: UOWEXEC = executing a unit of work
+        if (s.equals("UOWEXEC")) return "active";
         return null;
     }
 }

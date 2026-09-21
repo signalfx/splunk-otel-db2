@@ -442,14 +442,13 @@ class TopQueryQueryTest {
 
     @Test
     void postFetchTruncationRespectsMaxQuerySampleCount() throws Exception {
-        // maxQuerySampleCount=2; DB returns 3 rows. After truncation only the first 2
-        // rows enter the delta-ranking loop, so at most 2 records are emitted.
-        // topQueryCount=10 (higher than maxQuerySampleCount) to ensure truncation — not
-        // topQueryCount — is the binding constraint.
-        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 2, 60L,
+        // maxQuerySampleCount=1; DB returns 3 rows with different deltas (300 > 200 > 100).
+        // Truncation must happen AFTER delta ranking so the hottest query (e3, delta=300)
+        // is the one emitted — not the first row in DB order.
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 1, 60L,
             null, 1000, 3600_000L, "");
 
-        // Seed 3 rows
+        // Seed cycle: 3 rows, DB-order e1/e2/e3 with ascending exec times
         when(rs.next()).thenReturn(true, true, true, false);
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
@@ -466,11 +465,12 @@ class TopQueryQueryTest {
         when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null);
         q.collect();
 
-        // Cycle 2: all 3 rows grew — but only 2 (the first 2 after truncation) should rank
+        // Cycle 2: all 3 rows grew by ascending deltas (e1+100, e2+200, e3+300)
         reset(stmt, rs, otelLogger, logBuilder);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
         when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(logBuilder.setAllAttributes(any())).thenReturn(logBuilder);
         when(rs.next()).thenReturn(true, true, true, false);
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T", "SELECT 2 FROM T", "SELECT 3 FROM T");
         when(rs.getLong("MEMBER")).thenReturn(0L);
@@ -487,8 +487,14 @@ class TopQueryQueryTest {
         when(rs.getTimestamp("INSERT_TIMESTAMP")).thenReturn(null);
         q.collect();
 
-        // Only 2 records emitted — the 3rd row was truncated by maxQuerySampleCount
-        verify(logBuilder, times(2)).emit();
+        // Only 1 record emitted (maxQuerySampleCount=1), and it must be the hottest query
+        // (e3, exec time delta=300ms), not the first DB-order row (e1, delta=100ms).
+        verify(logBuilder, times(1)).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // e3 delta = 600-300 = 300ms = 0.3s
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_TOTAL_EXEC_TIME)).isEqualTo(0.3);
     }
 
     @Test
