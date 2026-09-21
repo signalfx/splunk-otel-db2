@@ -181,14 +181,16 @@ public class TopQueryQuery {
         "  AND ARGUMENT_TYPE <> 'COST_DETAIL' " +
         "ORDER BY OPERATOR_ID, ARGUMENT_TYPE";
 
-    // Step 2d — objects (tables and indexes) accessed, matched via STREAM.SOURCE_ID = -1 streams.
+    // Step 2d — objects (tables and indexes) accessed. EXPLAIN_OBJECT has no STREAM_ID column;
+    // the positional correspondence with SOURCE_ID=-1 streams is implicit. ROW_COUNT and
+    // COLUMN_COUNT from EXPLAIN_OBJECT are included for cardinality annotations.
     private static final String SQL_EXPLAIN_OBJECT =
         "SELECT RTRIM(OBJECT_SCHEMA) AS OBJECT_SCHEMA, RTRIM(OBJECT_NAME) AS OBJECT_NAME, " +
-        "       RTRIM(OBJECT_TYPE) AS OBJECT_TYPE, STREAM_ID " +
+        "       RTRIM(OBJECT_TYPE) AS OBJECT_TYPE, ROW_COUNT, COLUMN_COUNT " +
         "FROM %s.EXPLAIN_OBJECT " +
         "WHERE EXPLAIN_REQUESTER = ? AND EXPLAIN_TIME = ? " +
         "  AND SOURCE_NAME = ? AND SOURCE_SCHEMA = ? AND SOURCE_VERSION = ? " +
-        "ORDER BY STREAM_ID";
+        "ORDER BY OBJECT_NAME";
 
     // Step 2e — predicates (filter/join conditions with PREDICATE_TEXT containing literals).
     // PREDICATE_TEXT is obfuscated via SqlObfuscator.obfuscateFragment before emission.
@@ -681,91 +683,95 @@ public class TopQueryQuery {
                 }
             }
 
-            // Step 2c: read EXPLAIN_ARGUMENT (operator config — join type, prefetch, sort, etc.)
+            // Steps 2c-2e: argument, object, predicate tables are standard in all supported
+            // DB2 versions but each is queried in its own try/catch so that a missing column
+            // or permission error on one table degrades gracefully to an empty array rather
+            // than aborting the whole plan and returning null.
+
+            // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
             sb.append("],\"arguments\":[");
-            boolean firstArg = true;
-            try (PreparedStatement ps = conn.prepareStatement(sqlArg)) {
-                ps.setQueryTimeout(queryTimeoutSeconds);
-                ps.setString(1, explainRequester);
-                ps.setTimestamp(2, explainTime);
-                ps.setString(3, sourceName);
-                ps.setString(4, sourceSchema);
-                ps.setString(5, sourceVersion);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        if (!firstArg) sb.append(',');
-                        firstArg = false;
-                        int opId    = rs.getInt("OPERATOR_ID");
-                        String type = rs.getString("ARGUMENT_TYPE");
-                        String val  = rs.getString("ARGUMENT_VALUE");
-                        sb.append("{\"op\":").append(opId)
-                          .append(",\"type\":\"").append(jsonEscape(type)).append('"')
-                          .append(",\"value\":\"").append(jsonEscape(val)).append("\"}");
+            try {
+                boolean firstArg = true;
+                try (PreparedStatement ps = conn.prepareStatement(sqlArg)) {
+                    ps.setQueryTimeout(queryTimeoutSeconds);
+                    ps.setString(1, explainRequester); ps.setTimestamp(2, explainTime);
+                    ps.setString(3, sourceName);       ps.setString(4, sourceSchema);
+                    ps.setString(5, sourceVersion);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            if (!firstArg) sb.append(',');
+                            firstArg = false;
+                            sb.append("{\"op\":").append(rs.getInt("OPERATOR_ID"))
+                              .append(",\"type\":\"").append(jsonEscape(rs.getString("ARGUMENT_TYPE"))).append('"')
+                              .append(",\"value\":\"").append(jsonEscape(rs.getString("ARGUMENT_VALUE"))).append("\"}");
+                        }
                     }
                 }
+            } catch (Exception e) {
+                log.debug("TopQueryQuery: EXPLAIN_ARGUMENT query failed for execIdHex={}: {}", execIdHex, e.getMessage());
             }
 
-            // Step 2d: read EXPLAIN_OBJECT (tables/indexes accessed)
+            // Step 2d: EXPLAIN_OBJECT — tables and indexes accessed
             sb.append("],\"objects\":[");
-            boolean firstObj = true;
-            try (PreparedStatement ps = conn.prepareStatement(sqlObj)) {
-                ps.setQueryTimeout(queryTimeoutSeconds);
-                ps.setString(1, explainRequester);
-                ps.setTimestamp(2, explainTime);
-                ps.setString(3, sourceName);
-                ps.setString(4, sourceSchema);
-                ps.setString(5, sourceVersion);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        if (!firstObj) sb.append(',');
-                        firstObj = false;
-                        String schema   = rs.getString("OBJECT_SCHEMA");
-                        String name     = rs.getString("OBJECT_NAME");
-                        String type     = rs.getString("OBJECT_TYPE");
-                        int    streamId = rs.getInt("STREAM_ID");
-                        sb.append("{\"schema\":\"").append(jsonEscape(schema)).append('"')
-                          .append(",\"name\":\"").append(jsonEscape(name)).append('"')
-                          .append(",\"type\":\"").append(jsonEscape(type)).append('"')
-                          .append(",\"stream\":").append(streamId).append('}');
+            try {
+                boolean firstObj = true;
+                try (PreparedStatement ps = conn.prepareStatement(sqlObj)) {
+                    ps.setQueryTimeout(queryTimeoutSeconds);
+                    ps.setString(1, explainRequester); ps.setTimestamp(2, explainTime);
+                    ps.setString(3, sourceName);       ps.setString(4, sourceSchema);
+                    ps.setString(5, sourceVersion);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            if (!firstObj) sb.append(',');
+                            firstObj = false;
+                            sb.append("{\"schema\":\"").append(jsonEscape(rs.getString("OBJECT_SCHEMA"))).append('"')
+                              .append(",\"name\":\"").append(jsonEscape(rs.getString("OBJECT_NAME"))).append('"')
+                              .append(",\"type\":\"").append(jsonEscape(rs.getString("OBJECT_TYPE"))).append('"')
+                              .append(",\"rows\":").append(rs.getDouble("ROW_COUNT"))
+                              .append(",\"cols\":").append(rs.getInt("COLUMN_COUNT")).append('}');
+                        }
                     }
                 }
+            } catch (Exception e) {
+                log.debug("TopQueryQuery: EXPLAIN_OBJECT query failed for execIdHex={}: {}", execIdHex, e.getMessage());
             }
 
-            // Step 2e: read EXPLAIN_PREDICATE (filter/join conditions).
-            // PREDICATE_TEXT contains literal values — obfuscated before emission.
+            // Step 2e: EXPLAIN_PREDICATE — filter/join conditions; PREDICATE_TEXT is obfuscated
             sb.append("],\"predicates\":[");
-            boolean firstPred = true;
-            try (PreparedStatement ps = conn.prepareStatement(sqlPred)) {
-                ps.setQueryTimeout(queryTimeoutSeconds);
-                ps.setString(1, explainRequester);
-                ps.setTimestamp(2, explainTime);
-                ps.setString(3, sourceName);
-                ps.setString(4, sourceSchema);
-                ps.setString(5, sourceVersion);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        int    opId      = rs.getInt("OPERATOR_ID");
-                        int    predId    = rs.getInt("PREDICATE_ID");
-                        String howApplied = rs.getString("HOW_APPLIED");
-                        String rawText   = rs.getString("PREDICATE_TEXT");
-                        String obfText   = null;
-                        if (rawText != null && !rawText.isBlank()) {
-                            String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
-                            if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
-                            // if obfuscation fails, omit predicate_text but keep the row
+            try {
+                boolean firstPred = true;
+                try (PreparedStatement ps = conn.prepareStatement(sqlPred)) {
+                    ps.setQueryTimeout(queryTimeoutSeconds);
+                    ps.setString(1, explainRequester); ps.setTimestamp(2, explainTime);
+                    ps.setString(3, sourceName);       ps.setString(4, sourceSchema);
+                    ps.setString(5, sourceVersion);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            int    opId       = rs.getInt("OPERATOR_ID");
+                            int    predId     = rs.getInt("PREDICATE_ID");
+                            String howApplied = rs.getString("HOW_APPLIED");
+                            String rawText    = rs.getString("PREDICATE_TEXT");
+                            String obfText    = null;
+                            if (rawText != null && !rawText.isBlank()) {
+                                String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
+                                if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
+                            }
+                            if (!firstPred) sb.append(',');
+                            firstPred = false;
+                            sb.append("{\"op\":").append(opId)
+                              .append(",\"id\":").append(predId)
+                              .append(",\"how\":\"").append(jsonEscape(howApplied)).append('"');
+                            if (obfText != null) {
+                                sb.append(",\"text\":\"").append(jsonEscape(obfText)).append('"');
+                            }
+                            sb.append('}');
                         }
-                        if (!firstPred) sb.append(',');
-                        firstPred = false;
-                        sb.append("{\"op\":").append(opId)
-                          .append(",\"id\":").append(predId)
-                          .append(",\"how\":\"").append(jsonEscape(howApplied)).append('"');
-                        if (obfText != null) {
-                            sb.append(",\"text\":\"").append(jsonEscape(obfText)).append('"');
-                        }
-                        sb.append('}');
                     }
                 }
+            } catch (Exception e) {
+                log.debug("TopQueryQuery: EXPLAIN_PREDICATE query failed for execIdHex={}: {}", execIdHex, e.getMessage());
             }
+
             sb.append("]}");
             return sb.toString();
 

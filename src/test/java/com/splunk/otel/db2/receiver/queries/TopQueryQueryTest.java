@@ -893,14 +893,15 @@ class TopQueryQueryTest {
         when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
         when(argPs.executeQuery()).thenReturn(argRs);
 
-        // EXPLAIN_OBJECT — one row: DB2INST1.ORDERS TABLE stream=1
+        // EXPLAIN_OBJECT — one row: DB2INST1.ORDERS TABLE rows=1000 cols=6
         PreparedStatement objPs = mock(PreparedStatement.class);
         ResultSet objRs = mock(ResultSet.class);
         when(objRs.next()).thenReturn(true, false);
         when(objRs.getString("OBJECT_SCHEMA")).thenReturn("DB2INST1");
         when(objRs.getString("OBJECT_NAME")).thenReturn("ORDERS");
         when(objRs.getString("OBJECT_TYPE")).thenReturn("TABLE");
-        when(objRs.getInt("STREAM_ID")).thenReturn(1);
+        when(objRs.getDouble("ROW_COUNT")).thenReturn(1000.0);
+        when(objRs.getInt("COLUMN_COUNT")).thenReturn(6);
         when(objPs.executeQuery()).thenReturn(objRs);
 
         // EXPLAIN_PREDICATE — one row: op=1 predId=1 SARG "Q1.ID = 42" (raw, obfuscated to "Q1.ID = ?")
@@ -958,7 +959,7 @@ class TopQueryQueryTest {
         assertThat(plan).contains("\"operators\"").contains("TBSCAN");
         assertThat(plan).contains("\"streams\"").contains("\"from\":-1");
         assertThat(plan).contains("\"arguments\"").contains("PREFETCHTYPE").contains("NONE");
-        assertThat(plan).contains("\"objects\"").contains("ORDERS").contains("TABLE");
+        assertThat(plan).contains("\"objects\"").contains("ORDERS").contains("TABLE").contains("\"rows\"");
         assertThat(plan).contains("\"predicates\"").contains("SARG");
         // Literal in predicate text must be obfuscated: "Q1.ID = 42" → "Q1.ID = ?"
         assertThat(plan).contains("Q1.ID = ?").doesNotContain("42");
