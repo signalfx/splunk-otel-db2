@@ -156,6 +156,9 @@ attributes:
       JSON plan summary for the statement, produced by EXPLAIN_FROM_SECTION which reads
       the compiled section from the in-memory package cache (no query re-execution).
       Contains operator types and costs plus stream connectivity.
+      Predicate text is pre-redacted before obfuscation: double-quoted content is replaced
+      with "?" so that XQuery string literals are never emitted; as a side-effect, SQL
+      delimited identifiers in predicate text are also replaced with "?".
       Stripped by the dbmon-processor after upload to object storage; consumers
       receive _dbmon.query_plan.object_key instead.
     type: string
