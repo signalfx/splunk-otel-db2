@@ -198,7 +198,14 @@ public class Db2ReceiverConfig {
         public void setQueryPlanCacheTtl(String v) { this.queryPlanCacheTtl = v; }
 
         public String getExplainSchema() { return explainSchema; }
-        public void setExplainSchema(String v) { this.explainSchema = v == null ? "" : v.trim(); }
+        public void setExplainSchema(String v) {
+            String s = v == null ? "" : v.trim();
+            if (!s.isEmpty() && !s.matches("[A-Za-z_$#@][A-Za-z0-9_$#@]*")) {
+                throw new IllegalArgumentException(
+                    "top_query_collection.explain_schema must be a valid SQL identifier, got '" + s + "'");
+            }
+            this.explainSchema = s;
+        }
     }
 
     // --- query_sample_collection ---

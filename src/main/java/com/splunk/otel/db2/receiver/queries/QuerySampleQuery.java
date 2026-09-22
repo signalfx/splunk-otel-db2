@@ -74,10 +74,11 @@ public class QuerySampleQuery {
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
-        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE, " +
+        "       C.LAST_EXECUTABLE_ID AS EXEC_ID_BYTES " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
-        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
+        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME, LAST_EXECUTABLE_ID " +
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
@@ -128,10 +129,11 @@ public class QuerySampleQuery {
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
-        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE, " +
+        "       COALESCE(A.EXECUTABLE_ID, C.LAST_EXECUTABLE_ID) AS EXEC_ID_BYTES " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
-        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
+        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME, LAST_EXECUTABLE_ID " +
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
@@ -275,6 +277,11 @@ public class QuerySampleQuery {
                         long member       = rs.getLong("MEMBER");
                         long cpuUs        = rs.getLong("CPU_US");
                         long waitMs       = useSnapshotMonitor ? -1L : rs.getLong("LOCK_WAIT_TIME_MS");
+                        String execIdHex  = null;
+                        if (!useSnapshotMonitor) {
+                            byte[] execIdBytes = rs.getBytes("EXEC_ID_BYTES");
+                            if (execIdBytes != null) execIdHex = bytesToHex(execIdBytes);
+                        }
 
                         QuerySampleEvent ev = QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
                             .appHandle(appHandle)
@@ -285,7 +292,8 @@ public class QuerySampleQuery {
                             .userName(authId)
                             .clientAddress(clientHost)
                             .cpuTimeMicros(cpuUs)
-                            .waitTimeMillis(waitMs);
+                            .waitTimeMillis(waitMs)
+                            .planHash(execIdHex);
 
                         // Blocking columns only on the default (MON_CURRENT) paths.
                         // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
@@ -380,6 +388,12 @@ public class QuerySampleQuery {
 
     private static String trim(String s) {
         return s != null ? s.trim() : null;
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
     }
 
     // Converts Db2's CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN" to RFC3339 UTC

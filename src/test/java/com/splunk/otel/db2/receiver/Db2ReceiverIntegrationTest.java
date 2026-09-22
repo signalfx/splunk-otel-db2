@@ -54,7 +54,7 @@ class Db2ReceiverIntegrationTest {
 
     @BeforeAll
     static void createExplainTables() throws Exception {
-        // Required once per schema before top_query_plan_enabled: true can work.
+        // Required once per schema before max_explain_each_interval > 0 can work.
         // SYSINSTALLOBJECTS creates EXPLAIN_INSTANCE + 9 child tables in the current user's schema.
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());

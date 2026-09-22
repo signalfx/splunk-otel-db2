@@ -176,7 +176,7 @@ public class TopQueryQuery {
 
     // Step 2b — read plan streams (operator connectivity) for this explain session.
     private static final String SQL_EXPLAIN_STREAM =
-        "SELECT STREAM_ID, SOURCE_ID, TARGET_ID, COLUMN_COUNT, " +
+        "SELECT STREAM_ID, SOURCE_ID, TARGET_ID, STREAM_COUNT, " +
         "       RTRIM(SOURCE_TYPE) AS SOURCE_TYPE, RTRIM(TARGET_TYPE) AS TARGET_TYPE, " +
         "       RTRIM(OBJECT_SCHEMA) AS OBJECT_SCHEMA, RTRIM(OBJECT_NAME) AS OBJECT_NAME " +
         "FROM %s.EXPLAIN_STREAM " +
@@ -569,12 +569,17 @@ public class TopQueryQuery {
                     planXml  = cached.xml;
                     planHash = cached.hash;
                 } else if (planAttempts < planMaxPerInterval) {
-                    planAttempts++; // budget consumed only on DB2 round-trip attempts
+                    planAttempts++;
                     planXml = fetchPlanXml(conn, execIdHex, (int) member);
                     if (planXml != null) {
-                        // EXECUTABLE_ID is the plan hash — changes on recompile, same semantics as SQL Server plan_handle.
                         planHash = execIdHex;
                         planCache.put(cacheKey, new PlanCacheEntry(planXml, planHash,
+                            System.currentTimeMillis() + planCacheTtlMs));
+                    } else {
+                        // Negative cache: permanent failures (no explain tables, static SQL,
+                        // evicted section) re-attempt every interval otherwise. Cache null
+                        // using the same TTL so next-interval re-explains only on expiry.
+                        planCache.put(cacheKey, new PlanCacheEntry(null, null,
                             System.currentTimeMillis() + planCacheTtlMs));
                     }
                 }
@@ -699,7 +704,7 @@ public class TopQueryQuery {
                         int streamId     = rs.getInt("STREAM_ID");
                         int srcId        = rs.getInt("SOURCE_ID");
                         int tgtId        = rs.getInt("TARGET_ID");
-                        int colCount     = rs.getInt("COLUMN_COUNT");
+                        long streamCount = rs.getLong("STREAM_COUNT");
                         String srcType   = rs.getString("SOURCE_TYPE");
                         String tgtType   = rs.getString("TARGET_TYPE");
                         String objSchema = rs.getString("OBJECT_SCHEMA");
@@ -708,7 +713,7 @@ public class TopQueryQuery {
                         frag.append("{\"id\":").append(streamId)
                             .append(",\"from\":").append(srcId)
                             .append(",\"to\":").append(tgtId)
-                            .append(",\"cols\":").append(colCount);
+                            .append(",\"rows\":").append(streamCount);
                         if (srcType != null && !srcType.isEmpty())
                             frag.append(",\"src_type\":\"").append(jsonEscape(srcType)).append('"');
                         if (tgtType != null && !tgtType.isEmpty())
@@ -767,15 +772,19 @@ public class TopQueryQuery {
                             // syntax (e.g. SORTKEY, PREDICATE) use the SQL obfuscator.
                             // Unknown or non-SQL types (XPATH) are omitted entirely
                             // because the SQL lexer cannot safely redact their string literals.
-                            if (rawVal != null && !isSafeArgumentType(argType)) {
-                                // non-SQL type — omit value to avoid leaking literals
-                            } else if (rawVal != null) {
-                                String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
-                                if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
-                                    frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
+                            if (rawVal != null && isSafeArgumentType(argType)) {
+                                // For PREDICATE-typed args on XQuery operators, the value uses
+                                // XQuery syntax — the SQL obfuscator would preserve double-quoted
+                                // literals. Omit value when the operator is tagged QLANG=XQUERY.
+                                int curOpId = rs.getInt("OPERATOR_ID");
+                                if (!"PREDICATE".equalsIgnoreCase(argType) || !xqueryOpIds.contains(curOpId)) {
+                                    String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
+                                    if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
+                                        frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
+                                    }
                                 }
-                                // else: obfuscation failed — omit "value" key but keep op+type
                             }
+                            // else: non-SQL or unknown type — omit value to avoid leaking literals
                             frag.append('}');
                             String fragment = frag.toString();
                             int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
@@ -917,7 +926,7 @@ public class TopQueryQuery {
                     ps.setString(5, sourceVersion);
                     ps.executeUpdate();
                 } catch (Exception e) {
-                    log.debug("TopQueryQuery: explain cleanup failed for requester={} time={}: {}",
+                    log.warn("TopQueryQuery: explain cleanup failed for requester={} time={}: {}",
                         explainRequester, explainTime, e.getMessage());
                 }
             }

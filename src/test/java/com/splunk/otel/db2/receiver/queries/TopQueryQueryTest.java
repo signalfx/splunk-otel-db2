@@ -894,7 +894,7 @@ class TopQueryQueryTest {
         when(streamRs.getInt("STREAM_ID")).thenReturn(1);
         when(streamRs.getInt("SOURCE_ID")).thenReturn(-1);
         when(streamRs.getInt("TARGET_ID")).thenReturn(1);
-        when(streamRs.getInt("COLUMN_COUNT")).thenReturn(3);
+        when(streamRs.getLong("STREAM_COUNT")).thenReturn(3L);
         when(streamRs.getString("SOURCE_TYPE")).thenReturn("TBSCAN");
         when(streamRs.getString("TARGET_TYPE")).thenReturn("RETURN");
         when(streamRs.getString("OBJECT_SCHEMA")).thenReturn("DB2INST1");

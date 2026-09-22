@@ -162,7 +162,8 @@ attributes:
   db2.query_plan.hash:
     description: >
       Db2 EXECUTABLE_ID hex string, uniquely identifying the compiled plan section in the
-      package cache. Changes on recompile.
+      package cache. Changes on recompile. Emitted on both db.server.top_query and
+      db.server.query_sample (default path only; not available on snapshot monitor path).
     type: string
 
   # --- query sample event attributes ---
@@ -417,6 +418,7 @@ events:
       - db2.session_id
       - db2.activity_state
       - db2.session_status
+      - db2.query_plan.hash                    # default path only; hex EXECUTABLE_ID of the active section
       - db2.query_start
       - db2.session.duration
       - db2.member

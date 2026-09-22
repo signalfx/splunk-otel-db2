@@ -29,6 +29,7 @@ public final class QuerySampleEvent {
     public static final AttributeKey<String> DB2_APP_HANDLE      = AttributeKey.stringKey("db2.session_id");
     public static final AttributeKey<String> DB2_ACTIVITY        = AttributeKey.stringKey("db2.activity_state");
     public static final AttributeKey<String> DB2_SESSION_STATUS  = AttributeKey.stringKey("db2.session_status");
+    public static final AttributeKey<String> DB2_PLAN_HASH       = AttributeKey.stringKey("db2.query_plan.hash");
     public static final AttributeKey<String> DB2_QUERY_START     = AttributeKey.stringKey("db2.query_start");
     public static final AttributeKey<Double> DB2_DURATION     = AttributeKey.doubleKey("db2.session.duration");
     public static final AttributeKey<Long>   DB2_MEMBER       = AttributeKey.longKey("db2.member");
@@ -66,6 +67,7 @@ public final class QuerySampleEvent {
     private String clientAddress;
     private Double cpuTimeSec;   // null = omit (snapshot path has no CPU data)
     private Double waitTimeSec;  // null = omit (Db2 < 10.5 has no MON_GET_ACTIVITY)
+    private String planHash;  // null = not available (snapshot path or no active section)
 
     // Optional — blocking fields (null = not in lock-wait)
     private String  blockerHandle;
@@ -113,6 +115,8 @@ public final class QuerySampleEvent {
         return this;
     }
 
+    public QuerySampleEvent planHash(String v) { this.planHash = v; return this; }
+
     // Blocking attribute setters
     public QuerySampleEvent blockerHandle(String v)       { this.blockerHandle     = v; return this; }
     public QuerySampleEvent blockerUser(String v)         { this.blockerUser        = v; return this; }
@@ -146,6 +150,7 @@ public final class QuerySampleEvent {
         if (clientAddress != null) b.put(CLIENT_ADDRESS,  clientAddress);
         if (cpuTimeSec    != null) b.put(DB2_CPU_TIME,    cpuTimeSec);
         if (waitTimeSec   != null) b.put(DB2_WAIT_TIME,   waitTimeSec);
+        if (planHash      != null) b.put(DB2_PLAN_HASH,   planHash);
 
         if (blockerHandle     != null) b.put(DB2_BLOCKER_APP_HANDLE, blockerHandle);
         if (blockerUser       != null) b.put(DB2_BLOCKER_USER,       blockerUser);
