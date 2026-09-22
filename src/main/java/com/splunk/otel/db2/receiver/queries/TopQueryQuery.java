@@ -747,19 +747,22 @@ public class TopQueryQuery {
             // catch returns null (keeping the entry uncached).
 
             // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
-            // Also collects xqueryOpIds: operator IDs where QLANG=XQUERY, used in Step 2e to
-            // suppress predicate text for XQuery operators (SQL obfuscator cannot safely
-            // sanitise XQuery string literals in double-quoted syntax).
+            // Two-pass approach: buffer ALL rows first to classify XQuery operators, then
+            // serialize values. This ensures xqueryOpIds is fully populated before any
+            // PREDICATE-typed value is processed — rows are not guaranteed to arrive with
+            // QLANG before PREDICATE for the same operator.
             // xqueryArgCollectionSucceeded: true only when EXPLAIN_ARGUMENT was read without
-            // error. If argument collection degrades (compatibility exception), predicates for
-            // all operators are suppressed — fail-closed.
+            // error. If argument collection degrades (compatibility exception), all predicate
+            // text in Step 2e is suppressed — fail-closed.
             sb.append("],\"arguments\":[");
             planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             java.util.Set<Integer> xqueryOpIds = new java.util.HashSet<>();
             boolean xqueryArgCollectionSucceeded = false;
+            // Buffered rows: int[opId], String[argType], String[rawValue]
+            java.util.List<Object[]> argRows = new java.util.ArrayList<>();
             if (!planBudgetExceeded) {
             try {
-                boolean firstArg = true;
+                // Pass 1: read all rows and classify XQuery operators
                 try (PreparedStatement ps = conn.prepareStatement(sqlArg)) {
                     ps.setQueryTimeout(queryTimeoutSeconds);
                     ps.setString(1, explainRequester); ps.setTimestamp(2, explainTime);
@@ -767,45 +770,49 @@ public class TopQueryQuery {
                     ps.setString(5, sourceVersion);
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
+                            int    opId    = rs.getInt("OPERATOR_ID");
                             String argType = rs.getString("ARGUMENT_TYPE");
                             String rawVal  = rs.getString("ARGUMENT_VALUE");
-                            // Track XQuery operators so Step 2e can omit their predicate text.
                             if ("QLANG".equalsIgnoreCase(argType) && "XQUERY".equalsIgnoreCase(rawVal)) {
-                                xqueryOpIds.add(rs.getInt("OPERATOR_ID"));
+                                xqueryOpIds.add(opId);
                             }
-                            StringBuilder frag = new StringBuilder();
-                            frag.append("{\"op\":").append(rs.getInt("OPERATOR_ID"))
-                                .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
-                            // ARGUMENT_VALUE may contain literals. For types that use SQL
-                            // syntax (e.g. SORTKEY, PREDICATE) use the SQL obfuscator.
-                            // Unknown or non-SQL types (XPATH) are omitted entirely
-                            // because the SQL lexer cannot safely redact their string literals.
-                            if (rawVal != null && isSafeArgumentType(argType)) {
-                                // For PREDICATE-typed args on XQuery operators, the value uses
-                                // XQuery syntax — the SQL obfuscator would preserve double-quoted
-                                // literals. Omit value when the operator is tagged QLANG=XQUERY.
-                                int curOpId = rs.getInt("OPERATOR_ID");
-                                if (!"PREDICATE".equalsIgnoreCase(argType) || !xqueryOpIds.contains(curOpId)) {
-                                    String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
-                                    if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
-                                        frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
-                                    }
-                                }
-                            }
-                            // else: non-SQL or unknown type — omit value to avoid leaking literals
-                            frag.append('}');
-                            String fragment = frag.toString();
-                            int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-                            if (!firstArg) fragBytes += 1; // comma separator
-                            planByteCount += fragBytes;
-                            if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
-                            if (!firstArg) sb.append(',');
-                            firstArg = false;
-                            sb.append(fragment);
+                            argRows.add(new Object[]{opId, argType, rawVal});
                         }
                     }
                 }
                 xqueryArgCollectionSucceeded = true;
+                // Pass 2: serialize argument rows now that xqueryOpIds is complete
+                boolean firstArg = true;
+                for (Object[] row : argRows) {
+                    int    opId    = (Integer) row[0];
+                    String argType = (String)  row[1];
+                    String rawVal  = (String)  row[2];
+                    StringBuilder frag = new StringBuilder();
+                    frag.append("{\"op\":").append(opId)
+                        .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
+                    // ARGUMENT_VALUE may contain literals. For types that use SQL syntax
+                    // (e.g. SORTKEY, PREDICATE) use the SQL obfuscator. Unknown or non-SQL
+                    // types (XPATH) are omitted because the SQL lexer cannot safely redact them.
+                    // PREDICATE values on XQuery operators use XQuery syntax — omit them even
+                    // though PREDICATE is in the SQL-safe allowlist.
+                    if (rawVal != null && isSafeArgumentType(argType)) {
+                        if (!"PREDICATE".equalsIgnoreCase(argType) || !xqueryOpIds.contains(opId)) {
+                            String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
+                            if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
+                                frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
+                            }
+                        }
+                    }
+                    frag.append('}');
+                    String fragment = frag.toString();
+                    int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                    if (!firstArg) fragBytes += 1; // comma separator
+                    planByteCount += fragBytes;
+                    if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                    if (!firstArg) sb.append(',');
+                    firstArg = false;
+                    sb.append(fragment);
+                }
             } catch (Exception e) {
                 if (isCompatibilityException(e)) {
                     log.debug("TopQueryQuery: EXPLAIN_ARGUMENT query failed (compatibility) for execIdHex={}: {}", execIdHex, e.getMessage());

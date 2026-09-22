@@ -1476,6 +1476,88 @@ class TopQueryQueryTest {
     }
 
     @Test
+    void xqueryArgumentPredicateOmittedWhenPredicateRowPrecedesQlangRow() throws Exception {
+        // EXPLAIN_ARGUMENT rows are ordered by ARGUMENT_TYPE, so PREDICATE sorts before QLANG
+        // for the same operator. Buffering all rows before classification must ensure the
+        // XQuery PREDICATE value is still suppressed even when it arrives first in the result set.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("XISCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(2.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: PREDICATE row arrives BEFORE QLANG=XQUERY for the same operator (op 1).
+        // This reflects the actual ORDER BY ARGUMENT_TYPE sort order from the DB2 explain tables.
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1, 1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREDICATE", "QLANG");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("/order[id=\"secret-42\"]", "XQUERY");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(false);
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0C});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execPredFirst", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0C});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execPredFirst", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // XQuery PREDICATE value must not leak even though its row arrived before QLANG
+        assertThat(plan).doesNotContain("secret-42");
+        // The QLANG row itself should appear (with no value — QLANG is not in the safe allowlist)
+        assertThat(plan).contains("\"type\":\"QLANG\"");
+    }
+
+    @Test
     void predicateTextOmittedWhenArgumentCollectionDegrades() throws Exception {
         // When EXPLAIN_ARGUMENT throws SQLFeatureNotSupportedException (compatibility degradation),
         // xqueryArgCollectionSucceeded stays false. Step 2e must suppress ALL predicate text

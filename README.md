@@ -226,6 +226,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db2.member` | Db2 member number |
 | `db2.cpu_time` | CPU time in seconds (default path only; omitted on snapshot path) |
 | `db2.wait_time` | Lock wait time in seconds (Db2 10.5+ default path only) |
+| `db2.query_plan.hash` | Db2 EXECUTABLE_ID hex string identifying the active plan section; Db2 10.5+ default path only |
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
