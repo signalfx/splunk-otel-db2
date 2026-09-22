@@ -37,12 +37,14 @@ public class SqlActivityQuery {
         "BINDS_PRECOMPILES, IMPLICIT_REBINDS, TOTAL_COMPILATIONS, TOTAL_COMPILE_TIME " +
         "FROM TABLE(MON_GET_DATABASE(-2)) AS T";
 
-    // SNAP_GET_DB takes -1 (current partition); it reports the partition as DBPARTITIONNUM.
+    // The member argument is omitted deliberately: that is SNAP_GET_DB's "one row per active
+    // member" form, matching MON_GET_DATABASE(-2) above. Passing -1 would return only the
+    // current member, and -2 returns a single aggregated row with a NULL DBPARTITIONNUM.
     private static final String SNAPSHOT_SQL =
         "SELECT DBPARTITIONNUM, " +
         "COMMIT_SQL_STMTS, ROLLBACK_SQL_STMTS, ROWS_SELECTED, " +
         "INT_DEADLOCK_ROLLBACKS, INT_AUTO_REBINDS " +
-        "FROM TABLE(SNAP_GET_DB('', -1)) AS S";
+        "FROM TABLE(SNAP_GET_DB('')) AS S";
 
     private final Supplier<Connection> connSupplier;
     private final String dbName;

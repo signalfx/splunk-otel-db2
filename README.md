@@ -453,6 +453,9 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
 
 -- Snapshot monitor path (use_snapshot_monitor: true)
 -- Note: blocking detection is NOT available on this path.
+-- IMPORTANT: the EXECUTE grants below are necessary but NOT sufficient. Every SNAP_GET_*
+-- function additionally requires the user to hold SYSMON, SYSCTRL, SYSMAINT or SYSADM
+-- instance-level authority — see the note after this block.
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
 -- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
@@ -467,6 +470,28 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
 ```
 
 > **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
+
+### Snapshot monitor authority (`use_snapshot_monitor: true`)
+
+The `SNAP_GET_*` functions are gated on **instance-level authority in addition to the `EXECUTE` grant**. DB2 requires one of `SYSMON`, `SYSCTRL`, `SYSMAINT` or `SYSADM`. A least-privilege monitoring user that has only been granted `EXECUTE` will silently receive no snapshot data — the receiver logs a warning and the snapshot-only metrics and dimensions are simply absent.
+
+`SYSMON` is the least-privileged option and is the one to use. It is granted by OS group, not by SQL, so it needs a DBM CFG change and an instance restart:
+
+```bash
+# Run as the instance owner. Replace db2mon_grp with the OS group your monitoring user belongs to.
+db2 UPDATE DBM CFG USING SYSMON_GROUP db2mon_grp
+db2stop force && db2start
+```
+
+Verify the user actually holds it:
+
+```sql
+SELECT AUTHORITY, D_USER, D_GROUP
+FROM TABLE(SYSPROC.AUTH_LIST_AUTHORITIES_FOR_AUTHID(CURRENT USER, 'U'))
+WHERE AUTHORITY = 'SYSMON';
+```
+
+A `Y` in `D_USER` or `D_GROUP` means the authority is held. If both are `N`, the snapshot path will not return data regardless of the `EXECUTE` grants. This applies to the query sample snapshot path (`SNAP_GET_APPL_INFO`, `SNAP_GET_STMT`) as well as the SQL activity metrics (`SNAP_GET_DB`).
 
 ## Installation
 

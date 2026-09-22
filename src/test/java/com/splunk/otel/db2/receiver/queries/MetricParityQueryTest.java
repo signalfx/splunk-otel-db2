@@ -398,6 +398,50 @@ class MetricParityQueryTest {
     // ── multi-member ─────────────────────────────────────────────────────────
 
     @Test
+    void snapshotMetricsCoverEveryMember() throws Exception {
+        ResultSet monRs = singleRow(0, cols("DYNAMIC_SQL_STMTS", 11));
+
+        // SNAP_GET_DB('') returns one row per active member, reported as DBPARTITIONNUM.
+        ResultSet snapRs = Mockito.mock(ResultSet.class);
+        when(snapRs.next()).thenReturn(true, true, false);
+        when(snapRs.getInt("DBPARTITIONNUM")).thenReturn(0, 1);
+        when(snapRs.getLong(anyString())).thenReturn(0L);
+        when(snapRs.getLong("COMMIT_SQL_STMTS")).thenReturn(61L, 62L);
+
+        Map<String, ResultSet> routes = new HashMap<>();
+        routes.put("MON_GET_DATABASE", monRs);
+        routes.put("SNAP_GET_DB", snapRs);
+        Connection conn = routingConnection(routes);
+        new SqlActivityQuery(() -> conn, "TESTDB", meter, true);
+
+        Collection<MetricData> metrics = collect();
+        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "commit"))).isEqualTo(61);
+        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(1, "db2.statement_type", "commit"))).isEqualTo(62);
+    }
+
+    @Test
+    void snapshotSqlRequestsAllMembersNotJustTheCurrentOne() throws Exception {
+        // -1 would scope to the current member only, and -2 returns one aggregated row with a
+        // NULL DBPARTITIONNUM that getInt would silently report as member 0.
+        Map<String, ResultSet> routes = new HashMap<>();
+        routes.put("MON_GET_DATABASE", singleRow(0, cols("DYNAMIC_SQL_STMTS", 11)));
+        routes.put("SNAP_GET_DB", singleRow(0, cols("COMMIT_SQL_STMTS", 51)));
+        Connection conn = routingConnection(routes);
+        Statement st = conn.createStatement();
+        new SqlActivityQuery(() -> conn, "TESTDB", meter, true);
+        collect();
+
+        org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+        Mockito.verify(st, Mockito.atLeastOnce()).executeQuery(sql.capture());
+        String snapshotSql = sql.getAllValues().stream()
+            .filter(s -> s.contains("SNAP_GET_DB"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("snapshot query never issued"));
+        assertThat(snapshotSql).contains("SNAP_GET_DB('')");
+        assertThat(snapshotSql).doesNotContain("-1").doesNotContain("-2");
+    }
+
+    @Test
     void eachMemberProducesItsOwnSeries() throws Exception {
         ResultSet rs = Mockito.mock(ResultSet.class);
         when(rs.next()).thenReturn(true, true, false);

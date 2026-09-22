@@ -325,4 +325,63 @@ class Db2ReceiverSnapshotIntegrationTest {
             meterProvider.shutdown();
         }
     }
+
+    /**
+     * Gates the SNAP_GET_DB supplement in SqlActivityQuery. The snapshot-only columns have no
+     * MON_GET_* equivalent, so without this the SQL would be exercised by nothing: a failure is
+     * only logged as a warning. These are asynchronous instruments, so a failed query records
+     * no measurement and the dimensions below are simply absent.
+     */
+    @Test
+    void snapshotOnlyMetricDimensionsAreEmitted() {
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2Receiver receiver = new Db2Receiver(
+            buildSnapshotConfig(), meterProvider.get("splunk-otel-db2"), (Logger) null);
+        receiver.start();
+
+        try {
+            // db2.deadlock.rollback.count comes only from SNAP_GET_DB.
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .until(() -> metricExporter.getFinishedMetricItems().stream()
+                    .anyMatch(m -> m.getName().equals("db2.deadlock.rollback.count")));
+
+            // statement_type commit/rollback, row_operation selected and rebind_type auto are
+            // all snapshot-only dimensions on instruments shared with the MON_GET_* path.
+            assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
+                assertThat(metric.getName()).isEqualTo("db2.sql.statement.count");
+                assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
+                    assertThat(pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey("db2.statement_type")))
+                        .isIn("commit", "rollback"));
+            });
+
+            assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
+                assertThat(metric.getName()).isEqualTo("db2.rows.count");
+                assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
+                    assertThat(pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey("db2.row_operation")))
+                        .isEqualTo("selected"));
+            });
+
+            assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
+                assertThat(metric.getName()).isEqualTo("db2.sql.rebind.count");
+                assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
+                    assertThat(pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey("db2.rebind_type")))
+                        .isEqualTo("auto"));
+            });
+        } finally {
+            receiver.stop();
+            meterProvider.shutdown();
+        }
+    }
 }
