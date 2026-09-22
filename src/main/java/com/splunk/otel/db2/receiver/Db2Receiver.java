@@ -4,8 +4,11 @@ import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.receiver.queries.BufferpoolQuery;
 import com.splunk.otel.db2.receiver.queries.DatabaseQuery;
 import com.splunk.otel.db2.receiver.queries.QuerySampleQuery;
+import com.splunk.otel.db2.receiver.queries.SortAndDirectIoQuery;
+import com.splunk.otel.db2.receiver.queries.SqlActivityQuery;
 import com.splunk.otel.db2.receiver.queries.TablespaceQuery;
 import com.splunk.otel.db2.receiver.queries.TopQueryQuery;
+import com.splunk.otel.db2.receiver.queries.TransactionLogQuery;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.metrics.Meter;
 import org.slf4j.LoggerFactory;
@@ -83,6 +86,9 @@ public class Db2Receiver {
         new DatabaseQuery(metricsConnSupplier, config.getDatabase(), meter);
         new BufferpoolQuery(metricsConnSupplier, config.getDatabase(), meter);
         new TablespaceQuery(metricsConnSupplier, config.getDatabase(), meter);
+        new SqlActivityQuery(metricsConnSupplier, config.getDatabase(), meter, config.isUseSnapshotMonitor());
+        new SortAndDirectIoQuery(metricsConnSupplier, config.getDatabase(), meter);
+        new TransactionLogQuery(metricsConnSupplier, config.getDatabase(), meter);
 
         if (otelLogger != null && config.getEvents().getDbServerQuerySample().isEnabled()) {
             int db2Version = detectDb2Version(metricsConnSupplier);

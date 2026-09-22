@@ -52,7 +52,8 @@ receivers:
     query_sample_collection:
       collection_interval: "10s"      # how often to sample active queries
       max_rows_per_query: 100         # max active sessions fetched per sample
-    use_snapshot_monitor: false        # set true to use SNAP_GET_STMT fallback path
+    use_snapshot_monitor: false        # set true for the SNAP_GET_STMT query sample path,
+                                       # and to add SNAP_GET_DB SQL activity metrics
     tls:
       insecure: true                   # set false to enable TLS
 
@@ -205,6 +206,65 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 | Metric | Type | Unit | Description |
 |---|---|---|---|
 | `db2.tablespace.size` | UpDownCounter | `By` | Tablespace size broken down by usage |
+
+### SQL and row activity (`MON_GET_DATABASE`)
+
+Additional attributes: `db2.statement_type` (`dynamic`, `static`, `failed`, `select`, `uid`, `ddl`, and `commit`/`rollback` when `use_snapshot_monitor` is enabled), `db2.transaction_type` (`commit`, `rollback`), `db2.row_operation` (`read`, `returned`, `modified`, `inserted`, `updated`, `deleted`, and `selected` when `use_snapshot_monitor` is enabled), `db2.internal` (`true` when initiated by the database manager rather than an application), `db2.rebind_type` (`implicit`, and `auto` when `use_snapshot_monitor` is enabled).
+
+| Metric | Type | Unit | Description |
+|---|---|---|---|
+| `db2.sql.statement.count` | Counter | `{statement}` | SQL statements executed, by statement type |
+| `db2.transaction.count` | Counter | `{transaction}` | Transactions committed or rolled back |
+| `db2.rows.count` | Counter | `{row}` | Rows affected, by operation |
+| `db2.sql.compilation.count` | Counter | `{compilation}` | SQL statement compilations |
+| `db2.sql.compilation.time` | Counter | `s` | Time spent compiling SQL statements |
+| `db2.sql.bind.count` | Counter | `{bind}` | Binds and precompiles attempted |
+| `db2.sql.rebind.count` | Counter | `{rebind}` | Packages rebound, by rebind type |
+| `db2.deadlock.rollback.count` | Counter | `{rollback}` | Internal rollbacks caused by a deadlock (requires `use_snapshot_monitor`) |
+
+### Sort and direct I/O (`MON_GET_DATABASE`)
+
+Additional attribute: `db2.direction` (`read`, `write`).
+
+| Metric | Type | Unit | Description |
+|---|---|---|---|
+| `db2.sort.heap.allocated` | Gauge | `{page}` | Allocated pages of sort heap space |
+| `db2.sort.shared_heap.allocated` | Gauge | `By` | Shared sort memory allocated |
+| `db2.sort.shared_heap.max` | Gauge | `By` | Shared sort memory high watermark |
+| `db2.sort.time` | Counter | `s` | Time spent performing section sorts |
+| `db2.sort.active` | UpDownCounter | `{sort}` | Sorts currently active |
+| `db2.hash_join.active` | UpDownCounter | `{hash_join}` | Hash joins currently active |
+| `db2.olap_function.active` | UpDownCounter | `{function}` | OLAP functions currently active |
+| `db2.direct.io.count` | Counter | `{operation}` | Read/write operations bypassing the buffer pool |
+| `db2.direct.io.request.count` | Counter | `{request}` | Direct read/write requests |
+| `db2.direct.io.time` | Counter | `s` | Time spent on direct reads/writes |
+
+`db2.sort.heap.allocated` is reported in pages because DB2 does not state a page size for that element. `db2.sort.shared_heap.*` are documented in 4KB pages and are converted to bytes.
+
+### Transaction log (`MON_GET_TRANSACTION_LOG`)
+
+Additional attributes: `db2.direction` (`read`, `write`), `db2.log_space_type` (`secondary`, `total`).
+
+| Metric | Type | Unit | Description |
+|---|---|---|---|
+| `db2.log.space.available` | Gauge | `By` | Active log space not held by uncommitted transactions |
+| `db2.log.space.used` | Gauge | `By` | Active log space currently used |
+| `db2.log.space.used.max` | Gauge | `By` | Peak log space used, by log space type |
+| `db2.log.secondary_files.allocated` | Gauge | `{file}` | Secondary log files currently in use |
+| `db2.log.io.pages` | Counter | `{page}` | Log pages read from / written to disk |
+| `db2.log.io.time` | Counter | `s` | Logger time spent reading from / writing to disk |
+| `db2.log.io.count` | Counter | `{operation}` | Logger I/O requests |
+| `db2.log.partial_page_io.count` | Counter | `{operation}` | Logger writes of partial log data |
+| `db2.log.buffer_full.count` | Counter | `{wait}` | Times agents waited for log data to flush |
+| `db2.log.buffer_hit.count` | Counter | `{read}` | Times an agent read log data from the log buffer |
+| `db2.log.recovery.redo_size` | Gauge | `By` | Log that would be redone for crash recovery |
+| `db2.log.dirty_pages.held_size` | Gauge | `By` | Log held by the oldest dirty page |
+| `db2.log.hadr.wait.time` | Counter | `s` | Logger time waiting on HADR log replication |
+| `db2.log.hadr.wait.count` | Counter | `{wait}` | Times the logger waited on HADR log replication |
+| `db2.log.disk_wait.time` | Counter | `s` | Agent time waiting for log writes to disk |
+| `db2.log.disk_wait.count` | Counter | `{wait}` | Times agents waited for log writes to disk |
+
+`db2.log.disk_wait.*` come from `MON_GET_DATABASE` rather than `MON_GET_TRANSACTION_LOG`, which is where DB2 exposes those two elements. `FIRST_ACTIVE_LOG`, `LAST_ACTIVE_LOG` and `CURRENT_ACTIVE_LOG` are log file numbers rather than measurements and are not emitted.
 
 ## Query samples (log records)
 
@@ -367,6 +427,7 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TRANSACTION_LOG TO USER db2mon;
 
 -- Top query collection (events.db.server.top_query.enabled: true)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
@@ -395,6 +456,9 @@ GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
 -- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
 -- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
+-- SNAP_GET_DB supplies the SQL activity metrics that have no MON_GET_* equivalent
+-- (see "SQL and row activity" under Metrics).
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_DB TO USER db2mon;
 -- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
 --   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
 --   db2stop force && db2start
