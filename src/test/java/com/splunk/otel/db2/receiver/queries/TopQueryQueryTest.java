@@ -1651,10 +1651,11 @@ class TopQueryQueryTest {
     }
 
     @Test
-    void predicateTextOmittedWhenArgumentCollectionDegrades() throws Exception {
+    void predicateTextSafeWhenArgumentCollectionDegrades() throws Exception {
         // When EXPLAIN_ARGUMENT throws SQLFeatureNotSupportedException (compatibility degradation),
-        // xqueryArgCollectionSucceeded stays false. Step 2e must suppress ALL predicate text
-        // to avoid leaking XQuery literals that the SQL obfuscator cannot safely redact.
+        // predicate text is still emitted because pre-redaction makes it safe regardless of
+        // language classification — double-quoted string literals are replaced with "?" before
+        // the SQL obfuscator runs, so XQuery literals cannot leak.
         CallableStatement cs = mock(CallableStatement.class);
         when(cs.getString(3)).thenReturn("TESTUSER");
         when(cs.getString(4)).thenReturn("TESTUSER");
@@ -1726,9 +1727,11 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
         assertThat(plan).isNotNull();
-        // XQuery literal must not appear — argument collection degraded, all predicates suppressed
-        assertThat(plan).doesNotContain("999-99-9999").doesNotContain("ssn");
-        assertThat(plan).doesNotContain("\"text\"");
+        // The literal value is pre-redacted to "?" — the raw SSN must not appear
+        assertThat(plan).doesNotContain("999-99-9999");
+        // The element name "ssn" is not a literal — it may appear in the predicate text
+        // "text" key must be present — predicate is emitted (not suppressed) after pre-redaction
+        assertThat(plan).contains("\"text\"");
     }
 
     @Test

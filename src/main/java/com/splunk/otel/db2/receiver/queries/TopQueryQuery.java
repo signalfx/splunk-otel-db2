@@ -754,7 +754,6 @@ public class TopQueryQuery {
             // No language classification is needed.
             sb.append("],\"arguments\":[");
             planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-            boolean xqueryArgCollectionSucceeded = false;
             if (!planBudgetExceeded) {
             try {
                 boolean firstArg = true;
@@ -796,7 +795,6 @@ public class TopQueryQuery {
                         }
                     }
                 }
-                xqueryArgCollectionSucceeded = true;
             } catch (Exception e) {
                 if (isCompatibilityException(e)) {
                     log.debug("TopQueryQuery: EXPLAIN_ARGUMENT query failed (compatibility) for execIdHex={}: {}", execIdHex, e.getMessage());
@@ -866,13 +864,11 @@ public class TopQueryQuery {
                                 // In SQL, "..." is a delimited identifier (not PII); in XQuery,
                                 // "..." is a string literal that must be redacted. Pre-redacting
                                 // makes obfuscation safe for both languages without requiring
-                                // operator language classification.
-                                // If argument collection degraded entirely, suppress all predicates.
-                                if (xqueryArgCollectionSucceeded) {
-                                    String preRedacted = redactDoubleQuotedStrings(rawText.trim());
-                                    String ob = SqlObfuscator.obfuscateFragment(preRedacted);
-                                    if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
-                                }
+                                // operator language classification — so predicate safety does not
+                                // depend on EXPLAIN_ARGUMENT collection succeeding.
+                                String preRedacted = redactDoubleQuotedStrings(rawText.trim());
+                                String ob = SqlObfuscator.obfuscateFragment(preRedacted);
+                                if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
                             }
                             StringBuilder frag = new StringBuilder();
                             frag.append("{\"op\":").append(opId)
