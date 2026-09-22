@@ -1468,8 +1468,8 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
         assertThat(plan).isNotNull();
-        // XQuery predicate text must be omitted — literal must not leak
-        assertThat(plan).doesNotContain("123-45-6789").doesNotContain("ssn");
+        // XQuery string literal must be redacted — "123-45-6789" is replaced before obfuscation
+        assertThat(plan).doesNotContain("123-45-6789");
         // SQL predicate on op 2 must still appear (obfuscated)
         assertThat(plan).contains("\"how\":\"SARG\"");
         assertThat(plan).contains("Q2.ID");
@@ -1558,12 +1558,12 @@ class TopQueryQueryTest {
     }
 
     @Test
-    void predicateTextOmittedForOperatorWithNoQlangRow() throws Exception {
-        // EXPLAIN_ARGUMENT collection succeeds but the operator that has a predicate
-        // returned NO rows at all (IBM may omit argument rows for some operator types, and
-        // section-explain can omit QLANG even when the statement is XQuery). The operator
-        // is therefore absent from both xqueryOpIds and confirmedSqlOpIds. Its predicate
-        // text must be suppressed — unknown language is treated as unsafe.
+    void predicateTextDoubleQuotedLiteralRedactedWhenNoQlangRow() throws Exception {
+        // EXPLAIN_ARGUMENT collection succeeds but the XQuery operator's predicate returns
+        // NO QLANG row (IBM may omit it, or section-explain can omit some argument types).
+        // The double-quoted string literal inside the predicate must still be redacted via
+        // redactDoubleQuotedStrings() before SQL obfuscation — no language classification
+        // is needed because double-quoted content is always treated as a potential literal.
         CallableStatement cs = mock(CallableStatement.class);
         when(cs.getString(3)).thenReturn("TESTUSER");
         when(cs.getString(4)).thenReturn("TESTUSER");
@@ -1644,9 +1644,9 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
         assertThat(plan).isNotNull();
-        // Op 1's predicate text must be suppressed — language unknown, no EXPLAIN_ARGUMENT rows
-        assertThat(plan).doesNotContain("secret").doesNotContain("customer");
-        // Op 2's predicate text must still appear — confirmed SQL via EXPLAIN_ARGUMENT
+        // Op 1: double-quoted XQuery string literal must be redacted even with no QLANG row
+        assertThat(plan).doesNotContain("secret");
+        // Op 2's predicate text must still appear — plain SQL, no double-quoted literals
         assertThat(plan).contains("Q2.ID");
     }
 
@@ -2119,5 +2119,119 @@ class TopQueryQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isNull();
+    }
+
+    // --- redactDoubleQuotedStrings unit tests ---
+
+    @Test
+    void redactDoubleQuotedStrings_replacesLiteralContent() {
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("/order[id=\"secret\"]"))
+            .isEqualTo("/order[id=\"?\"]");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_handlesEscapedDoubleQuotes() {
+        // "O""Brien" — "" escape inside a double-quoted body
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("\"O\"\"Brien\""))
+            .isEqualTo("\"?\"");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_multipleLiteralsInExpression() {
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("\"a\" AND \"b\""))
+            .isEqualTo("\"?\" AND \"?\"");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_noDoubleQuotes_unchanged() {
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("Q1.ID = 42"))
+            .isEqualTo("Q1.ID = 42");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_unterminatedQuote_replacedSafely() {
+        // Unterminated "secret — body consumed to end of input, replaced with ?
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("\"unterminated"))
+            .isEqualTo("\"?\"");
+    }
+
+    @Test
+    void xqueryPredicateWithNoQlangRow_doubleQuotedLiteralRedacted() throws Exception {
+        // Regression: argument collection succeeds and an XQuery operator returns a
+        // PREDICATE-typed ARGUMENT_VALUE with a double-quoted literal, but no QLANG row.
+        // The literal must be redacted via redactDoubleQuotedStrings without requiring
+        // language classification.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("XISCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: only a PREDICATE row, no QLANG row for this operator
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREDICATE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("/product[sku=\"P-9001\"]");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(false);
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0E});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQNoLang", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0E});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQNoLang", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // Double-quoted literal "P-9001" must be redacted even without a QLANG row
+        assertThat(plan).doesNotContain("P-9001");
     }
 }

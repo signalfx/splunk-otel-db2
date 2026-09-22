@@ -747,27 +747,17 @@ public class TopQueryQuery {
             // catch returns null (keeping the entry uncached).
 
             // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
-            // Two-pass approach: buffer ALL rows first to build language classification, then
-            // serialize values. This ensures full operator classification before any
-            // PREDICATE-typed value is processed — rows are not guaranteed to arrive with
-            // QLANG before PREDICATE for the same operator.
-            //
-            // Language classification (fail-closed):
-            //   xqueryOpIds       — operators with QLANG=XQUERY: XQuery syntax, suppress predicate.
-            //   confirmedSqlOpIds — operators that appeared in EXPLAIN_ARGUMENT without QLANG=XQUERY:
-            //                       language positively identified as SQL.
-            //   absent operators  — no EXPLAIN_ARGUMENT rows at all: language unknown → suppress.
-            //   xqueryArgCollectionSucceeded=false — query degraded → suppress all predicates.
+            // For PREDICATE-typed values (which may be SQL or XQuery), double-quoted content
+            // is pre-redacted before SQL obfuscation via redactDoubleQuotedStrings(). This is
+            // safe regardless of operator language: in SQL, "..." is a delimited identifier
+            // (never PII); in XQuery, "..." is a string literal that must be redacted.
+            // No language classification is needed.
             sb.append("],\"arguments\":[");
             planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-            java.util.Set<Integer> xqueryOpIds        = new java.util.HashSet<>();
-            java.util.Set<Integer> confirmedSqlOpIds  = new java.util.HashSet<>();
             boolean xqueryArgCollectionSucceeded = false;
-            // Buffered rows: int[opId], String[argType], String[rawValue]
-            java.util.List<Object[]> argRows = new java.util.ArrayList<>();
             if (!planBudgetExceeded) {
             try {
-                // Pass 1: read all rows and build operator language classification
+                boolean firstArg = true;
                 try (PreparedStatement ps = conn.prepareStatement(sqlArg)) {
                     ps.setQueryTimeout(queryTimeoutSeconds);
                     ps.setString(1, explainRequester); ps.setTimestamp(2, explainTime);
@@ -778,53 +768,35 @@ public class TopQueryQuery {
                             int    opId    = rs.getInt("OPERATOR_ID");
                             String argType = rs.getString("ARGUMENT_TYPE");
                             String rawVal  = rs.getString("ARGUMENT_VALUE");
-                            if ("QLANG".equalsIgnoreCase(argType) && "XQUERY".equalsIgnoreCase(rawVal)) {
-                                xqueryOpIds.add(opId);
+                            StringBuilder frag = new StringBuilder();
+                            frag.append("{\"op\":").append(opId)
+                                .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
+                            // ARGUMENT_VALUE may contain literals. For SQL-syntax types use the
+                            // SQL obfuscator; for PREDICATE-typed values pre-redact double-quoted
+                            // content first so XQuery string literals are never passed through.
+                            // Unknown or non-SQL types (XPATH) are omitted entirely.
+                            if (rawVal != null && isSafeArgumentType(argType)) {
+                                String toObf = "PREDICATE".equalsIgnoreCase(argType)
+                                    ? redactDoubleQuotedStrings(rawVal.trim())
+                                    : rawVal.trim();
+                                String obfVal = SqlObfuscator.obfuscateFragment(toObf);
+                                if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
+                                    frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
+                                }
                             }
-                            argRows.add(new Object[]{opId, argType, rawVal});
+                            frag.append('}');
+                            String fragment = frag.toString();
+                            int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                            if (!firstArg) fragBytes += 1; // comma separator
+                            planByteCount += fragBytes;
+                            if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
+                            if (!firstArg) sb.append(',');
+                            firstArg = false;
+                            sb.append(fragment);
                         }
                     }
-                }
-                // confirmedSqlOpIds = operators seen in EXPLAIN_ARGUMENT minus XQuery operators.
-                // Operators absent from EXPLAIN_ARGUMENT entirely have unknown language and are
-                // not added here — their predicate text is suppressed by the check below.
-                for (Object[] row : argRows) {
-                    int opId = (Integer) row[0];
-                    if (!xqueryOpIds.contains(opId)) confirmedSqlOpIds.add(opId);
                 }
                 xqueryArgCollectionSucceeded = true;
-                // Pass 2: serialize argument rows now that classification is complete
-                boolean firstArg = true;
-                for (Object[] row : argRows) {
-                    int    opId    = (Integer) row[0];
-                    String argType = (String)  row[1];
-                    String rawVal  = (String)  row[2];
-                    StringBuilder frag = new StringBuilder();
-                    frag.append("{\"op\":").append(opId)
-                        .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
-                    // ARGUMENT_VALUE may contain literals. For types that use SQL syntax
-                    // (e.g. SORTKEY, PREDICATE) use the SQL obfuscator. Unknown or non-SQL
-                    // types (XPATH) are omitted because the SQL lexer cannot safely redact them.
-                    // For PREDICATE-typed values: require positive SQL classification — omit for
-                    // XQuery operators and for operators with unknown language (absent from args).
-                    if (rawVal != null && isSafeArgumentType(argType)) {
-                        if (!"PREDICATE".equalsIgnoreCase(argType) || confirmedSqlOpIds.contains(opId)) {
-                            String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
-                            if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
-                                frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
-                            }
-                        }
-                    }
-                    frag.append('}');
-                    String fragment = frag.toString();
-                    int fragBytes = fragment.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-                    if (!firstArg) fragBytes += 1; // comma separator
-                    planByteCount += fragBytes;
-                    if (planByteCount > PLAN_MAX_BYTES) { planBudgetExceeded = true; break; }
-                    if (!firstArg) sb.append(',');
-                    firstArg = false;
-                    sb.append(fragment);
-                }
             } catch (Exception e) {
                 if (isCompatibilityException(e)) {
                     log.debug("TopQueryQuery: EXPLAIN_ARGUMENT query failed (compatibility) for execIdHex={}: {}", execIdHex, e.getMessage());
@@ -890,14 +862,15 @@ public class TopQueryQuery {
                             String rawText    = rs.getString("PREDICATE_TEXT");
                             String obfText    = null;
                             if (rawText != null && !rawText.isBlank()) {
-                                // Emit predicate text only when this operator is positively
-                                // classified as SQL — i.e. it appeared in EXPLAIN_ARGUMENT and
-                                // had no QLANG=XQUERY row. Operators absent from EXPLAIN_ARGUMENT
-                                // (unknown language) and all XQuery operators are suppressed.
-                                // xqueryArgCollectionSucceeded=false means the query degraded
-                                // entirely — all predicates are suppressed.
-                                if (xqueryArgCollectionSucceeded && confirmedSqlOpIds.contains(opId)) {
-                                    String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
+                                // Pre-redact double-quoted content before SQL obfuscation.
+                                // In SQL, "..." is a delimited identifier (not PII); in XQuery,
+                                // "..." is a string literal that must be redacted. Pre-redacting
+                                // makes obfuscation safe for both languages without requiring
+                                // operator language classification.
+                                // If argument collection degraded entirely, suppress all predicates.
+                                if (xqueryArgCollectionSucceeded) {
+                                    String preRedacted = redactDoubleQuotedStrings(rawText.trim());
+                                    String ob = SqlObfuscator.obfuscateFragment(preRedacted);
                                     if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
                                 }
                             }
@@ -992,6 +965,46 @@ public class TopQueryQuery {
                 // Unknown or non-SQL types (e.g. XPATH) — omit value rather than risk leaking literals.
                 return false;
         }
+    }
+
+    /**
+     * Replaces each double-quoted string body with {@code ?} so that XQuery string
+     * literals (which use double-quote syntax) are redacted before the SQL obfuscator
+     * runs. In SQL, {@code "..."} is a delimited identifier whose content is never PII;
+     * replacing its body with {@code ?} is therefore safe for both languages.
+     *
+     * Handles {@code ""} escape sequences inside the quoted body. An unterminated
+     * double-quoted sequence (reached end-of-input) is replaced with {@code ?} to avoid
+     * leaking a partial literal.
+     */
+    static String redactDoubleQuotedStrings(String s) {
+        if (s == null || s.indexOf('"') < 0) return s;
+        StringBuilder sb = new StringBuilder(s.length());
+        int i = 0;
+        int len = s.length();
+        while (i < len) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                i++; // skip opening quote
+                // consume body, handling "" escape
+                while (i < len) {
+                    char q = s.charAt(i);
+                    i++;
+                    if (q == '"') {
+                        if (i < len && s.charAt(i) == '"') {
+                            i++; // "" escape — skip both
+                        } else {
+                            break; // closing quote
+                        }
+                    }
+                }
+                sb.append('"').append('?').append('"');
+            } else {
+                sb.append(c);
+                i++;
+            }
+        }
+        return sb.toString();
     }
 
     // Only SQLFeatureNotSupportedException is a safe compatibility signal — it means
