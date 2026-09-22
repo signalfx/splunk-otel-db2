@@ -66,8 +66,8 @@ class Db2ReceiverSnapshotIntegrationTest {
         config.setPassword(db2.getPassword());
         config.setDatabase(db2.getDatabaseName().toUpperCase());
         config.setCollectionInterval("2s");
-        config.setQuerySampleEnabled(true);
-        config.setQuerySampleInterval("1s");
+        config.getEvents().getDbServerQuerySample().setEnabled(true);
+        config.getQuerySampleCollection().setCollectionInterval("1s");
         config.setUseSnapshotMonitor(true);
         config.getTls().setInsecure(true);
         return config;

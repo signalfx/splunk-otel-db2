@@ -230,19 +230,127 @@ class Db2ConfigTest {
             "    username: db2inst1\n" +
             "    password: secret\n" +
             "    database: SAMPLE\n" +
-            "    query_sample_enabled: true\n" +
+            "    events:\n" +
+            "      db.server.query_sample:\n" +
+            "        enabled: true\n" +
             "exporters:\n" +
             "  otlp:\n" +
             "    endpoint: http://collector:4317\n"
         );
         Db2Config cfg = Db2Config.load(f.toString());
-        assertThat(cfg.getReceivers().get(0).isQuerySampleEnabled()).isTrue();
+        assertThat(cfg.getReceivers().get(0).getEvents().getDbServerQuerySample().isEnabled()).isTrue();
     }
 
     @Test
     void querySampleEnabledDefaultIsFalse() {
-        assertThat(new Db2ReceiverConfig().isQuerySampleEnabled()).isFalse();
+        assertThat(new Db2ReceiverConfig().getEvents().getDbServerQuerySample().isEnabled()).isFalse();
     }
+
+    @Test
+    void topQueryCollectionMaxExplainDefaultIsZero() {
+        assertThat(new Db2ReceiverConfig().getTopQueryCollection().getMaxExplainEachInterval()).isEqualTo(0);
+    }
+
+    @Test
+    void topQueryCollectionMaxExplainZeroDisablesPlanCollection() {
+        // 0 is the sentinel for "plan disabled" — must not throw
+        Db2ReceiverConfig.TopQueryCollectionConfig tqc = new Db2ReceiverConfig.TopQueryCollectionConfig();
+        tqc.setMaxExplainEachInterval(0); // should not throw
+        assertThat(tqc.getMaxExplainEachInterval()).isEqualTo(0);
+    }
+
+    @Test
+    void topQueryCollectionMaxExplainNegativeFails() {
+        Db2ReceiverConfig.TopQueryCollectionConfig tqc = new Db2ReceiverConfig.TopQueryCollectionConfig();
+        assertThatThrownBy(() -> tqc.setMaxExplainEachInterval(-5))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("max_explain_each_interval");
+    }
+
+    @Test
+    void topQueryCollectionMaxQuerySampleCountDefaultIsOneThousand() {
+        assertThat(new Db2ReceiverConfig().getTopQueryCollection().getMaxQuerySampleCount()).isEqualTo(1000);
+    }
+
+    @Test
+    void topQueryCollectionMaxQuerySampleCountZeroFails() {
+        Db2ReceiverConfig.TopQueryCollectionConfig tqc = new Db2ReceiverConfig.TopQueryCollectionConfig();
+        assertThatThrownBy(() -> tqc.setMaxQuerySampleCount(0))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("max_query_sample_count");
+    }
+
+    @Test
+    void topQueryCollectionIsParsedFromNestedBlock() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    top_query_enabled: true\n" +
+            "    top_query_collection:\n" +
+            "      max_query_sample_count: 2000\n" +
+            "      max_explain_each_interval: 5\n" +
+            "      query_plan_cache_size: 500\n" +
+            "      query_plan_cache_ttl: 5m\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2ReceiverConfig rc = Db2Config.load(f.toString()).getReceivers().get(0);
+        assertThat(rc.getTopQueryCollection().getMaxQuerySampleCount()).isEqualTo(2000);
+        assertThat(rc.getTopQueryCollection().getMaxExplainEachInterval()).isEqualTo(5);
+        assertThat(rc.getTopQueryCollection().getQueryPlanCacheSize()).isEqualTo(500);
+        assertThat(rc.getTopQueryCollection().getQueryPlanCacheTtlDuration())
+            .isEqualTo(java.time.Duration.ofMinutes(5));
+    }
+
+    @Test
+    void topQueryCollectionExplainSchemaIsParsed() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    top_query_enabled: true\n" +
+            "    top_query_collection:\n" +
+            "      explain_schema: DB2MON\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        Db2ReceiverConfig rc = Db2Config.load(f.toString()).getReceivers().get(0);
+        assertThat(rc.getTopQueryCollection().getExplainSchema()).isEqualTo("DB2MON");
+    }
+
+    @Test
+    void topQueryCollectionExplainSchemaDefaultsToEmpty() {
+        assertThat(new Db2ReceiverConfig().getTopQueryCollection().getExplainSchema()).isEmpty();
+    }
+
+    @Test
+    void topQueryCollectionNonMapFails() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    top_query_collection: true\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+        assertThatThrownBy(() -> Db2Config.load(f.toString()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("top_query_collection");
+    }
+
 
     @Test
     void unsupportedReceiverTypeFailsAtLoad() throws Exception {

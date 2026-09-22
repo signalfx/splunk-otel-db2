@@ -32,6 +32,8 @@ public final class TopQueryEvent {
     public static final AttributeKey<Long>   DB2_SORT_OVERFLOWS  = AttributeKey.longKey("db2.sort_overflows");
     public static final AttributeKey<Long>   DB2_ROWS_MODIFIED   = AttributeKey.longKey("db2.rows_modified");
     public static final AttributeKey<String> DB2_STMT_TYPE       = AttributeKey.stringKey("db2.stmt_type");
+    public static final AttributeKey<String> DB2_QUERY_PLAN      = AttributeKey.stringKey("db2.query_plan");
+    public static final AttributeKey<String> DB2_PLAN_HASH       = AttributeKey.stringKey("db2.query_plan.hash");
 
     // Required
     private final String dbNamespace;
@@ -49,6 +51,8 @@ public final class TopQueryEvent {
     private Long   sorts;
     private Long   sortOverflows;
     private String stmtType;
+    private String queryPlanXml;
+    private String queryPlanHash;
 
     private TopQueryEvent(String dbNamespace, String queryText, long member,
                           long executions, double totalExecTimeSec) {
@@ -83,6 +87,14 @@ public final class TopQueryEvent {
     public TopQueryEvent sortOverflows(long v)   { this.sortOverflows  = v; return this; }
     public TopQueryEvent stmtType(String v)      { this.stmtType       = v; return this; }
 
+    public TopQueryEvent queryPlan(String xml, String hash) {
+        if (xml != null && !xml.isBlank() && hash != null) {
+            this.queryPlanXml  = xml;
+            this.queryPlanHash = hash;
+        }
+        return this;
+    }
+
     public void emit(Logger logger, Instant timestamp) {
         AttributesBuilder b = Attributes.builder()
             .put(DB_SYSTEM,           "ibm.db2")
@@ -100,6 +112,8 @@ public final class TopQueryEvent {
         if (sorts           != null) b.put(DB2_SORTS,             sorts);
         if (sortOverflows   != null) b.put(DB2_SORT_OVERFLOWS,    sortOverflows);
         if (stmtType        != null) b.put(DB2_STMT_TYPE,         stmtType);
+        if (queryPlanXml    != null) b.put(DB2_QUERY_PLAN,        queryPlanXml);
+        if (queryPlanHash   != null) b.put(DB2_PLAN_HASH,         queryPlanHash);
 
         logger.logRecordBuilder()
             .setEventName("db.server.top_query")

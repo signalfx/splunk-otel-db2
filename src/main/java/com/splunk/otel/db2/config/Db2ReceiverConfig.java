@@ -12,13 +12,10 @@ public class Db2ReceiverConfig {
     private String password;
     private String database = "SAMPLE";
     private String collectionInterval = "30s";
-    private int topQueryCount = 250;
-    private boolean topQueryEnabled = false;
-    private int maxQuerySampleCount = 1000;
-    private boolean querySampleEnabled = false;
     private boolean useSnapshotMonitor = false;
-    private String querySampleInterval = "10s";
-    private String topQueryInterval = "60s";
+    private EventsConfig events = new EventsConfig();
+    private TopQueryCollectionConfig topQueryCollection = new TopQueryCollectionConfig();
+    private QuerySampleCollectionConfig querySampleCollection = new QuerySampleCollectionConfig();
     private int connectTimeoutSeconds = 10;
     private TlsConfig tls = new TlsConfig();
     private Map<String, String> resourceAttributes = Collections.emptyMap();
@@ -50,52 +47,35 @@ public class Db2ReceiverConfig {
     }
     public void setCollectionInterval(String collectionInterval) { this.collectionInterval = collectionInterval; }
 
-    private static Duration parseDuration(String s, long defaultSeconds) {
+    static Duration parseDuration(String s, long defaultSeconds) {
         if (s == null) return Duration.ofSeconds(defaultSeconds);
         s = s.trim();
         Duration d;
         if (s.endsWith("s")) d = Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
         else if (s.endsWith("m")) d = Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
-        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s' or '5m'");
+        else if (s.endsWith("h")) d = Duration.ofHours(Long.parseLong(s.substring(0, s.length() - 1)));
+        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s', '5m', or '1h'");
         if (d.getSeconds() <= 0) throw new IllegalArgumentException("Interval must be at least 1s, got '" + s + "'");
         return d;
     }
 
-    public int getTopQueryCount() { return topQueryCount; }
-    public void setTopQueryCount(int topQueryCount) {
-        if (topQueryCount <= 0)
-            throw new IllegalArgumentException("top_query_count must be > 0, got " + topQueryCount);
-        this.topQueryCount = topQueryCount;
-    }
-
-    public boolean isTopQueryEnabled() { return topQueryEnabled; }
-    public void setTopQueryEnabled(boolean topQueryEnabled) { this.topQueryEnabled = topQueryEnabled; }
-
-
-    public int getMaxQuerySampleCount() { return maxQuerySampleCount; }
-    public void setMaxQuerySampleCount(int maxQuerySampleCount) {
-        if (maxQuerySampleCount <= 0) {
-            throw new IllegalArgumentException("max_query_sample_count must be > 0, got " + maxQuerySampleCount);
-        }
-        this.maxQuerySampleCount = maxQuerySampleCount;
-    }
-
-    public boolean isQuerySampleEnabled() { return querySampleEnabled; }
-    public void setQuerySampleEnabled(boolean querySampleEnabled) { this.querySampleEnabled = querySampleEnabled; }
-
     public boolean isUseSnapshotMonitor() { return useSnapshotMonitor; }
     public void setUseSnapshotMonitor(boolean useSnapshotMonitor) { this.useSnapshotMonitor = useSnapshotMonitor; }
 
-    public Duration getQuerySampleIntervalDuration() { return parseDuration(querySampleInterval, 10); }
-    public void setQuerySampleInterval(String querySampleInterval) { this.querySampleInterval = querySampleInterval; }
-
-    public Duration getTopQueryIntervalDuration() {
-        Duration d = parseDuration(topQueryInterval, 60);
-        if (d.getSeconds() < 60)
-            throw new IllegalArgumentException("top_query_interval must be at least 60s, got '" + topQueryInterval + "'");
-        return d;
+    public EventsConfig getEvents() { return events; }
+    public void setEvents(EventsConfig events) {
+        this.events = events != null ? events : new EventsConfig();
     }
-    public void setTopQueryInterval(String topQueryInterval) { this.topQueryInterval = topQueryInterval; }
+
+    public TopQueryCollectionConfig getTopQueryCollection() { return topQueryCollection; }
+    public void setTopQueryCollection(TopQueryCollectionConfig topQueryCollection) {
+        this.topQueryCollection = topQueryCollection != null ? topQueryCollection : new TopQueryCollectionConfig();
+    }
+
+    public QuerySampleCollectionConfig getQuerySampleCollection() { return querySampleCollection; }
+    public void setQuerySampleCollection(QuerySampleCollectionConfig querySampleCollection) {
+        this.querySampleCollection = querySampleCollection != null ? querySampleCollection : new QuerySampleCollectionConfig();
+    }
 
     public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
     public void setConnectTimeoutSeconds(int connectTimeoutSeconds) {
@@ -136,6 +116,115 @@ public class Db2ReceiverConfig {
             return env;
         }
         return value;
+    }
+
+    // --- Events config (mirrors OTel LogsBuilderConfig.Events pattern) ---
+
+    public static class EventConfig {
+        private boolean enabled = false;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    }
+
+    public static class EventsConfig {
+        private EventConfig dbServerTopQuery    = new EventConfig();
+        private EventConfig dbServerQuerySample = new EventConfig();
+
+        public EventConfig getDbServerTopQuery()    { return dbServerTopQuery; }
+        public void setDbServerTopQuery(EventConfig v) {
+            this.dbServerTopQuery = v != null ? v : new EventConfig();
+        }
+        public EventConfig getDbServerQuerySample() { return dbServerQuerySample; }
+        public void setDbServerQuerySample(EventConfig v) {
+            this.dbServerQuerySample = v != null ? v : new EventConfig();
+        }
+    }
+
+    // --- top_query_collection ---
+
+    public static class TopQueryCollectionConfig {
+        private String collectionInterval = "60s";
+        private int topQueryCount = 250;
+        private int maxQuerySampleCount = 1000;
+        // 0 = plan collection disabled (no EXPLAIN_FROM_SECTION calls). Default 0 keeps plan collection
+        // opt-in; set to a positive value to enable (e.g. 250 to match MongoDB receiver default).
+        private int maxExplainEachInterval = 0;
+        private int queryPlanCacheSize = 1000;
+        private String queryPlanCacheTtl = "1h";
+        // Schema where explain tables exist (created by SYSINSTALLOBJECTS).
+        // Empty string means use the DB2 runtime default (USER).
+        private String explainSchema = "";
+
+        public Duration getCollectionIntervalDuration() {
+            Duration d = Db2ReceiverConfig.parseDuration(collectionInterval, 60);
+            if (d.getSeconds() < 60)
+                throw new IllegalArgumentException(
+                    "top_query_collection.collection_interval must be at least 60s, got '" + collectionInterval + "'");
+            return d;
+        }
+        public void setCollectionInterval(String v) { this.collectionInterval = v; }
+
+        public int getTopQueryCount() { return topQueryCount; }
+        public void setTopQueryCount(int v) {
+            if (v <= 0)
+                throw new IllegalArgumentException("top_query_collection.top_query_count must be > 0, got " + v);
+            this.topQueryCount = v;
+        }
+
+        public int getMaxQuerySampleCount() { return maxQuerySampleCount; }
+        public void setMaxQuerySampleCount(int v) {
+            if (v <= 0)
+                throw new IllegalArgumentException("top_query_collection.max_query_sample_count must be > 0, got " + v);
+            this.maxQuerySampleCount = v;
+        }
+
+        public int getMaxExplainEachInterval() { return maxExplainEachInterval; }
+        public void setMaxExplainEachInterval(int v) {
+            if (v < 0)
+                throw new IllegalArgumentException("top_query_collection.max_explain_each_interval must be >= 0, got " + v);
+            this.maxExplainEachInterval = v;
+        }
+
+        public int getQueryPlanCacheSize() { return queryPlanCacheSize; }
+        public void setQueryPlanCacheSize(int v) {
+            if (v <= 0)
+                throw new IllegalArgumentException("top_query_collection.query_plan_cache_size must be > 0, got " + v);
+            this.queryPlanCacheSize = v;
+        }
+
+        public Duration getQueryPlanCacheTtlDuration() {
+            return Db2ReceiverConfig.parseDuration(queryPlanCacheTtl, 600);
+        }
+        public void setQueryPlanCacheTtl(String v) { this.queryPlanCacheTtl = v; }
+
+        public String getExplainSchema() { return explainSchema; }
+        public void setExplainSchema(String v) {
+            String s = v == null ? "" : v.trim();
+            if (!s.isEmpty() && !s.matches("[A-Za-z_$#@][A-Za-z0-9_$#@]*")) {
+                throw new IllegalArgumentException(
+                    "top_query_collection.explain_schema must be a valid SQL identifier, got '" + s + "'");
+            }
+            this.explainSchema = s;
+        }
+    }
+
+    // --- query_sample_collection ---
+
+    public static class QuerySampleCollectionConfig {
+        private String collectionInterval = "10s";
+        private int maxRowsPerQuery = 100;
+
+        public Duration getCollectionIntervalDuration() {
+            return Db2ReceiverConfig.parseDuration(collectionInterval, 10);
+        }
+        public void setCollectionInterval(String v) { this.collectionInterval = v; }
+
+        public int getMaxRowsPerQuery() { return maxRowsPerQuery; }
+        public void setMaxRowsPerQuery(int v) {
+            if (v <= 0)
+                throw new IllegalArgumentException("query_sample_collection.max_rows_per_query must be > 0, got " + v);
+            this.maxRowsPerQuery = v;
+        }
     }
 
     public static class TlsConfig {

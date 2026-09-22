@@ -67,8 +67,22 @@ receivers:
     password: ""
     tls:
       insecure: true
-    topQueryEnabled: false
-    querySampleEnabled: false
+    events:
+      dbServerTopQuery:
+        enabled: false
+      dbServerQuerySample:
+        enabled: false
+    topQueryCollection:
+      collectionInterval: "60s"
+      topQueryCount: 250
+      maxQuerySampleCount: 1000
+      maxExplainEachInterval: 0
+      queryPlanCacheSize: 1000
+      queryPlanCacheTtl: "1h"
+      explainSchema: ""
+    querySampleCollection:
+      collectionInterval: "10s"
+      maxRowsPerQuery: 100
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────
 otlp:

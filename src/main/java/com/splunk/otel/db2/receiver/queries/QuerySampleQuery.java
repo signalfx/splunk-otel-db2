@@ -74,7 +74,8 @@ public class QuerySampleQuery {
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
-        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE, " +
+        "       CAST(NULL AS CHAR(16) FOR BIT DATA) AS EXEC_ID_BYTES " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
         "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
@@ -128,7 +129,8 @@ public class QuerySampleQuery {
         "       BLOCKER_SQL.STMT_TEXT AS BLOCKER_SQL, " +
         "       BLOCKER_CON.SESSION_AUTH_ID AS BLOCKER_USER, " +
         "       BLOCKER_CON.CLIENT_WRKSTNNAME AS BLOCKER_HOST, " +
-        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE " +
+        "       CASE WHEN BLOCKER_SQL.APPLICATION_HANDLE IS NULL THEN 1 ELSE 0 END AS BLOCKER_IS_IDLE, " +
+        "       A.EXECUTABLE_ID AS EXEC_ID_BYTES " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
         "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
@@ -164,10 +166,7 @@ public class QuerySampleQuery {
     // All three dbmon-api blocking endpoints return empty on this path — see README.
     private static final String SQL_SNAP =
         "SELECT COALESCE(SS.STMT_TEXT, S.TEXT) AS STMT_TEXT, " +
-        "       ( CASE WHEN SA.APPL_STATUS = 'UOWEXEC' " +
-        "              THEN CAST(SS.STMT_OPERATION AS VARCHAR(22)) " +
-        "              ELSE CAST(SA.APPL_STATUS AS VARCHAR(22)) " +
-        "         END ) AS ACTIVITY_STATE, " +
+        "       CAST(SA.APPL_STATUS AS VARCHAR(22)) AS ACTIVITY_STATE, " +
         "       CAST(NULL AS VARCHAR(22)) AS OPERATION_NAME, " +
         "       CHAR(SS.STMT_START) AS LOCAL_START_TIME, " +
         "       TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) AS WALL_ELAPSED_SEC, " +
@@ -278,16 +277,23 @@ public class QuerySampleQuery {
                         long member       = rs.getLong("MEMBER");
                         long cpuUs        = rs.getLong("CPU_US");
                         long waitMs       = useSnapshotMonitor ? -1L : rs.getLong("LOCK_WAIT_TIME_MS");
+                        String execIdHex  = null;
+                        if (!useSnapshotMonitor) {
+                            byte[] execIdBytes = rs.getBytes("EXEC_ID_BYTES");
+                            if (execIdBytes != null) execIdHex = bytesToHex(execIdBytes);
+                        }
 
                         QuerySampleEvent ev = QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
                             .appHandle(appHandle)
                             .activityState(state)
+                            .sessionStatus(deriveSessionStatus(state))
                             .operationName(opName)
                             .queryStart(startTime)
                             .userName(authId)
                             .clientAddress(clientHost)
                             .cpuTimeMicros(cpuUs)
-                            .waitTimeMillis(waitMs);
+                            .waitTimeMillis(waitMs)
+                            .planHash(execIdHex);
 
                         // Blocking columns only on the default (MON_CURRENT) paths.
                         // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
@@ -384,6 +390,12 @@ public class QuerySampleQuery {
         return s != null ? s.trim() : null;
     }
 
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
     // Converts Db2's CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN" to RFC3339 UTC
     // "YYYY-MM-DDTHH:MM:SS.NNNNNNZ". The SQL expression already subtracts CURRENT TIMEZONE
     // (DB2's UTC offset) so the value is true UTC before it reaches this method.
@@ -399,5 +411,23 @@ public class QuerySampleQuery {
         c[13] = ':';
         c[16] = ':';
         return new String(c) + "Z";
+    }
+
+    // Derives a coarse session status from the composite ACTIVITY_STATE column
+    // (e.g. "LOCK WAIT DML", "EXECUTING READ"). Follows the same pattern as
+    // MongoDB's deriveOperationState(): map raw DB flags to canonical values.
+    // Returns null for unknown values so the attribute is omitted rather than
+    // emitting a wrong value.
+    static String deriveSessionStatus(String activityState) {
+        if (activityState == null) return null;
+        String s = activityState.trim();
+        // MON_CURRENT_SQL composite: "EXECUTING READ", "RECOMP DML", etc.
+        if (s.startsWith("EXECUTING") || s.startsWith("RECOMP")) return "active";
+        // MON_CURRENT_SQL composite: "LOCKWAIT DML"; snapshot APPL_STATUS: "LOCKWAIT" or "LOCK WAIT"
+        if (s.startsWith("LOCKWAIT") || s.startsWith("LOCK WAIT") || s.startsWith("CLIENT WAIT")) return "waiting";
+        if (s.startsWith("IDLE")) return "idle";
+        // Snapshot monitor APPL_STATUS: UOWEXEC = executing a unit of work
+        if (s.equals("UOWEXEC")) return "active";
+        return null;
     }
 }

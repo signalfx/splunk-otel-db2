@@ -36,12 +36,22 @@ receivers:
     database: "SAMPLE"                 # database name (uppercase)
     collection_interval: "30s"         # metrics collection interval
     connect_timeout_seconds: 10        # JDBC login + socket timeout (default: 10)
-    top_query_enabled: false           # set true to enable top query collection (opt-in)
-    top_query_count: 250               # top N queries to emit per interval (must be > 0)
-    top_query_interval: "60s"          # how often to collect top queries (minimum 60s)
-    query_sample_enabled: false        # set true to enable query sampling (opt-in)
-    max_query_sample_count: 1000       # max active statements sampled per cycle (must be > 0)
-    query_sample_interval: "10s"       # how often to sample active queries
+    events:
+      db.server.top_query:
+        enabled: false                 # set true to enable top query collection (opt-in)
+      db.server.query_sample:
+        enabled: false                 # set true to enable query sampling (opt-in)
+    top_query_collection:
+      collection_interval: "60s"      # how often to collect top queries (minimum 60s)
+      top_query_count: 250            # top N queries to emit per interval (must be > 0)
+      max_query_sample_count: 1000    # max rows fetched from MON_GET_PKG_CACHE_STMT (must be > 0)
+      max_explain_each_interval: 0    # max EXPLAIN_FROM_SECTION calls per interval; 0 = plan disabled (default)
+      query_plan_cache_size: 1000     # max entries in the client-side plan cache
+      query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
+      explain_schema: ""              # schema where explain tables live (default: USER)
+    query_sample_collection:
+      collection_interval: "10s"      # how often to sample active queries
+      max_rows_per_query: 100         # max active sessions fetched per sample
     use_snapshot_monitor: false        # set true to use SNAP_GET_STMT fallback path
     tls:
       insecure: true                   # set false to enable TLS
@@ -145,8 +155,10 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 | Collector | Connection | Always open? |
 |---|---|---|
 | Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
-| Query sample + Blocking session (`query_sample_enabled: true`) | `querySampleConnection` | Optional |
-| Top query (`top_query_enabled: true`) | `topQueryConnection` | Optional |
+| Query sample + Blocking session (`events.db.server.query_sample.enabled: true`) | `querySampleConnection` | Optional |
+| Top query + Plan (`events.db.server.top_query.enabled: true`) | `topQueryConnection` | Optional |
+
+Plan collection (`max_explain_each_interval > 0`) reuses the top-query connection — it does **not** open a fourth connection.
 
 There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
 
@@ -196,7 +208,7 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 
 ## Query samples (log records)
 
-Active statements are sampled at `query_sample_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `query_sample_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Active statements are sampled at `query_sample_collection.collection_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
 
@@ -208,11 +220,13 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
 | `db2.session_id` | Session identifier (DB2 application handle) |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
+| `db2.session_status` | Coarse session lifecycle state derived from `ACTIVITY_STATE`: `active`, `waiting`, or `idle` |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |
 | `db2.cpu_time` | CPU time in seconds (default path only; omitted on snapshot path) |
 | `db2.wait_time` | Lock wait time in seconds (Db2 10.5+ default path only) |
+| `db2.query_plan.hash` | Db2 EXECUTABLE_ID hex string identifying the active plan section; Db2 10.5+ default path only |
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
@@ -224,8 +238,8 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 Lock contention is detected automatically whenever query sampling is enabled. When a sampled session is waiting for a lock (`LOCKWAIT`), its `db.server.query_sample` record is enriched with blocking attributes and emitted at severity WARN. No separate flag is needed.
 
-- `query_sample_enabled: true` enables both query samples and blocking detection.
-- `query_sample_interval` controls the poll cadence for both.
+- `events.db.server.query_sample.enabled: true` enables both query samples and blocking detection.
+- `query_sample_collection.collection_interval` controls the poll cadence for both.
 - Both share the same `querySampleConnection`.
 
 If the blocker is idle (holding an open transaction but not currently executing), its last statement is looked up from `MON_GET_PKG_CACHE_STMT` and attached as `db2.blocking.blocker.query_text`.
@@ -239,8 +253,11 @@ receivers:
     database: "SAMPLE"
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
-    query_sample_enabled: true    # enables query sampling and blocking detection
-    query_sample_interval: "10s"  # controls poll cadence for both
+    events:
+      db.server.query_sample:
+        enabled: true              # enables query sampling and blocking detection
+    query_sample_collection:
+      collection_interval: "10s"  # controls poll cadence for both
 ```
 
 | Attribute | Description |
@@ -285,9 +302,9 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;  -- idl
 
 ## Top queries (log records)
 
-Top SQL statements are collected from the Db2 plan cache at `top_query_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `top_query_enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Top SQL statements are collected from the Db2 plan cache at `top_query_collection.collection_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.top_query.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
-Statements are ranked by execution elapsed time added during the current collection interval (per-interval delta of `STMT_EXEC_TIME`). The first collection after startup seeds the delta baseline and emits nothing. The lookback window is automatically set to 2× the configured interval (minimum 5 minutes) to ensure statements executed early in a long interval are not excluded before the next collection.
+Statements are ranked by execution elapsed time added during the current collection interval (per-interval delta of `STMT_EXEC_TIME`). **Note:** the SQL query first selects at most `max_query_sample_count` candidate statements from the plan cache ordered by cumulative lifetime elapsed time. The interval-delta ranking is then computed over that candidate set. A newly-hot statement outside the top-N cumulative candidates can therefore be missed in a single interval, but will appear once its cumulative cost enters the candidate window. The first collection after startup seeds the delta baseline and emits nothing. The lookback window is automatically set to 2× the configured interval (minimum 5 minutes) to ensure statements executed early in a long interval are not excluded before the next collection.
 
 **Cache-miss classification:** when a plan-cache section has no baseline (first appearance or returning after eviction), its `INSERT_TIMESTAMP` is compared against the Db2 server clock recorded at the end of the previous scrape. Sections compiled after the previous scrape are treated as genuinely new and their current counters are emitted as the interval delta. Sections that predate the previous scrape are conservatively seeded — their baseline is established and nothing is emitted until the next cycle. This prevents lifetime cumulative totals from being reported as a single interval spike when an evicted section resumes execution. Both timestamps originate from the Db2 server clock, avoiding JVM/server timezone skew.
 
@@ -309,6 +326,22 @@ The log record's native `event_name` field is set to `db.server.top_query`.
 | `db2.sorts` | Sorts performed during this interval |
 | `db2.sort_overflows` | Sorts that spilled to disk during this interval |
 | `db2.stmt_type` | Statement type: `D` = dynamic SQL, `S` = static SQL |
+| `db2.query_plan` | JSON plan summary (operators + streams) — only when `max_explain_each_interval > 0` |
+| `db2.query_plan.hash` | Db2 EXECUTABLE_ID hex string identifying the compiled plan section; changes on recompile — only when `max_explain_each_interval > 0` |
+
+**Plan collection prerequisite** (`max_explain_each_interval > 0`): Db2 explain tables must be created once in the monitoring user's schema before enabling plan collection. Connect as the monitoring user and run:
+
+```sql
+CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
+```
+
+This creates 10 explain tables (`EXPLAIN_INSTANCE`, `EXPLAIN_OPERATOR`, `EXPLAIN_STREAM`, etc.) in the user's schema. The tables are automatically owned by the monitoring user so no additional grants are needed. This is a one-time setup step — the tables persist across Db2 restarts.
+
+The plan JSON format:
+
+```json
+{"operators":[{"id":1,"type":"RETURN","cost":198.6},{"id":2,"type":"NLJOIN","cost":198.6}],"streams":[{"id":1,"from":-1,"to":3,"cols":477}]}
+```
 
 ## Required permissions
 
@@ -335,16 +368,25 @@ GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
 
--- Top query collection (top_query_enabled: true)
+-- Top query collection (events.db.server.top_query.enabled: true)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
 
--- Query sampling (query_sample_enabled: true, default path)
+-- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
+-- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
+-- Requires explain tables to be created once per schema — run as the monitoring user:
+--   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
+-- Then grant the procedure and the explain tables:
+GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
+-- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
+-- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
+
+-- Query sampling (events.db.server.query_sample.enabled: true, default path)
 GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
 
 -- Db2 10.5+ wait time attribute (db2.wait_time)
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
 
--- Blocking session detection (runs automatically with query_sample_enabled: true)
+-- Blocking session detection (runs automatically with events.db.server.query_sample.enabled: true)
 GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
 -- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
 
@@ -433,8 +475,11 @@ receivers:
     credentialsSecret: "my-db2-credentials"   # pre-existing Secret with DB2_USER / DB2_PASSWORD
     tls:
       insecure: true
-    topQueryEnabled: false
-    querySampleEnabled: false
+    events:
+      dbServerTopQuery:
+        enabled: false
+      dbServerQuerySample:
+        enabled: false
 
 otlp:
   # OTel Collector in the same cluster:

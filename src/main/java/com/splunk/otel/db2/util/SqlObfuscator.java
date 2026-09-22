@@ -249,6 +249,16 @@ public final class SqlObfuscator {
         return result;
     }
 
+    /**
+     * Obfuscates a SQL expression fragment (e.g. a predicate from EXPLAIN_PREDICATE.PREDICATE_TEXT)
+     * using the same lexer as {@link #obfuscate}. Suitable for sub-expressions that are not full
+     * statements — the same literals, string prefixes, and fail-closed guarantees apply.
+     * Returns {@link #OBFUSCATION_FAILED} on any failure or if a literal remnant survives.
+     */
+    public static String obfuscateFragment(String fragment) {
+        return obfuscate(fragment);
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------

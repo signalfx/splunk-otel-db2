@@ -150,7 +150,9 @@ class QuerySampleQueryTest {
     @Test
     void snapshotPathNoCpuAttribute() throws Exception {
         when(rs.next()).thenReturn(true, false);
-        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC SELECT",
+        // Snapshot SQL now emits APPL_STATUS directly as ACTIVITY_STATE (e.g. UOWEXEC)
+        // rather than substituting STMT_OPERATION for UOWEXEC rows.
+        stubRow("SELECT 1 FROM SYSIBM.SYSDUMMY1", "UOWEXEC",
                 "2024-01-01-12.00.00.000000", 2L,
                 "db2inst1", "host1", "99", 0L, -1L);
 
@@ -161,6 +163,8 @@ class QuerySampleQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
 
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_CPU_TIME)).isNull();
+        // UOWEXEC (snapshot executing state) must map to "active"
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("active");
     }
 
     @Test
@@ -248,16 +252,18 @@ class QuerySampleQueryTest {
 
     @Test
     void configRejectsZeroSampleCount() {
-        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig tqc =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setMaxQuerySampleCount(0));
+            () -> tqc.setMaxQuerySampleCount(0));
     }
 
     @Test
     void configRejectsNegativeSampleCount() {
-        com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
+        com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig tqc =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setMaxQuerySampleCount(-1));
+            () -> tqc.setMaxQuerySampleCount(-1));
     }
 
     @Test
@@ -644,8 +650,6 @@ class QuerySampleQueryTest {
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
-        // BLOCKER_IS_IDLE must use APPLICATION_HANDLE IS NULL — not STMT_TEXT IS NULL —
-        // so that a blocker with an active but unreadable statement is not misclassified.
         assertThat(sqlCap.getValue()).containsIgnoringCase("BLOCKER_SQL.APPLICATION_HANDLE IS NULL");
         assertThat(sqlCap.getValue()).doesNotContainIgnoringCase("BLOCKER_SQL.STMT_TEXT IS NULL");
     }
@@ -672,8 +676,55 @@ class QuerySampleQueryTest {
         ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
-        // stubBlockedRow stubs BLOCKING_START_TIME = "2024-01-01-12.00.00.000000"
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_BLOCKING_START))
             .isEqualTo("2024-01-01T12:00:00.000000Z");
+    }
+
+    @Test
+    void deriveSessionStatusMapsAllKnownActivityStates() {
+        assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING DML")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("EXECUTING READ")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("RECOMP READ")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("UOWEXEC")).isEqualTo("active");
+        assertThat(QuerySampleQuery.deriveSessionStatus("LOCKWAIT DML")).isEqualTo("waiting");
+        assertThat(QuerySampleQuery.deriveSessionStatus("LOCK WAIT DML")).isEqualTo("waiting");
+        assertThat(QuerySampleQuery.deriveSessionStatus("CLIENT WAIT ")).isEqualTo("waiting");
+        assertThat(QuerySampleQuery.deriveSessionStatus("IDLE ")).isEqualTo("idle");
+        assertThat(QuerySampleQuery.deriveSessionStatus(null)).isNull();
+        assertThat(QuerySampleQuery.deriveSessionStatus("UNKNOWN STATE")).isNull();
+    }
+
+    @Test
+    void blockedSessionHasWaitingSessionStatus() throws Exception {
+        // stubBlockedRow uses ACTIVITY_STATE "LOCKWAIT DML" — deriveSessionStatus must map it to "waiting".
+        when(rs.next()).thenReturn(true, false);
+        stubBlockedRow(
+            "SELECT ID FROM ORDERS WHERE ID = 1",
+            "111", 0L, 222L, 0L,
+            "UPDATE ORDERS SET STATUS = 'X' WHERE ID = 1",
+            "user2", "host2",
+            "DB2INST1", "ORDERS", "ROW", "X",
+            3L, false);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("waiting");
+    }
+
+    @Test
+    void sessionStatusEmittedOnRecord() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("active");
     }
 }

@@ -18,8 +18,22 @@ data:
         collection_interval: {{ .collectionInterval | quote }}
         tls:
           insecure: {{ .tls.insecure }}
-        top_query_enabled: {{ .topQueryEnabled }}
-        query_sample_enabled: {{ .querySampleEnabled }}
+        events:
+          db.server.top_query:
+            enabled: {{ dig "events" "dbServerTopQuery" "enabled" false . }}
+          db.server.query_sample:
+            enabled: {{ dig "events" "dbServerQuerySample" "enabled" false . }}
+        top_query_collection:
+          collection_interval: {{ dig "topQueryCollection" "collectionInterval" "60s" . | quote }}
+          top_query_count: {{ dig "topQueryCollection" "topQueryCount" 250 . }}
+          max_query_sample_count: {{ dig "topQueryCollection" "maxQuerySampleCount" 1000 . }}
+          max_explain_each_interval: {{ dig "topQueryCollection" "maxExplainEachInterval" 0 . }}
+          query_plan_cache_size: {{ dig "topQueryCollection" "queryPlanCacheSize" 1000 . }}
+          query_plan_cache_ttl: {{ dig "topQueryCollection" "queryPlanCacheTtl" "1h" . | quote }}
+          explain_schema: {{ dig "topQueryCollection" "explainSchema" "" . | quote }}
+        query_sample_collection:
+          collection_interval: {{ dig "querySampleCollection" "collectionInterval" "10s" . | quote }}
+          max_rows_per_query: {{ dig "querySampleCollection" "maxRowsPerQuery" 100 . }}
     {{- end }}
 
     exporters:

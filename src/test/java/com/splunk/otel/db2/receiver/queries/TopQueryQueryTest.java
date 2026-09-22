@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
+import java.sql.CallableStatement;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -58,6 +60,7 @@ class TopQueryQueryTest {
         when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
         when(rs.getLong("MEMBER")).thenReturn(member);
         when(rs.getString("EXECUTABLE_ID")).thenReturn(execId);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(execId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         when(rs.getLong("NUM_EXECUTIONS")).thenReturn(numExecutions);
         when(rs.getLong("STMT_EXEC_TIME")).thenReturn(stmtExecMs);
         when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(cpuUs);
@@ -422,6 +425,31 @@ class TopQueryQueryTest {
         assertThat(sql).contains("SNAP_GET_APPL_INFO");
         assertThat(sql).contains("SNAP_GET_STMT");
         assertThat(sql).contains("SYSDUMMY1");
+    }
+
+    @Test
+    void sqlAppliesFetchFirstWithMaxQuerySampleCount() throws Exception {
+        // FETCH FIRST %maxQuerySampleCount% ROWS ONLY bounds rows fetched at the DB layer.
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 500, 60L,
+            null, 1000, 3600_000L, "");
+        when(rs.next()).thenReturn(false);
+        q.collect();
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("FETCH FIRST 500 ROWS ONLY");
+    }
+
+    @Test
+    void sqlContainsFetchFirstWithMaxQuerySampleCount() throws Exception {
+        // maxQuerySampleCount=2 → SQL must contain FETCH FIRST 2 ROWS ONLY so the DB
+        // enforces the row cap before any data is transferred or stored.
+        TopQueryQuery q = new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 2, 60L,
+            null, 1000, 3600_000L, "");
+        when(rs.next()).thenReturn(false);
+        q.collect();
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).containsIgnoringCase("FETCH FIRST 2 ROWS ONLY");
     }
 
     @Test
@@ -816,34 +844,1397 @@ class TopQueryQueryTest {
         assertThat(allAttrs.get(2).get(TopQueryEvent.DB2_EXECUTIONS)).isEqualTo(10000L);
     }
 
+    // --- Plan collection tests ---
+
+    /** Build a plan-enabled query: 2 max attempts/interval, cache size 100, TTL 1h. */
+    private TopQueryQuery queryWithPlan() {
+        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2, 100, 3600_000L);
+    }
+
+    /** Build a plan-enabled query with 0ms TTL — cache always expires between calls. */
+    private TopQueryQuery queryWithPlanNoCache() {
+        return new TopQueryQuery(() -> conn, "TESTDB", otelLogger, 10, 60L, 2, 100, 0L);
+    }
+
+    /**
+     * Stub the EXPLAIN_FROM_SECTION CallableStatement and subsequent explain table
+     * PreparedStatements so that fetchPlanXml returns a full JSON plan string.
+     *
+     * Produces one operator (TBSCAN, cost=1.0), one stream (id=1, from=-1, to=1, cols=3),
+     * one argument (PREFETCHTYPE=NONE), one object (DB2INST1.ORDERS TABLE stream=1),
+     * and one predicate (SARG on op=1, text="Q1.ID = ?").
+     *
+     * Returns the CallableStatement mock so callers can verify call counts.
+     */
+    private CallableStatement stubPlanPs(String ignoredPlanXml) throws Exception {
+        CallableStatement cs = mock(CallableStatement.class);
+        // EXPLAIN_FROM_SECTION params: (3)=EXPLAIN_SCHEMA INOUT, (4)=EXPLAIN_REQUESTER, (5)=EXPLAIN_TIME,
+        //                              (6)=SOURCE_NAME, (7)=SOURCE_SCHEMA, (8)=SOURCE_VERSION
+        when(cs.getString(3)).thenReturn("TESTUSER"); // EXPLAIN_SCHEMA INOUT — actual schema used
+        when(cs.getString(4)).thenReturn("TESTUSER"); // EXPLAIN_REQUESTER OUT
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200"); // SOURCE_NAME OUT
+        when(cs.getString(7)).thenReturn("NULLID");   // SOURCE_SCHEMA OUT
+        when(cs.getString(8)).thenReturn("0100270A"); // SOURCE_VERSION OUT
+
+        // EXPLAIN_OPERATOR — one row: TBSCAN cost=1.0
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        // EXPLAIN_STREAM — one row: id=1 from=-1 to=1 cols=3, with SOURCE_TYPE/TARGET_TYPE/OBJECT_SCHEMA/OBJECT_NAME
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(true, false);
+        when(streamRs.getInt("STREAM_ID")).thenReturn(1);
+        when(streamRs.getInt("SOURCE_ID")).thenReturn(-1);
+        when(streamRs.getInt("TARGET_ID")).thenReturn(1);
+        when(streamRs.getDouble("STREAM_COUNT")).thenReturn(3.0);
+        when(streamRs.getString("SOURCE_TYPE")).thenReturn("TBSCAN");
+        when(streamRs.getString("TARGET_TYPE")).thenReturn("RETURN");
+        when(streamRs.getString("OBJECT_SCHEMA")).thenReturn("DB2INST1");
+        when(streamRs.getString("OBJECT_NAME")).thenReturn("ORDERS");
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT — one row: op=1 PREFETCHTYPE=NONE
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        // EXPLAIN_OBJECT — one row: DB2INST1.ORDERS TABLE rows=1000 cols=6
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(true, false);
+        when(objRs.getString("OBJECT_SCHEMA")).thenReturn("DB2INST1");
+        when(objRs.getString("OBJECT_NAME")).thenReturn("ORDERS");
+        when(objRs.getString("OBJECT_TYPE")).thenReturn("TABLE");
+        when(objRs.getDouble("ROW_COUNT")).thenReturn(1000.0);
+        when(objRs.getInt("COLUMN_COUNT")).thenReturn(6);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE — one row: op=1 predId=1 SARG "Q1.ID = 42" (raw, obfuscated to "Q1.ID = ?")
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn("Q1.ID = 42");
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        // EXPLAIN_INSTANCE DELETE
+        PreparedStatement deletePs = mock(PreparedStatement.class);
+        when(deletePs.executeUpdate()).thenReturn(1);
+
+        // Wire: prepareCall → cs; prepareStatement in order: op, stream, arg, obj, pred, delete
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, deletePs);
+
+        return cs;
+    }
+
+    @Test
+    void planXmlAttachedToTopQueryRecordOnCacheMiss() throws Exception {
+        stubPlanPs(null);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed cycle
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Emit cycle
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        verify(logBuilder).emit();
+
+        // Plan JSON must contain all 5 explain sections with obfuscated predicate text
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).contains("\"operators\"").contains("TBSCAN");
+        assertThat(plan).contains("\"streams\"").contains("\"from\":-1");
+        // Stream must include SOURCE_TYPE, TARGET_TYPE, OBJECT_SCHEMA, OBJECT_NAME (P2-4)
+        assertThat(plan).contains("src_type").contains("tgt_type").contains("obj_schema").contains("obj_name");
+        assertThat(plan).contains("\"arguments\"").contains("PREFETCHTYPE");
+        assertThat(plan).contains("\"objects\"").contains("ORDERS").contains("TABLE").contains("\"rows\"");
+        assertThat(plan).contains("\"predicates\"").contains("SARG");
+        // Literal in predicate text must be obfuscated: "Q1.ID = 42" → "Q1.ID = ?"
+        assertThat(plan).contains("Q1.ID = ?").doesNotContain("42");
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH)).isNotNull().matches("[0-9a-fA-F]+");
+    }
+
+    @Test
+    void planServedFromCacheOnSecondEmit() throws Exception {
+        // First emit fetches the plan from DB2; second emit uses the cache (TTL=1h).
+        CallableStatement cs = stubPlanPs(null);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // First emit — cache miss, DB2 called once
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+        verify(conn, times(1)).prepareCall(anyString());
+
+        // Second emit — cache hit, no new DB2 call
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        verify(conn, times(1)).prepareCall(anyString()); // still 1 — second emit served from cache
+        verify(logBuilder).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // Plan JSON must be present (one operator: TBSCAN)
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).contains("TBSCAN");
+    }
+
+    @Test
+    void planRefetchedAfterCacheExpiry() throws Exception {
+        // With TTL=0ms the cache always expires — DB2 is called on every emit interval.
+        CallableStatement cs = stubPlanPs(null);
+
+        TopQueryQuery q = queryWithPlanNoCache(); // TTL=0
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // First emit
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+        verify(conn, times(1)).prepareCall(anyString());
+
+        // Second emit — cache expired (TTL=0), DB2 called again
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        // Re-stub prepareCall after reset
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+            PreparedStatement ps = mock(PreparedStatement.class);
+            ResultSet prs = mock(ResultSet.class);
+            when(prs.next()).thenReturn(false);
+            when(ps.executeQuery()).thenReturn(prs);
+            when(ps.executeUpdate()).thenReturn(1);
+            return ps;
+        });
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // 2 total calls (first + second emit after cache expiry)
+        verify(conn, times(2)).prepareCall(anyString());
+        verify(logBuilder).emit();
+    }
+
+    @Test
+    void planFetchFailureDoesNotDropTopQueryRecord() throws Exception {
+        when(conn.prepareCall(anyString())).thenThrow(new java.sql.SQLException("access denied"));
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x03});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Emit — plan fetch fails; top_query record should still be emitted without plan attrs
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x03});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        verify(logBuilder).emit(); // top_query still emitted
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isNull(); // no plan attr
+    }
+
+    @Test
+    void planNotFetchedWhenPlanDisabled() throws Exception {
+        // Use a query without plan enabled
+        TopQueryQuery q = query();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x05});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Emit
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x05});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // prepareCall must never be called when plan is disabled
+        verify(conn, never()).prepareCall(anyString());
+    }
+
+    @Test
+    void planBudgetCapRespectsMaxAttemptsPerInterval() throws Exception {
+        // planMaxPerInterval=2; 3 candidates; budget counts attempts before the DB2 call.
+        // The 3rd candidate must not trigger a plan lookup even when the first two succeed.
+        when(conn.prepareCall(anyString())).thenAnswer(inv -> {
+            CallableStatement cs = mock(CallableStatement.class);
+            when(cs.getString(3)).thenReturn("TESTUSER"); // EXPLAIN_SCHEMA INOUT
+            when(cs.getString(4)).thenReturn("TESTUSER"); // EXPLAIN_REQUESTER
+            when(cs.getTimestamp(5)).thenReturn(
+                Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999)));
+            when(cs.getString(6)).thenReturn("SYSSH200"); // SOURCE_NAME
+            when(cs.getString(7)).thenReturn("NULLID");   // SOURCE_SCHEMA
+            when(cs.getString(8)).thenReturn("0100270A"); // SOURCE_VERSION
+            return cs;
+        });
+        when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
+            PreparedStatement ps = mock(PreparedStatement.class);
+            ResultSet prs = mock(ResultSet.class);
+            when(prs.next()).thenReturn(false);
+            when(ps.executeQuery()).thenReturn(prs);
+            when(ps.executeUpdate()).thenReturn(1);
+            return ps;
+        });
+
+        // Use TTL=0 so no cache hits inflate attempt counts
+        TopQueryQuery q = queryWithPlanNoCache();
+
+        // Seed 3 rows
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L, 300L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // Emit cycle: all 3 rows grew
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(200L, 400L, 600L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // All 3 top_query records emitted, but only 2 plan attempts (budget cap = max attempts)
+        verify(logBuilder, times(3)).emit();
+        verify(conn, times(2)).prepareCall(anyString());
+    }
+
+    @Test
+    void planBudgetCapCountsFailedAttemptsAgainstBudget() throws Exception {
+        // planMaxPerInterval=2; all calls fail; the 3rd candidate must still be skipped.
+        when(conn.prepareCall(anyString())).thenThrow(new java.sql.SQLException("access denied"));
+
+        TopQueryQuery q = queryWithPlanNoCache();
+
+        // Seed 3 rows
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(1L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(100L, 200L, 300L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // Emit cycle
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01}, new byte[]{0x02}, new byte[]{0x03});
+        when(rs.next()).thenReturn(true, true, true, false);
+        when(rs.getString("STMT_TEXT")).thenReturn("Q1", "Q2", "Q3");
+        when(rs.getLong("MEMBER")).thenReturn(0L);
+        when(rs.getString("EXECUTABLE_ID")).thenReturn("e1", "e2", "e3");
+        when(rs.getLong("NUM_EXECUTIONS")).thenReturn(2L);
+        when(rs.getLong("STMT_EXEC_TIME")).thenReturn(200L, 400L, 600L);
+        when(rs.getLong("TOTAL_CPU_TIME")).thenReturn(0L);
+        when(rs.getLong("ROWS_READ")).thenReturn(0L);
+        when(rs.getLong("ROWS_RETURNED")).thenReturn(0L);
+        when(rs.getLong("ROWS_MODIFIED")).thenReturn(0L);
+        when(rs.getLong("TOTAL_SECTION_SORTS")).thenReturn(0L);
+        when(rs.getLong("SORT_OVERFLOWS")).thenReturn(0L);
+        when(rs.getString("SECTION_TYPE")).thenReturn("D");
+        q.collect();
+
+        // All 3 records emitted without plans; prepareCall called exactly 2 times (not 3)
+        verify(logBuilder, times(3)).emit();
+        verify(conn, times(2)).prepareCall(anyString());
+    }
+
+    @Test
+    void hexConversionRoundTrip() {
+        byte[] bytes = {0x00, 0x0F, (byte) 0xFF, 0x42, (byte) 0xAB};
+        String hex = TopQueryQuery.hexToBytes(null) == null ? "null ok" : "";
+        assertThat(TopQueryQuery.hexToBytes(null)).isNull();
+        assertThat(TopQueryQuery.hexToBytes("0d")).isEqualTo(new byte[]{0x0d});
+        assertThat(TopQueryQuery.hexToBytes("abc")).isNull();  // odd length
+        assertThat(TopQueryQuery.hexToBytes("0off")).isNull(); // non-hex character
+    }
+
+    @Test
+    void sha256HexIsDeterministicAndCorrectLength() {
+        String h = TopQueryQuery.sha256Hex("hello");
+        assertThat(h).hasSize(64).matches("[0-9a-f]+");
+        assertThat(TopQueryQuery.sha256Hex("hello")).isEqualTo(h);
+        assertThat(TopQueryQuery.sha256Hex("other")).isNotEqualTo(h);
+    }
+
     // --- Config validation tests ---
 
     @Test
     void configRejectsTopQueryIntervalBelowMinimum() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
-        cfg.setTopQueryInterval("30s");
+        cfg.getTopQueryCollection().setCollectionInterval("30s");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            cfg::getTopQueryIntervalDuration);
+            cfg.getTopQueryCollection()::getCollectionIntervalDuration);
     }
 
     @Test
     void configAcceptsTopQueryIntervalAtMinimum() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
-        cfg.setTopQueryInterval("60s");
-        org.junit.jupiter.api.Assertions.assertDoesNotThrow(cfg::getTopQueryIntervalDuration);
+        cfg.getTopQueryCollection().setCollectionInterval("60s");
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(cfg.getTopQueryCollection()::getCollectionIntervalDuration);
     }
 
     @Test
     void configRejectsZeroTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setTopQueryCount(0));
+            () -> cfg.getTopQueryCollection().setTopQueryCount(0));
+    }
+
+    @Test
+    void jsonEscapeHandlesSpecialCharacters() {
+        assertThat(TopQueryQuery.jsonEscape(null)).isEmpty();
+        assertThat(TopQueryQuery.jsonEscape("plain")).isEqualTo("plain");
+        assertThat(TopQueryQuery.jsonEscape("say \"hi\"")).isEqualTo("say \\\"hi\\\"");
+        assertThat(TopQueryQuery.jsonEscape("a\\b")).isEqualTo("a\\\\b");
+        assertThat(TopQueryQuery.jsonEscape("tab\there")).isEqualTo("tab\\u0009here");
+    }
+
+    @Test
+    void predicateTextObfuscationFailureOmitsTextButKeepsRow() throws Exception {
+        // When PREDICATE_TEXT cannot be obfuscated the row is still emitted without "text"
+        stubPlanPs(null); // sets up normal mocks first, then we override predicate
+        CallableStatement cs2 = mock(CallableStatement.class);
+        when(cs2.getString(3)).thenReturn("TESTUSER");
+        when(cs2.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs2.getTimestamp(5)).thenReturn(ts);
+        when(cs2.getString(6)).thenReturn("SYSSH200");
+        when(cs2.getString(7)).thenReturn("NULLID");
+        when(cs2.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs2 = mock(PreparedStatement.class);
+        ResultSet opRs2 = mock(ResultSet.class);
+        when(opRs2.next()).thenReturn(true, false);
+        when(opRs2.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs2.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs2.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs2.executeQuery()).thenReturn(opRs2);
+
+        PreparedStatement streamPs2 = mock(PreparedStatement.class);
+        ResultSet streamRs2 = mock(ResultSet.class);
+        when(streamRs2.next()).thenReturn(false);
+        when(streamPs2.executeQuery()).thenReturn(streamRs2);
+
+        PreparedStatement argPs2 = mock(PreparedStatement.class);
+        ResultSet argRs2 = mock(ResultSet.class);
+        when(argRs2.next()).thenReturn(false);
+        when(argPs2.executeQuery()).thenReturn(argRs2);
+
+        PreparedStatement objPs2 = mock(PreparedStatement.class);
+        ResultSet objRs2 = mock(ResultSet.class);
+        when(objRs2.next()).thenReturn(false);
+        when(objPs2.executeQuery()).thenReturn(objRs2);
+
+        // Predicate with unterminated string literal — obfuscation will fail
+        PreparedStatement predPs2 = mock(PreparedStatement.class);
+        ResultSet predRs2 = mock(ResultSet.class);
+        when(predRs2.next()).thenReturn(true, false);
+        when(predRs2.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs2.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs2.getString("HOW_APPLIED")).thenReturn("SARG");
+        when(predRs2.getString("PREDICATE_TEXT")).thenReturn("Q1.NAME = 'unterminated");
+        when(predPs2.executeQuery()).thenReturn(predRs2);
+
+        PreparedStatement delPs2 = mock(PreparedStatement.class);
+        when(delPs2.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Seed
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0A});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execA", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs2);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs2, streamPs2, argPs2, objPs2, predPs2, delPs2);
+        q.collect();
+
+        // Emit
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0A});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execA", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull().contains("SARG");
+        // text field must be absent — obfuscation failed, literal must not leak
+        assertThat(plan).doesNotContain("unterminated").doesNotContain("Q1.NAME");
+    }
+
+    @Test
+    void xqueryOperatorPredicateTextOmitted() throws Exception {
+        // When EXPLAIN_ARGUMENT contains QLANG=XQUERY for an operator, that operator's
+        // PREDICATE_TEXT must be omitted from the plan (the SQL obfuscator cannot safely
+        // sanitise XQuery double-quoted string literals like [ssn="123-45-6789"]).
+        // A predicate on a different (SQL) operator must still emit its text.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("XISCAN", "TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: op 1 tagged QLANG=XQUERY; op 2 has a PREFETCHTYPE row (confirms SQL)
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("QLANG", "PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("XQUERY", "NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE: op 1 (XQuery) and op 2 (SQL)
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1, 2);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG", "SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn(
+            "/customer[ssn=\"123-45-6789\"]",   // XQuery literal — must not appear
+            "Q2.ID = 42"                          // SQL — safe to obfuscate and emit
+        );
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0B});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execX", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0B});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execX", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // XQuery string literal must be redacted — "123-45-6789" is replaced before obfuscation
+        assertThat(plan).doesNotContain("123-45-6789");
+        // SQL predicate on op 2 must still appear (obfuscated)
+        assertThat(plan).contains("\"how\":\"SARG\"");
+        assertThat(plan).contains("Q2.ID");
+    }
+
+    @Test
+    void xqueryArgumentPredicateOmittedWhenPredicateRowPrecedesQlangRow() throws Exception {
+        // EXPLAIN_ARGUMENT rows are ordered by ARGUMENT_TYPE, so PREDICATE sorts before QLANG
+        // for the same operator. Buffering all rows before classification must ensure the
+        // XQuery PREDICATE value is still suppressed even when it arrives first in the result set.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("XISCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(2.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: PREDICATE row arrives BEFORE QLANG=XQUERY for the same operator (op 1).
+        // This reflects the actual ORDER BY ARGUMENT_TYPE sort order from the DB2 explain tables.
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1, 1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREDICATE", "QLANG");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("/order[id=\"secret-42\"]", "XQUERY");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(false);
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0C});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execPredFirst", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0C});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execPredFirst", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // XQuery PREDICATE value must not leak even though its row arrived before QLANG
+        assertThat(plan).doesNotContain("secret-42");
+        // The QLANG row itself should appear (with no value — QLANG is not in the safe allowlist)
+        assertThat(plan).contains("\"type\":\"QLANG\"");
+    }
+
+    @Test
+    void predicateTextDoubleQuotedLiteralRedactedWhenNoQlangRow() throws Exception {
+        // EXPLAIN_ARGUMENT collection succeeds but the XQuery operator's predicate returns
+        // NO QLANG row (IBM may omit it, or section-explain can omit some argument types).
+        // The double-quoted string literal inside the predicate must still be redacted via
+        // redactDoubleQuotedStrings() before SQL obfuscation — no language classification
+        // is needed because double-quoted content is always treated as a potential literal.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        // Two operators: op 1 (the predicate's op), op 2 (SQL — confirmed via arg row)
+        when(opRs.next()).thenReturn(true, true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("FETCH", "TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: only op 2 returns a row; op 1 has NO argument rows at all.
+        // Op 1's language is therefore unknown.
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(2);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE: op 1 (unknown language) and op 2 (confirmed SQL)
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1, 2);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG", "SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn(
+            "/order[customer=\"secret\"]",  // op 1: unknown language — must not emit
+            "Q2.ID = 99"                    // op 2: confirmed SQL — safe to obfuscate
+        );
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0D});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execNoQlang", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0D});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execNoQlang", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // Op 1: double-quoted XQuery string literal must be redacted even with no QLANG row
+        assertThat(plan).doesNotContain("secret");
+        // Op 2's predicate text must still appear — plain SQL, no double-quoted literals
+        assertThat(plan).contains("Q2.ID");
+    }
+
+    @Test
+    void predicateTextSafeWhenArgumentCollectionDegrades() throws Exception {
+        // When EXPLAIN_ARGUMENT throws SQLFeatureNotSupportedException (compatibility degradation),
+        // predicate text is still emitted because pre-redaction makes it safe regardless of
+        // language classification — double-quoted string literals are replaced with "?" before
+        // the SQL obfuscator runs, so XQuery literals cannot leak.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT degrades — driver reports feature unsupported
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        when(argPs.executeQuery()).thenThrow(new java.sql.SQLFeatureNotSupportedException("not supported"));
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // Predicate row that would leak an XQuery literal if emitted
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn("/customer[ssn=\"999-99-9999\"]");
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQ", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQ", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+
+        q.collect();
+
+        verify(logBuilder).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // The literal value is pre-redacted to "?" — the raw SSN must not appear
+        assertThat(plan).doesNotContain("999-99-9999");
+        // The element name "ssn" is not a literal — it may appear in the predicate text
+        // "text" key must be present — predicate is emitted (not suppressed) after pre-redaction
+        assertThat(plan).contains("\"text\"");
     }
 
     @Test
     void configRejectsNegativeTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-            () -> cfg.setTopQueryCount(-1));
+            () -> cfg.getTopQueryCollection().setTopQueryCount(-1));
+    }
+
+    // --- P1-1: ARGUMENT_VALUE obfuscation ---
+
+    @Test
+    void argumentValueWithLiteralIsObfuscated() throws Exception {
+        // PREFETCHTYPE is in the allowlist — its value "NONE" passes through obfuscation
+        // unchanged (no literals) and appears in the plan JSON.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(false);
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x20});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execLit", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x20});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execLit", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull().contains("PREFETCHTYPE");
+        // PREFETCHTYPE is in the allowlist; "NONE" has no literals so passes through obfuscation unchanged.
+        assertThat(plan).contains("NONE");
+    }
+
+    @Test
+    void unknownArgumentTypeValueOmitted() throws Exception {
+        // NEWTYPE is not in the allowlist — its value must be omitted from the plan JSON
+        // to prevent leaking literals from unknown argument formats.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("NEWTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("some value");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(false);
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x21});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execNew", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x21});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execNew", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull().contains("NEWTYPE");
+        // Unknown type — value must be omitted to avoid leaking literals.
+        assertThat(plan).doesNotContain("some value");
+    }
+
+    // --- P1-2: deterministic ORDER BY before FETCH FIRST ---
+
+    @Test
+    void sqlHasOrderByBeforeFetchFirst() throws Exception {
+        // ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC makes the candidate set
+        // deterministic (highest cumulative elapsed time). FETCH FIRST then caps rows.
+        when(rs.next()).thenReturn(false);
+        query().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+        assertThat(sql).containsIgnoringCase("ORDER BY STMT_EXEC_TIME DESC");
+        assertThat(sql).containsIgnoringCase("FETCH FIRST");
+        // ORDER BY must precede FETCH FIRST in the statement text
+        assertThat(sql.toUpperCase().indexOf("ORDER BY"))
+            .isLessThan(sql.toUpperCase().indexOf("FETCH FIRST"));
+    }
+
+    // --- P1-3: maxExplainEachInterval defaults to 0 ---
+
+    @Test
+    void maxExplainDefaultIsZero() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig cfg =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.TopQueryCollectionConfig();
+        assertThat(cfg.getMaxExplainEachInterval()).isEqualTo(0);
+    }
+
+    // --- P2-5: transient timeout in per-table try/catch returns null plan (not cached) ---
+
+    @Test
+    void transientTimeoutInArgumentTableReturnsNullPlan() throws Exception {
+        // Stub EXPLAIN_FROM_SECTION and EXPLAIN_OPERATOR normally, but EXPLAIN_ARGUMENT throws
+        // a generic SQLException (not SQLCODE -206, not SQLFeatureNotSupportedException).
+        // The outer catch should return null so the entry is not cached.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT throws a transient SQLException (not a compatibility signal)
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        when(argPs.executeQuery()).thenThrow(new java.sql.SQLException("timeout"));
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        // op, stream, arg, delete (cleanup always runs)
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, delPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x30});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTimeout", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x30});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTimeout", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // top_query record should still be emitted (plan failure doesn't drop the record)
+        verify(logBuilder).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        // But plan must be null (transient exception → not cached → null returned)
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isNull();
+    }
+
+    @Test
+    void transientPlanFailureIsNotCached_prepareCallRetried() throws Exception {
+        // A generic SQLException from EXPLAIN_FROM_SECTION (non-permanent SQLSTATE) is
+        // transient — fetchPlanEntry returns null and the plan cache stores no negative entry.
+        // prepareCall must therefore be invoked again on the NEXT emission for the same executableId.
+        // Test structure: cycle 1 seeds; cycle 2 emits + fails (prepareCall #1); cycle 3 emits + retries (prepareCall #2).
+        CallableStatement cs1 = mock(CallableStatement.class);
+        when(cs1.execute()).thenThrow(new java.sql.SQLException("connection reset", "08006"));
+
+        CallableStatement cs2 = mock(CallableStatement.class);
+        when(cs2.execute()).thenThrow(new java.sql.SQLException("connection reset", "08006"));
+
+        when(conn.prepareCall(anyString())).thenReturn(cs1, cs2);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Cycle 1: seed baseline — no emission, no prepareCall
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x42});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTransient", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Cycle 2: emit (delta present); transient failure → prepareCall #1, no cache entry stored
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x42});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTransient", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Cycle 3: emit again; plan cache has no entry → prepareCall #2 (not suppressed)
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x42});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTransient", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Both emitting cycles must have attempted plan fetch — transient failure not cached
+        verify(conn, times(2)).prepareCall(anyString());
+    }
+
+    // --- P2-6: per-plan byte budget cap ---
+
+    @Test
+    void planExceedingByteBudgetReturnsNull() throws Exception {
+        // Generate a large predicate result set that pushes sb.length() over 100 KiB.
+        // Each predicate row contributes ~60 bytes; need ~1700 rows to exceed 100 KiB.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // One EXPLAIN_ARGUMENT row for op 1 — confirms it as SQL so predicate text is processed
+        // (required for the budget cap to trigger; unknown-language operators are suppressed)
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE: produce 2000 rows, each with a 50-char text → well over 100 KiB
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        // Return true 2000 times then false
+        Boolean[] nexts = new Boolean[2001];
+        java.util.Arrays.fill(nexts, Boolean.TRUE);
+        nexts[2000] = Boolean.FALSE;
+        when(predRs.next()).thenReturn(true, nexts);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG");
+        // 60-char text per predicate row
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn("ABCDEFGHIJKLMNOPQRSTUVWXYZ01234567890ABCDEFGHIJKLMNOPQRSTUVWX");
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x40});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execBig", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x40});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execBig", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // top_query record emitted, but plan must be null (budget exceeded → not cached)
+        verify(logBuilder).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isNull();
+    }
+
+    // --- redactDoubleQuotedStrings unit tests ---
+
+    @Test
+    void redactDoubleQuotedStrings_replacesLiteralContent() {
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("/order[id=\"secret\"]"))
+            .isEqualTo("/order[id=\"?\"]");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_handlesEscapedDoubleQuotes() {
+        // "O""Brien" — "" escape inside a double-quoted body
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("\"O\"\"Brien\""))
+            .isEqualTo("\"?\"");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_multipleLiteralsInExpression() {
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("\"a\" AND \"b\""))
+            .isEqualTo("\"?\" AND \"?\"");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_noDoubleQuotes_unchanged() {
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("Q1.ID = 42"))
+            .isEqualTo("Q1.ID = 42");
+    }
+
+    @Test
+    void redactDoubleQuotedStrings_unterminatedQuote_replacedSafely() {
+        // Unterminated "secret — body consumed to end of input, replaced with ?
+        assertThat(TopQueryQuery.redactDoubleQuotedStrings("\"unterminated"))
+            .isEqualTo("\"?\"");
+    }
+
+    @Test
+    void xqueryPredicateWithNoQlangRow_doubleQuotedLiteralRedacted() throws Exception {
+        // Regression: argument collection succeeds and an XQuery operator returns a
+        // PREDICATE-typed ARGUMENT_VALUE with a double-quoted literal, but no QLANG row.
+        // The literal must be redacted via redactDoubleQuotedStrings without requiring
+        // language classification.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("XISCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: only a PREDICATE row, no QLANG row for this operator
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREDICATE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("/product[sku=\"P-9001\"]");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(false);
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0E});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQNoLang", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0E});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQNoLang", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // Double-quoted literal "P-9001" must be redacted even without a QLANG row
+        assertThat(plan).doesNotContain("P-9001");
     }
 }

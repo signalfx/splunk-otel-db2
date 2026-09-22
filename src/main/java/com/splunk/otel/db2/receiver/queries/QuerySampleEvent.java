@@ -26,9 +26,11 @@ public final class QuerySampleEvent {
     public static final AttributeKey<String> DB_NAMESPACE     = AttributeKey.stringKey("db.namespace");
     public static final AttributeKey<String> DB_QUERY_TEXT    = AttributeKey.stringKey("db.query.text");
     public static final AttributeKey<String> DB_OPERATION     = AttributeKey.stringKey("db.operation.name");
-    public static final AttributeKey<String> DB2_APP_HANDLE   = AttributeKey.stringKey("db2.session_id");
-    public static final AttributeKey<String> DB2_ACTIVITY     = AttributeKey.stringKey("db2.activity_state");
-    public static final AttributeKey<String> DB2_QUERY_START  = AttributeKey.stringKey("db2.query_start");
+    public static final AttributeKey<String> DB2_APP_HANDLE      = AttributeKey.stringKey("db2.session_id");
+    public static final AttributeKey<String> DB2_ACTIVITY        = AttributeKey.stringKey("db2.activity_state");
+    public static final AttributeKey<String> DB2_SESSION_STATUS  = AttributeKey.stringKey("db2.session_status");
+    public static final AttributeKey<String> DB2_PLAN_HASH       = AttributeKey.stringKey("db2.query_plan.hash");
+    public static final AttributeKey<String> DB2_QUERY_START     = AttributeKey.stringKey("db2.query_start");
     public static final AttributeKey<Double> DB2_DURATION     = AttributeKey.doubleKey("db2.session.duration");
     public static final AttributeKey<Long>   DB2_MEMBER       = AttributeKey.longKey("db2.member");
     public static final AttributeKey<Double> DB2_CPU_TIME     = AttributeKey.doubleKey("db2.cpu_time");
@@ -58,12 +60,14 @@ public final class QuerySampleEvent {
     // Optional — query sample fields
     private String appHandle;
     private String activityState;
+    private String sessionStatus;
     private String operationName;
     private String queryStart;
     private String userName;
     private String clientAddress;
     private Double cpuTimeSec;   // null = omit (snapshot path has no CPU data)
     private Double waitTimeSec;  // null = omit (Db2 < 10.5 has no MON_GET_ACTIVITY)
+    private String planHash;  // null = not available (snapshot path or no active section)
 
     // Optional — blocking fields (null = not in lock-wait)
     private String  blockerHandle;
@@ -93,6 +97,7 @@ public final class QuerySampleEvent {
 
     public QuerySampleEvent appHandle(String v)      { this.appHandle      = v; return this; }
     public QuerySampleEvent activityState(String v)  { this.activityState  = v; return this; }
+    public QuerySampleEvent sessionStatus(String v)  { this.sessionStatus  = v; return this; }
     public QuerySampleEvent operationName(String v)  { this.operationName  = v; return this; }
     public QuerySampleEvent queryStart(String v)     { this.queryStart     = v; return this; }
     public QuerySampleEvent userName(String v)       { this.userName      = v; return this; }
@@ -109,6 +114,8 @@ public final class QuerySampleEvent {
         if (waitMs >= 0) this.waitTimeSec = waitMs / 1000.0;
         return this;
     }
+
+    public QuerySampleEvent planHash(String v) { this.planHash = v; return this; }
 
     // Blocking attribute setters
     public QuerySampleEvent blockerHandle(String v)       { this.blockerHandle     = v; return this; }
@@ -135,13 +142,15 @@ public final class QuerySampleEvent {
             .put(DB2_MEMBER,    member);
 
         if (appHandle     != null) b.put(DB2_APP_HANDLE,  appHandle);
-        if (activityState != null) b.put(DB2_ACTIVITY,    activityState);
-        if (operationName != null) b.put(DB_OPERATION,    operationName);
+        if (activityState != null) b.put(DB2_ACTIVITY,       activityState);
+        if (sessionStatus != null) b.put(DB2_SESSION_STATUS, sessionStatus);
+        if (operationName != null) b.put(DB_OPERATION,       operationName);
         if (queryStart    != null) b.put(DB2_QUERY_START, queryStart);
         if (userName      != null) b.put(USER_NAME,       userName);
         if (clientAddress != null) b.put(CLIENT_ADDRESS,  clientAddress);
         if (cpuTimeSec    != null) b.put(DB2_CPU_TIME,    cpuTimeSec);
         if (waitTimeSec   != null) b.put(DB2_WAIT_TIME,   waitTimeSec);
+        if (planHash      != null) b.put(DB2_PLAN_HASH,   planHash);
 
         if (blockerHandle     != null) b.put(DB2_BLOCKER_APP_HANDLE, blockerHandle);
         if (blockerUser       != null) b.put(DB2_BLOCKER_USER,       blockerUser);
