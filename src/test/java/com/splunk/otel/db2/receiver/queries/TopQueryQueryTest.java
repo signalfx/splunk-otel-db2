@@ -894,7 +894,7 @@ class TopQueryQueryTest {
         when(streamRs.getInt("STREAM_ID")).thenReturn(1);
         when(streamRs.getInt("SOURCE_ID")).thenReturn(-1);
         when(streamRs.getInt("TARGET_ID")).thenReturn(1);
-        when(streamRs.getLong("STREAM_COUNT")).thenReturn(3L);
+        when(streamRs.getDouble("STREAM_COUNT")).thenReturn(3.0);
         when(streamRs.getString("SOURCE_TYPE")).thenReturn("TBSCAN");
         when(streamRs.getString("TARGET_TYPE")).thenReturn("RETURN");
         when(streamRs.getString("OBJECT_SCHEMA")).thenReturn("DB2INST1");
@@ -1476,6 +1476,87 @@ class TopQueryQueryTest {
     }
 
     @Test
+    void predicateTextOmittedWhenArgumentCollectionDegrades() throws Exception {
+        // When EXPLAIN_ARGUMENT throws SQLFeatureNotSupportedException (compatibility degradation),
+        // xqueryArgCollectionSucceeded stays false. Step 2e must suppress ALL predicate text
+        // to avoid leaking XQuery literals that the SQL obfuscator cannot safely redact.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT degrades — driver reports feature unsupported
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        when(argPs.executeQuery()).thenThrow(new java.sql.SQLFeatureNotSupportedException("not supported"));
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // Predicate row that would leak an XQuery literal if emitted
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn("/customer[ssn=\"999-99-9999\"]");
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQ", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execXQ", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+
+        q.collect();
+
+        verify(logBuilder).emit();
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // XQuery literal must not appear — argument collection degraded, all predicates suppressed
+        assertThat(plan).doesNotContain("999-99-9999").doesNotContain("ssn");
+        assertThat(plan).doesNotContain("\"text\"");
+    }
+
+    @Test
     void configRejectsNegativeTopQueryCount() {
         com.splunk.otel.db2.config.Db2ReceiverConfig cfg = new com.splunk.otel.db2.config.Db2ReceiverConfig();
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
@@ -1728,6 +1809,52 @@ class TopQueryQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         // But plan must be null (transient exception → not cached → null returned)
         assertThat(cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN)).isNull();
+    }
+
+    @Test
+    void transientPlanFailureIsNotCached_prepareCallRetried() throws Exception {
+        // A generic SQLException from EXPLAIN_FROM_SECTION (non-permanent SQLSTATE) is
+        // transient — fetchPlanEntry returns null and the plan cache stores no negative entry.
+        // prepareCall must therefore be invoked again on the NEXT emission for the same executableId.
+        // Test structure: cycle 1 seeds; cycle 2 emits + fails (prepareCall #1); cycle 3 emits + retries (prepareCall #2).
+        CallableStatement cs1 = mock(CallableStatement.class);
+        when(cs1.execute()).thenThrow(new java.sql.SQLException("connection reset", "08006"));
+
+        CallableStatement cs2 = mock(CallableStatement.class);
+        when(cs2.execute()).thenThrow(new java.sql.SQLException("connection reset", "08006"));
+
+        when(conn.prepareCall(anyString())).thenReturn(cs1, cs2);
+
+        TopQueryQuery q = queryWithPlan();
+
+        // Cycle 1: seed baseline — no emission, no prepareCall
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x42});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTransient", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Cycle 2: emit (delta present); transient failure → prepareCall #1, no cache entry stored
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x42});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTransient", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Cycle 3: emit again; plan cache has no entry → prepareCall #2 (not suppressed)
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x42});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execTransient", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        // Both emitting cycles must have attempted plan fetch — transient failure not cached
+        verify(conn, times(2)).prepareCall(anyString());
     }
 
     // --- P2-6: per-plan byte budget cap ---

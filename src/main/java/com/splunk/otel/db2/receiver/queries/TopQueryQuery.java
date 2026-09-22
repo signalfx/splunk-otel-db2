@@ -570,18 +570,15 @@ public class TopQueryQuery {
                     planHash = cached.hash;
                 } else if (planAttempts < planMaxPerInterval) {
                     planAttempts++;
-                    planXml = fetchPlanXml(conn, execIdHex, (int) member);
-                    if (planXml != null) {
-                        planHash = execIdHex;
-                        planCache.put(cacheKey, new PlanCacheEntry(planXml, planHash,
-                            System.currentTimeMillis() + planCacheTtlMs));
-                    } else {
-                        // Negative cache: permanent failures (no explain tables, static SQL,
-                        // evicted section) re-attempt every interval otherwise. Cache null
-                        // using the same TTL so next-interval re-explains only on expiry.
-                        planCache.put(cacheKey, new PlanCacheEntry(null, null,
-                            System.currentTimeMillis() + planCacheTtlMs));
+                    PlanCacheEntry fetched = fetchPlanEntry(conn, execIdHex, (int) member);
+                    if (fetched != null) {
+                        // fetched.xml == null means permanent failure — cache it so we don't retry.
+                        // fetched.xml != null means success.
+                        planCache.put(cacheKey, fetched);
+                        planXml  = fetched.xml;
+                        planHash = fetched.hash;
                     }
+                    // fetched == null means transient failure — do not cache; retry next interval.
                 }
                 if (planXml != null) {
                     event.queryPlan(planXml, planHash);
@@ -599,6 +596,9 @@ public class TopQueryQuery {
     /**
      * Retrieve the explain plan for one section using EXPLAIN_FROM_SECTION.
      *
+     * Returns a {@link PlanCacheEntry} on success or permanent failure (xml==null),
+     * or {@code null} on transient failure so the caller does not negative-cache it.
+     *
      * 1. Call {@code SYSPROC.EXPLAIN_FROM_SECTION} with EXECUTABLE_ID and SECTION_SOURCE_TYPE='M'
      *    (empirically verified on DB2 11.5 as the correct value for dynamic SQL).
      *    Returns EXPLAIN_REQUESTER and EXPLAIN_TIME that identify the inserted rows.
@@ -609,7 +609,7 @@ public class TopQueryQuery {
      * Requires explain tables pre-created:
      *   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN','C',NULL,CURRENT SCHEMA)
      */
-    private String fetchPlanXml(Connection conn, String execIdHex, int member) {
+    private PlanCacheEntry fetchPlanEntry(Connection conn, String execIdHex, int member) {
         byte[] execIdBytes = hexToBytes(execIdHex);
         if (execIdBytes == null) return null;
 
@@ -643,7 +643,11 @@ public class TopQueryQuery {
                 sourceVersion    = cs.getString(8);
             }
 
-            if (explainRequester == null || explainTime == null || usedSchema == null) return null;
+            if (explainRequester == null || explainTime == null || usedSchema == null) {
+                // EXPLAIN_FROM_SECTION returned no output params — section was evicted from memory.
+                // Permanent: cache null entry so we don't retry this interval.
+                return new PlanCacheEntry(null, null, System.currentTimeMillis() + planCacheTtlMs);
+            }
 
             // Step 2a: read EXPLAIN_OPERATOR using the schema DB2 confirmed
             String sqlOp   = String.format(SQL_EXPLAIN_OPERATOR,  usedSchema);
@@ -704,7 +708,7 @@ public class TopQueryQuery {
                         int streamId     = rs.getInt("STREAM_ID");
                         int srcId        = rs.getInt("SOURCE_ID");
                         int tgtId        = rs.getInt("TARGET_ID");
-                        long streamCount = rs.getLong("STREAM_COUNT");
+                        double streamCount = rs.getDouble("STREAM_COUNT");
                         String srcType   = rs.getString("SOURCE_TYPE");
                         String tgtType   = rs.getString("TARGET_TYPE");
                         String objSchema = rs.getString("OBJECT_SCHEMA");
@@ -746,9 +750,13 @@ public class TopQueryQuery {
             // Also collects xqueryOpIds: operator IDs where QLANG=XQUERY, used in Step 2e to
             // suppress predicate text for XQuery operators (SQL obfuscator cannot safely
             // sanitise XQuery string literals in double-quoted syntax).
+            // xqueryArgCollectionSucceeded: true only when EXPLAIN_ARGUMENT was read without
+            // error. If argument collection degrades (compatibility exception), predicates for
+            // all operators are suppressed — fail-closed.
             sb.append("],\"arguments\":[");
             planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
             java.util.Set<Integer> xqueryOpIds = new java.util.HashSet<>();
+            boolean xqueryArgCollectionSucceeded = false;
             if (!planBudgetExceeded) {
             try {
                 boolean firstArg = true;
@@ -797,6 +805,7 @@ public class TopQueryQuery {
                         }
                     }
                 }
+                xqueryArgCollectionSucceeded = true;
             } catch (Exception e) {
                 if (isCompatibilityException(e)) {
                     log.debug("TopQueryQuery: EXPLAIN_ARGUMENT query failed (compatibility) for execIdHex={}: {}", execIdHex, e.getMessage());
@@ -862,12 +871,11 @@ public class TopQueryQuery {
                             String rawText    = rs.getString("PREDICATE_TEXT");
                             String obfText    = null;
                             if (rawText != null && !rawText.isBlank()) {
-                                // Omit predicate text for XQuery operators: EXPLAIN_ARGUMENT
-                                // QLANG=XQUERY tags operators whose predicates use XQuery syntax.
-                                // The SQL obfuscator preserves double-quoted text as identifiers,
-                                // which would leak XQuery string literals (e.g. [ssn="secret"]).
-                                // Fail-closed: emit text only when the operator is confirmed SQL.
-                                if (!xqueryOpIds.contains(opId)) {
+                                // Emit predicate text only when argument collection succeeded
+                                // (QLANG tags were reliably read) AND this operator is not XQuery.
+                                // If argument collection degraded, xqueryArgCollectionSucceeded is
+                                // false and all predicate text is suppressed — fail-closed.
+                                if (xqueryArgCollectionSucceeded && !xqueryOpIds.contains(opId)) {
                                     String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
                                     if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
                                 }
@@ -907,10 +915,16 @@ public class TopQueryQuery {
                 return null;
             }
             sb.append("]}");
-            return sb.toString();
+            String planXml = sb.toString();
+            return new PlanCacheEntry(planXml, execIdHex, System.currentTimeMillis() + planCacheTtlMs);
 
         } catch (Exception e) {
-            log.debug("TopQueryQuery: plan fetch failed for execIdHex={} member={}: {}",
+            if (isPermanentPlanFailure(e)) {
+                log.debug("TopQueryQuery: plan fetch permanently failed for execIdHex={} member={} ({}): {}",
+                    execIdHex, member, e.getClass().getSimpleName(), e.getMessage());
+                return new PlanCacheEntry(null, null, System.currentTimeMillis() + planCacheTtlMs);
+            }
+            log.debug("TopQueryQuery: plan fetch transiently failed for execIdHex={} member={}: {}",
                 execIdHex, member, e.getMessage());
             return null;
         } finally {
@@ -962,9 +976,24 @@ public class TopQueryQuery {
     // Only SQLFeatureNotSupportedException is a safe compatibility signal — it means
     // the JDBC driver explicitly reports the feature as unsupported for this DB version.
     // Operational errors (timeout, permissions, syntax) re-throw to the outer catch
-    // so fetchPlanXml returns null (uncached).
+    // so fetchPlanEntry returns null (uncached).
     private static boolean isCompatibilityException(Exception e) {
         return e instanceof SQLFeatureNotSupportedException;
+    }
+
+    // Permanent plan failures: section is no longer in memory (SQLSTATE 55075) or
+    // explain tables have not been created (SQLSTATE 51002 / SQLCODE -805/-218).
+    // These conditions will not resolve within the cache TTL window, so negative-
+    // caching them avoids repeated failed EXPLAIN_FROM_SECTION calls every interval.
+    private static boolean isPermanentPlanFailure(Exception e) {
+        if (!(e instanceof java.sql.SQLException)) return false;
+        String sqlState = ((java.sql.SQLException) e).getSQLState();
+        if (sqlState == null) return false;
+        // 55075: DB2 section no longer in memory
+        // 42704: object not found (explain tables missing or dropped)
+        // 42601/42S02: similar schema/object errors on some JDBC stacks
+        return sqlState.startsWith("55075") || sqlState.startsWith("42704")
+            || sqlState.startsWith("42601") || sqlState.startsWith("42S02");
     }
 
     public static String sha256Hex(String input) {

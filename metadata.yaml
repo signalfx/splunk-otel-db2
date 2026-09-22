@@ -442,10 +442,13 @@ events:
   db.server.top_query:
     enabled: false
     description: >
-      A top SQL statement from the Db2 plan cache, ranked by execution elapsed time
-      added during the current collection interval. SQL text is obfuscated before
-      emission — literal values are replaced with ?. Emitted at top_query_interval
-      as OTel log records with severity INFO.
+      A top SQL statement from the Db2 plan cache, approximately ranked by execution
+      elapsed time added during the current collection interval (per-interval delta of
+      STMT_EXEC_TIME). The SQL first selects at most max_query_sample_count candidates
+      by cumulative lifetime elapsed time; interval deltas are then ranked over that set.
+      A newly-hot statement outside the cumulative top-N can be missed in one interval.
+      SQL text is obfuscated before emission — literal values are replaced with ?.
+      Emitted at top_query_interval as OTel log records with severity INFO.
       The first collection after startup seeds the delta baseline and emits nothing.
 
       When top_query_collection.max_explain_each_interval is greater than zero, each
