@@ -747,22 +747,27 @@ public class TopQueryQuery {
             // catch returns null (keeping the entry uncached).
 
             // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
-            // Two-pass approach: buffer ALL rows first to classify XQuery operators, then
-            // serialize values. This ensures xqueryOpIds is fully populated before any
+            // Two-pass approach: buffer ALL rows first to build language classification, then
+            // serialize values. This ensures full operator classification before any
             // PREDICATE-typed value is processed — rows are not guaranteed to arrive with
             // QLANG before PREDICATE for the same operator.
-            // xqueryArgCollectionSucceeded: true only when EXPLAIN_ARGUMENT was read without
-            // error. If argument collection degrades (compatibility exception), all predicate
-            // text in Step 2e is suppressed — fail-closed.
+            //
+            // Language classification (fail-closed):
+            //   xqueryOpIds       — operators with QLANG=XQUERY: XQuery syntax, suppress predicate.
+            //   confirmedSqlOpIds — operators that appeared in EXPLAIN_ARGUMENT without QLANG=XQUERY:
+            //                       language positively identified as SQL.
+            //   absent operators  — no EXPLAIN_ARGUMENT rows at all: language unknown → suppress.
+            //   xqueryArgCollectionSucceeded=false — query degraded → suppress all predicates.
             sb.append("],\"arguments\":[");
             planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-            java.util.Set<Integer> xqueryOpIds = new java.util.HashSet<>();
+            java.util.Set<Integer> xqueryOpIds        = new java.util.HashSet<>();
+            java.util.Set<Integer> confirmedSqlOpIds  = new java.util.HashSet<>();
             boolean xqueryArgCollectionSucceeded = false;
             // Buffered rows: int[opId], String[argType], String[rawValue]
             java.util.List<Object[]> argRows = new java.util.ArrayList<>();
             if (!planBudgetExceeded) {
             try {
-                // Pass 1: read all rows and classify XQuery operators
+                // Pass 1: read all rows and build operator language classification
                 try (PreparedStatement ps = conn.prepareStatement(sqlArg)) {
                     ps.setQueryTimeout(queryTimeoutSeconds);
                     ps.setString(1, explainRequester); ps.setTimestamp(2, explainTime);
@@ -780,8 +785,15 @@ public class TopQueryQuery {
                         }
                     }
                 }
+                // confirmedSqlOpIds = operators seen in EXPLAIN_ARGUMENT minus XQuery operators.
+                // Operators absent from EXPLAIN_ARGUMENT entirely have unknown language and are
+                // not added here — their predicate text is suppressed by the check below.
+                for (Object[] row : argRows) {
+                    int opId = (Integer) row[0];
+                    if (!xqueryOpIds.contains(opId)) confirmedSqlOpIds.add(opId);
+                }
                 xqueryArgCollectionSucceeded = true;
-                // Pass 2: serialize argument rows now that xqueryOpIds is complete
+                // Pass 2: serialize argument rows now that classification is complete
                 boolean firstArg = true;
                 for (Object[] row : argRows) {
                     int    opId    = (Integer) row[0];
@@ -793,10 +805,10 @@ public class TopQueryQuery {
                     // ARGUMENT_VALUE may contain literals. For types that use SQL syntax
                     // (e.g. SORTKEY, PREDICATE) use the SQL obfuscator. Unknown or non-SQL
                     // types (XPATH) are omitted because the SQL lexer cannot safely redact them.
-                    // PREDICATE values on XQuery operators use XQuery syntax — omit them even
-                    // though PREDICATE is in the SQL-safe allowlist.
+                    // For PREDICATE-typed values: require positive SQL classification — omit for
+                    // XQuery operators and for operators with unknown language (absent from args).
                     if (rawVal != null && isSafeArgumentType(argType)) {
-                        if (!"PREDICATE".equalsIgnoreCase(argType) || !xqueryOpIds.contains(opId)) {
+                        if (!"PREDICATE".equalsIgnoreCase(argType) || confirmedSqlOpIds.contains(opId)) {
                             String obfVal = SqlObfuscator.obfuscateFragment(rawVal.trim());
                             if (!SqlObfuscator.OBFUSCATION_FAILED.equals(obfVal)) {
                                 frag.append(",\"value\":\"").append(jsonEscape(obfVal)).append('"');
@@ -878,11 +890,13 @@ public class TopQueryQuery {
                             String rawText    = rs.getString("PREDICATE_TEXT");
                             String obfText    = null;
                             if (rawText != null && !rawText.isBlank()) {
-                                // Emit predicate text only when argument collection succeeded
-                                // (QLANG tags were reliably read) AND this operator is not XQuery.
-                                // If argument collection degraded, xqueryArgCollectionSucceeded is
-                                // false and all predicate text is suppressed — fail-closed.
-                                if (xqueryArgCollectionSucceeded && !xqueryOpIds.contains(opId)) {
+                                // Emit predicate text only when this operator is positively
+                                // classified as SQL — i.e. it appeared in EXPLAIN_ARGUMENT and
+                                // had no QLANG=XQUERY row. Operators absent from EXPLAIN_ARGUMENT
+                                // (unknown language) and all XQuery operators are suppressed.
+                                // xqueryArgCollectionSucceeded=false means the query degraded
+                                // entirely — all predicates are suppressed.
+                                if (xqueryArgCollectionSucceeded && confirmedSqlOpIds.contains(opId)) {
                                     String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
                                     if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
                                 }

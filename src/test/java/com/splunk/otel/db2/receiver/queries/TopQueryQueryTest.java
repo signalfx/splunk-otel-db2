@@ -1412,13 +1412,13 @@ class TopQueryQueryTest {
         when(streamRs.next()).thenReturn(false);
         when(streamPs.executeQuery()).thenReturn(streamRs);
 
-        // EXPLAIN_ARGUMENT: op 1 tagged QLANG=XQUERY; op 2 has no QLANG (SQL)
+        // EXPLAIN_ARGUMENT: op 1 tagged QLANG=XQUERY; op 2 has a PREFETCHTYPE row (confirms SQL)
         PreparedStatement argPs = mock(PreparedStatement.class);
         ResultSet argRs = mock(ResultSet.class);
-        when(argRs.next()).thenReturn(true, false);
-        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
-        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("QLANG");
-        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("XQUERY");
+        when(argRs.next()).thenReturn(true, true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("QLANG", "PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("XQUERY", "NONE");
         when(argPs.executeQuery()).thenReturn(argRs);
 
         PreparedStatement objPs = mock(PreparedStatement.class);
@@ -1555,6 +1555,99 @@ class TopQueryQueryTest {
         assertThat(plan).doesNotContain("secret-42");
         // The QLANG row itself should appear (with no value — QLANG is not in the safe allowlist)
         assertThat(plan).contains("\"type\":\"QLANG\"");
+    }
+
+    @Test
+    void predicateTextOmittedForOperatorWithNoQlangRow() throws Exception {
+        // EXPLAIN_ARGUMENT collection succeeds but the operator that has a predicate
+        // returned NO rows at all (IBM may omit argument rows for some operator types, and
+        // section-explain can omit QLANG even when the statement is XQuery). The operator
+        // is therefore absent from both xqueryOpIds and confirmedSqlOpIds. Its predicate
+        // text must be suppressed — unknown language is treated as unsafe.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        // Two operators: op 1 (the predicate's op), op 2 (SQL — confirmed via arg row)
+        when(opRs.next()).thenReturn(true, true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("FETCH", "TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: only op 2 returns a row; op 1 has NO argument rows at all.
+        // Op 1's language is therefore unknown.
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(2);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE: op 1 (unknown language) and op 2 (confirmed SQL)
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1, 2);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG", "SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn(
+            "/order[customer=\"secret\"]",  // op 1: unknown language — must not emit
+            "Q2.ID = 99"                    // op 2: confirmed SQL — safe to obfuscate
+        );
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0D});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execNoQlang", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0D});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execNoQlang", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // Op 1's predicate text must be suppressed — language unknown, no EXPLAIN_ARGUMENT rows
+        assertThat(plan).doesNotContain("secret").doesNotContain("customer");
+        // Op 2's predicate text must still appear — confirmed SQL via EXPLAIN_ARGUMENT
+        assertThat(plan).contains("Q2.ID");
     }
 
     @Test
@@ -1967,9 +2060,14 @@ class TopQueryQueryTest {
         when(streamRs.next()).thenReturn(false);
         when(streamPs.executeQuery()).thenReturn(streamRs);
 
+        // One EXPLAIN_ARGUMENT row for op 1 — confirms it as SQL so predicate text is processed
+        // (required for the budget cap to trigger; unknown-language operators are suppressed)
         PreparedStatement argPs = mock(PreparedStatement.class);
         ResultSet argRs = mock(ResultSet.class);
-        when(argRs.next()).thenReturn(false);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("PREFETCHTYPE");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("NONE");
         when(argPs.executeQuery()).thenReturn(argRs);
 
         PreparedStatement objPs = mock(PreparedStatement.class);
