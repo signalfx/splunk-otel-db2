@@ -1385,13 +1385,94 @@ class TopQueryQueryTest {
     }
 
     @Test
-    void isXQueryDetectsVariableRefsAndPathSteps() {
-        // $ and // are XQuery markers; neither appears in SQL predicates
-        assertThat(TopQueryQuery.isXQuery("$customer/ssn[. = \"123-45-6789\"]")).isTrue();
-        assertThat(TopQueryQuery.isXQuery("//order[amount > 100]")).isTrue();
-        assertThat(TopQueryQuery.isXQuery("$x = 1")).isTrue();
-        assertThat(TopQueryQuery.isXQuery("Q1.COL1 = 'value'")).isFalse();
-        assertThat(TopQueryQuery.isXQuery("T.ID > 42")).isFalse();
+    void xqueryOperatorPredicateTextOmitted() throws Exception {
+        // When EXPLAIN_ARGUMENT contains QLANG=XQUERY for an operator, that operator's
+        // PREDICATE_TEXT must be omitted from the plan (the SQL obfuscator cannot safely
+        // sanitise XQuery double-quoted string literals like [ssn="123-45-6789"]).
+        // A predicate on a different (SQL) operator must still emit its text.
+        CallableStatement cs = mock(CallableStatement.class);
+        when(cs.getString(3)).thenReturn("TESTUSER");
+        when(cs.getString(4)).thenReturn("TESTUSER");
+        Timestamp ts = Timestamp.from(java.time.Instant.EPOCH.plusSeconds(999));
+        when(cs.getTimestamp(5)).thenReturn(ts);
+        when(cs.getString(6)).thenReturn("SYSSH200");
+        when(cs.getString(7)).thenReturn("NULLID");
+        when(cs.getString(8)).thenReturn("0100270A");
+
+        PreparedStatement opPs = mock(PreparedStatement.class);
+        ResultSet opRs = mock(ResultSet.class);
+        when(opRs.next()).thenReturn(true, true, false);
+        when(opRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(opRs.getString("OPERATOR_TYPE")).thenReturn("XISCAN", "TBSCAN");
+        when(opRs.getDouble("TOTAL_COST")).thenReturn(1.0);
+        when(opPs.executeQuery()).thenReturn(opRs);
+
+        PreparedStatement streamPs = mock(PreparedStatement.class);
+        ResultSet streamRs = mock(ResultSet.class);
+        when(streamRs.next()).thenReturn(false);
+        when(streamPs.executeQuery()).thenReturn(streamRs);
+
+        // EXPLAIN_ARGUMENT: op 1 tagged QLANG=XQUERY; op 2 has no QLANG (SQL)
+        PreparedStatement argPs = mock(PreparedStatement.class);
+        ResultSet argRs = mock(ResultSet.class);
+        when(argRs.next()).thenReturn(true, false);
+        when(argRs.getInt("OPERATOR_ID")).thenReturn(1);
+        when(argRs.getString("ARGUMENT_TYPE")).thenReturn("QLANG");
+        when(argRs.getString("ARGUMENT_VALUE")).thenReturn("XQUERY");
+        when(argPs.executeQuery()).thenReturn(argRs);
+
+        PreparedStatement objPs = mock(PreparedStatement.class);
+        ResultSet objRs = mock(ResultSet.class);
+        when(objRs.next()).thenReturn(false);
+        when(objPs.executeQuery()).thenReturn(objRs);
+
+        // EXPLAIN_PREDICATE: op 1 (XQuery) and op 2 (SQL)
+        PreparedStatement predPs = mock(PreparedStatement.class);
+        ResultSet predRs = mock(ResultSet.class);
+        when(predRs.next()).thenReturn(true, true, false);
+        when(predRs.getInt("OPERATOR_ID")).thenReturn(1, 2);
+        when(predRs.getInt("PREDICATE_ID")).thenReturn(1, 2);
+        when(predRs.getString("HOW_APPLIED")).thenReturn("SARG", "SARG");
+        when(predRs.getString("PREDICATE_TEXT")).thenReturn(
+            "/customer[ssn=\"123-45-6789\"]",   // XQuery literal — must not appear
+            "Q2.ID = 42"                          // SQL — safe to obfuscate and emit
+        );
+        when(predPs.executeQuery()).thenReturn(predRs);
+
+        PreparedStatement delPs = mock(PreparedStatement.class);
+        when(delPs.executeUpdate()).thenReturn(1);
+
+        TopQueryQuery q = queryWithPlan();
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0B});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execX", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        reset(conn);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(conn.prepareCall(anyString())).thenReturn(cs);
+        when(conn.prepareStatement(anyString()))
+            .thenReturn(opPs, streamPs, argPs, objPs, predPs, delPs);
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x0B});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "execX", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String plan = cap.getValue().get(TopQueryEvent.DB2_QUERY_PLAN);
+        assertThat(plan).isNotNull();
+        // XQuery predicate text must be omitted — literal must not leak
+        assertThat(plan).doesNotContain("123-45-6789").doesNotContain("ssn");
+        // SQL predicate on op 2 must still appear (obfuscated)
+        assertThat(plan).contains("\"how\":\"SARG\"");
+        assertThat(plan).contains("Q2.ID");
     }
 
     @Test
@@ -1555,20 +1636,23 @@ class TopQueryQueryTest {
         assertThat(plan).doesNotContain("some value");
     }
 
-    // --- P1-2: no ORDER BY in SQL; FETCH FIRST uses maxQuerySampleCount ---
+    // --- P1-2: deterministic ORDER BY before FETCH FIRST ---
 
     @Test
-    void sqlHasNoOrderByButHasFetchFirst() throws Exception {
-        // No ORDER BY — Java ranks interval deltas after fetch.
-        // FETCH FIRST bounds DB rows to maxQuerySampleCount (default 1000 via query()).
+    void sqlHasOrderByBeforeFetchFirst() throws Exception {
+        // ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC makes the candidate set
+        // deterministic (highest cumulative elapsed time). FETCH FIRST then caps rows.
         when(rs.next()).thenReturn(false);
         query().collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
-        assertThat(sql).doesNotContainIgnoringCase("ORDER BY STMT_EXEC_TIME");
+        assertThat(sql).containsIgnoringCase("ORDER BY STMT_EXEC_TIME DESC");
         assertThat(sql).containsIgnoringCase("FETCH FIRST");
+        // ORDER BY must precede FETCH FIRST in the statement text
+        assertThat(sql.toUpperCase().indexOf("ORDER BY"))
+            .isLessThan(sql.toUpperCase().indexOf("FETCH FIRST"));
     }
 
     // --- P1-3: maxExplainEachInterval defaults to 0 ---

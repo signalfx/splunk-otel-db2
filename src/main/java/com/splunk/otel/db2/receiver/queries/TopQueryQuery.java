@@ -103,9 +103,13 @@ public class TopQueryQuery {
     // SORT_OVERFLOWS: correct column name (not TOTAL_SORT_OVERFLOWS).
     // TOTAL_SECTION_SORTS: correct column name (not STMT_SORTS).
     // Lookback is parameterised as %1$d minutes (derived from the collection interval).
-    // FETCH FIRST %2$d ROWS ONLY bounds the result set to maxQuerySampleCount rows so
-    // memory, network, and sort cost are proportional to that limit.
-    // Delta ranking then selects the hottest topQueryCount rows from the fetched set.
+    // ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC with FETCH FIRST %2$d ROWS ONLY
+    // yields a deterministic candidate set bounded to maxQuerySampleCount rows: the rows
+    // with the highest cumulative elapsed time (a proxy for historical hot queries).
+    // Interval-delta ranking over this candidate set is approximate — a statement that
+    // had zero activity before the last scrape but is genuinely new-and-hot this interval
+    // can only be found if it falls in the top maxQuerySampleCount by cumulative cost.
+    // This is documented behaviour; use a large maxQuerySampleCount to widen coverage.
     private static final String SQL =
         "SELECT STMT_TEXT, " +
         "       MEMBER, " +
@@ -134,6 +138,7 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%' " +
+        "ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC " +
         "FETCH FIRST %2$d ROWS ONLY";
 
     // DB2 explain workflow — two steps (verified on DB2 11.5.8.0):
@@ -733,8 +738,12 @@ public class TopQueryQuery {
             // catch returns null (keeping the entry uncached).
 
             // Step 2c: EXPLAIN_ARGUMENT — operator configuration (join type, prefetch, etc.)
+            // Also collects xqueryOpIds: operator IDs where QLANG=XQUERY, used in Step 2e to
+            // suppress predicate text for XQuery operators (SQL obfuscator cannot safely
+            // sanitise XQuery string literals in double-quoted syntax).
             sb.append("],\"arguments\":[");
             planByteCount += "],\"arguments\":[".getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            java.util.Set<Integer> xqueryOpIds = new java.util.HashSet<>();
             if (!planBudgetExceeded) {
             try {
                 boolean firstArg = true;
@@ -747,6 +756,10 @@ public class TopQueryQuery {
                         while (rs.next()) {
                             String argType = rs.getString("ARGUMENT_TYPE");
                             String rawVal  = rs.getString("ARGUMENT_VALUE");
+                            // Track XQuery operators so Step 2e can omit their predicate text.
+                            if ("QLANG".equalsIgnoreCase(argType) && "XQUERY".equalsIgnoreCase(rawVal)) {
+                                xqueryOpIds.add(rs.getInt("OPERATOR_ID"));
+                            }
                             StringBuilder frag = new StringBuilder();
                             frag.append("{\"op\":").append(rs.getInt("OPERATOR_ID"))
                                 .append(",\"type\":\"").append(jsonEscape(argType)).append('"');
@@ -840,13 +853,13 @@ public class TopQueryQuery {
                             String rawText    = rs.getString("PREDICATE_TEXT");
                             String obfText    = null;
                             if (rawText != null && !rawText.isBlank()) {
-                                String trimmed = rawText.trim();
-                                // XQuery predicates use $ (variable refs) or // (path steps).
+                                // Omit predicate text for XQuery operators: EXPLAIN_ARGUMENT
+                                // QLANG=XQUERY tags operators whose predicates use XQuery syntax.
                                 // The SQL obfuscator preserves double-quoted text as identifiers,
-                                // which would leak XQuery string literals (e.g. [. = "secret"]).
-                                // Omit the text entirely when XQuery syntax is detected.
-                                if (!isXQuery(trimmed)) {
-                                    String ob = SqlObfuscator.obfuscateFragment(trimmed);
+                                // which would leak XQuery string literals (e.g. [ssn="secret"]).
+                                // Fail-closed: emit text only when the operator is confirmed SQL.
+                                if (!xqueryOpIds.contains(opId)) {
+                                    String ob = SqlObfuscator.obfuscateFragment(rawText.trim());
                                     if (!SqlObfuscator.OBFUSCATION_FAILED.equals(ob)) obfText = ob;
                                 }
                             }
@@ -909,15 +922,6 @@ public class TopQueryQuery {
                 }
             }
         }
-    }
-
-    // XQuery predicates use $ (variable references) or // (path steps), neither of
-    // which appears in SQL predicates. The SQL obfuscator preserves double-quoted text
-    // as identifiers, so an XQuery string literal like [. = "secret"] would leak.
-    // Treating the text as XQuery when either marker is present is conservative: if
-    // we misidentify a SQL predicate we merely omit its text, which is safe.
-    static boolean isXQuery(String text) {
-        return text.contains("$") || text.contains("//");
     }
 
     // Explicit allowlist: default false so unknown future ARGUMENT_TYPE values are
