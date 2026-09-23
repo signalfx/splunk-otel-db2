@@ -209,18 +209,26 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 
 ### SQL and row activity
 
-Additional attributes: `db2.statement_type` (`dynamic`, `static`, `failed`, `select`, `uid`, `ddl`, and `commit`/`rollback` when `use_snapshot_monitor` is enabled), `db2.transaction_type` (`commit`, `rollback`), `db2.row_operation` (`read`, `returned`, `modified`, `inserted`, `updated`, `deleted`, and `selected` when `use_snapshot_monitor` is enabled), `db2.internal` (`true` when initiated by the database manager rather than an application), `db2.rebind_type` (`implicit`, and `auto` when `use_snapshot_monitor` is enabled).
+Additional attributes: `db2.statement_type` (`dynamic`, `static`), `db2.operation_type` (`select`, `uid`, `ddl`), `db2.transaction_type` (`commit`, `rollback`), `db2.row_operation` (`inserted`, `updated`, `deleted`), `db2.internal` (`true` when initiated by the database manager rather than an application).
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `db2.sql.statement.count` | Counter | `{statement}` | SQL statements executed, by statement type |
+| `db2.sql.statement.count` | Counter | `{statement}` | SQL statements executed, by how the statement was prepared |
+| `db2.sql.operation.count` | Counter | `{statement}` | SQL statements executed, by the kind of operation performed |
+| `db2.sql.failed.count` | Counter | `{statement}` | SQL statements that failed |
 | `db2.transaction.count` | Counter | `{transaction}` | Transactions committed or rolled back |
-| `db2.row.count` | Counter | `{row}` | Rows affected, by operation |
+| `db2.row.count` | Counter | `{row}` | Rows inserted, updated or deleted |
+| `db2.row.read.count` | Counter | `{row}` | Rows read from tables |
+| `db2.row.returned.count` | Counter | `{row}` | Rows returned to clients |
 | `db2.sql.compilation.count` | Counter | `{compilation}` | SQL statement compilations |
 | `db2.sql.compilation.time` | Counter | `s` | Time spent compiling SQL statements |
 | `db2.sql.bind.count` | Counter | `{bind}` | Binds and precompiles attempted |
-| `db2.sql.rebind.count` | Counter | `{rebind}` | Packages rebound, by rebind type |
+| `db2.sql.rebind.count` | Counter | `{rebind}` | Packages implicitly rebound |
 | `db2.deadlock.rollback.count` | Counter | `{rollback}` | Internal rollbacks caused by a deadlock (requires `use_snapshot_monitor`) |
+
+`db2.sql.statement.count` and `db2.sql.operation.count` classify the same statements two different ways — a dynamic `SELECT` is counted once in each — so they are separate metrics and must not be added together. For the same reason `db2.row.count` carries only the mutually exclusive insert/update/delete partition, with rows read and rows returned as their own metrics.
+
+Enabling `use_snapshot_monitor` adds only `db2.deadlock.rollback.count`; the remaining snapshot columns duplicate values already available natively and are deliberately not emitted.
 
 ### Sort and direct I/O
 

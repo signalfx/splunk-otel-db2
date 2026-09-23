@@ -15,10 +15,15 @@ import java.util.function.Supplier;
 /**
  * SQL statement and row activity metrics from MON_GET_DATABASE.
  *
- * <p>COMMIT_SQL_STMTS, ROLLBACK_SQL_STMTS, ROWS_SELECTED, INT_DEADLOCK_ROLLBACKS and
- * INT_AUTO_REBINDS exist only in the deprecated snapshot interface, so they are collected
- * from SNAP_GET_DB as extra dimensions on the same instruments when use_snapshot_monitor
- * is enabled.
+ * <p>Each additive metric here holds only mutually exclusive members, so aggregating away an
+ * attribute yields a meaningful total. DB2 classifies the same statement along two axes —
+ * dynamic/static describes how it was prepared, select/uid/ddl what it did — so those are
+ * separate metrics rather than values of one attribute; a dynamic SELECT increments one value
+ * in each. Likewise db2.row.count carries only the insert/update/delete partition, with rows
+ * read and rows returned as their own metrics.
+ *
+ * <p>INT_DEADLOCK_ROLLBACKS exists only in the deprecated snapshot interface and is collected
+ * from SNAP_GET_DB when use_snapshot_monitor is enabled.
  */
 public class SqlActivityQuery {
     private static final Logger log = LoggerFactory.getLogger(SqlActivityQuery.class);
@@ -40,10 +45,14 @@ public class SqlActivityQuery {
     // The member argument is omitted deliberately: that is SNAP_GET_DB's "one row per active
     // member" form, matching MON_GET_DATABASE(-2) above. Passing -1 would return only the
     // current member, and -2 returns a single aggregated row with a NULL DBPARTITIONNUM.
+    //
+    // Only INT_DEADLOCK_ROLLBACKS is read. The other snapshot columns duplicate MON_GET_DATABASE
+    // values measured live on Db2 11.5: COMMIT_SQL_STMTS/ROLLBACK_SQL_STMTS match
+    // TOTAL_APP_COMMITS/TOTAL_APP_ROLLBACKS, ROWS_SELECTED matches ROWS_RETURNED, and
+    // INT_AUTO_REBINDS is the same rebind event as IMPLICIT_REBINDS. Emitting them would
+    // double-count the same quantity.
     private static final String SNAPSHOT_SQL =
-        "SELECT DBPARTITIONNUM, " +
-        "COMMIT_SQL_STMTS, ROLLBACK_SQL_STMTS, ROWS_SELECTED, " +
-        "INT_DEADLOCK_ROLLBACKS, INT_AUTO_REBINDS " +
+        "SELECT DBPARTITIONNUM, INT_DEADLOCK_ROLLBACKS " +
         "FROM TABLE(SNAP_GET_DB('')) AS S";
 
     private final Supplier<Connection> connSupplier;
@@ -51,8 +60,12 @@ public class SqlActivityQuery {
     private final boolean useSnapshotMonitor;
 
     private ObservableLongMeasurement statements;
+    private ObservableLongMeasurement operations;
+    private ObservableLongMeasurement failedStatements;
     private ObservableLongMeasurement transactions;
     private ObservableLongMeasurement rows;
+    private ObservableLongMeasurement rowsRead;
+    private ObservableLongMeasurement rowsReturned;
     private ObservableLongMeasurement compilations;
     private ObservableDoubleMeasurement compileTime;
     private ObservableLongMeasurement binds;
@@ -69,7 +82,17 @@ public class SqlActivityQuery {
 
     private void register(Meter meter) {
         statements = meter.counterBuilder("db2.sql.statement.count")
-            .setDescription("Number of SQL statements executed, by statement type.")
+            .setDescription("Number of SQL statements executed, by how the statement was prepared.")
+            .setUnit("{statement}")
+            .buildObserver();
+
+        operations = meter.counterBuilder("db2.sql.operation.count")
+            .setDescription("Number of SQL statements executed, by the kind of operation performed.")
+            .setUnit("{statement}")
+            .buildObserver();
+
+        failedStatements = meter.counterBuilder("db2.sql.failed.count")
+            .setDescription("Number of SQL statements that failed.")
             .setUnit("{statement}")
             .buildObserver();
 
@@ -79,7 +102,17 @@ public class SqlActivityQuery {
             .buildObserver();
 
         rows = meter.counterBuilder("db2.row.count")
-            .setDescription("Number of rows affected, by operation.")
+            .setDescription("Number of rows inserted, updated or deleted.")
+            .setUnit("{row}")
+            .buildObserver();
+
+        rowsRead = meter.counterBuilder("db2.row.read.count")
+            .setDescription("Number of rows read from tables.")
+            .setUnit("{row}")
+            .buildObserver();
+
+        rowsReturned = meter.counterBuilder("db2.row.returned.count")
+            .setDescription("Number of rows returned to clients.")
             .setUnit("{row}")
             .buildObserver();
 
@@ -100,7 +133,7 @@ public class SqlActivityQuery {
             .buildObserver();
 
         rebinds = meter.counterBuilder("db2.sql.rebind.count")
-            .setDescription("Number of times packages were rebound, by rebind type.")
+            .setDescription("Number of times packages were implicitly rebound.")
             .setUnit("{rebind}")
             .buildObserver();
 
@@ -111,7 +144,8 @@ public class SqlActivityQuery {
 
         meter.batchCallback(
             this::collect,
-            statements, transactions, rows,
+            statements, operations, failedStatements, transactions,
+            rows, rowsRead, rowsReturned,
             compilations, compileTime, binds, rebinds, deadlockRollbacks
         );
     }
@@ -139,10 +173,10 @@ public class SqlActivityQuery {
             .build();
     }
 
-    private static Attributes rebindAttrs(int member, String rebindType) {
+    private static Attributes operationAttrs(int member, String operationType) {
         return Attributes.builder()
             .put("db2.member", member)
-            .put("db2.rebind_type", rebindType)
+            .put("db2.operation_type", operationType)
             .build();
     }
 
@@ -156,21 +190,27 @@ public class SqlActivityQuery {
                         int member = rs.getInt("MEMBER");
                         Attributes memberAttrs = Attributes.builder().put("db2.member", member).build();
 
+                        // Preparation axis only. SELECT/UID/DDL classify the same statements a
+                        // second way, so they belong on their own metric rather than as extra
+                        // values here — a dynamic SELECT increments one value in each axis.
                         statements.record(rs.getLong("DYNAMIC_SQL_STMTS"), statementAttrs(member, "dynamic"));
                         statements.record(rs.getLong("STATIC_SQL_STMTS"),  statementAttrs(member, "static"));
-                        statements.record(rs.getLong("FAILED_SQL_STMTS"),  statementAttrs(member, "failed"));
-                        statements.record(rs.getLong("SELECT_SQL_STMTS"),  statementAttrs(member, "select"));
-                        statements.record(rs.getLong("UID_SQL_STMTS"),     statementAttrs(member, "uid"));
-                        statements.record(rs.getLong("DDL_SQL_STMTS"),     statementAttrs(member, "ddl"));
+
+                        operations.record(rs.getLong("SELECT_SQL_STMTS"), operationAttrs(member, "select"));
+                        operations.record(rs.getLong("UID_SQL_STMTS"),    operationAttrs(member, "uid"));
+                        operations.record(rs.getLong("DDL_SQL_STMTS"),    operationAttrs(member, "ddl"));
+
+                        failedStatements.record(rs.getLong("FAILED_SQL_STMTS"), memberAttrs);
 
                         transactions.record(rs.getLong("TOTAL_APP_COMMITS"),   transactionAttrs(member, "commit", false));
                         transactions.record(rs.getLong("TOTAL_APP_ROLLBACKS"), transactionAttrs(member, "rollback", false));
                         transactions.record(rs.getLong("INT_COMMITS"),         transactionAttrs(member, "commit", true));
                         transactions.record(rs.getLong("INT_ROLLBACKS"),       transactionAttrs(member, "rollback", true));
 
-                        rows.record(rs.getLong("ROWS_READ"),         rowAttrs(member, "read", false));
-                        rows.record(rs.getLong("ROWS_RETURNED"),     rowAttrs(member, "returned", false));
-                        rows.record(rs.getLong("ROWS_MODIFIED"),     rowAttrs(member, "modified", false));
+                        // db2.row.count carries only the mutually exclusive insert/update/delete
+                        // partition. ROWS_MODIFIED is an aggregate of those three, and rows read
+                        // and returned are separate measurements rather than members of the same
+                        // partition, so all three get their own metric.
                         rows.record(rs.getLong("ROWS_INSERTED"),     rowAttrs(member, "inserted", false));
                         rows.record(rs.getLong("ROWS_UPDATED"),      rowAttrs(member, "updated", false));
                         rows.record(rs.getLong("ROWS_DELETED"),      rowAttrs(member, "deleted", false));
@@ -178,10 +218,13 @@ public class SqlActivityQuery {
                         rows.record(rs.getLong("INT_ROWS_UPDATED"),  rowAttrs(member, "updated", true));
                         rows.record(rs.getLong("INT_ROWS_DELETED"),  rowAttrs(member, "deleted", true));
 
+                        rowsRead    .record(rs.getLong("ROWS_READ"),     memberAttrs);
+                        rowsReturned.record(rs.getLong("ROWS_RETURNED"), memberAttrs);
+
                         compilations.record(rs.getLong("TOTAL_COMPILATIONS"), memberAttrs);
                         compileTime .record(rs.getLong("TOTAL_COMPILE_TIME") / 1000.0, memberAttrs);
                         binds       .record(rs.getLong("BINDS_PRECOMPILES"), memberAttrs);
-                        rebinds     .record(rs.getLong("IMPLICIT_REBINDS"), rebindAttrs(member, "implicit"));
+                        rebinds     .record(rs.getLong("IMPLICIT_REBINDS"), memberAttrs);
                     }
                 }
             }
@@ -202,15 +245,10 @@ public class SqlActivityQuery {
                 st.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
                 try (ResultSet rs = st.executeQuery(SNAPSHOT_SQL)) {
                     while (rs.next()) {
-                        int member = rs.getInt("DBPARTITIONNUM");
-                        Attributes memberAttrs = Attributes.builder().put("db2.member", member).build();
-
-                        statements.record(rs.getLong("COMMIT_SQL_STMTS"),   statementAttrs(member, "commit"));
-                        statements.record(rs.getLong("ROLLBACK_SQL_STMTS"), statementAttrs(member, "rollback"));
-                        rows      .record(rs.getLong("ROWS_SELECTED"),      rowAttrs(member, "selected", false));
-
+                        Attributes memberAttrs = Attributes.builder()
+                            .put("db2.member", rs.getInt("DBPARTITIONNUM"))
+                            .build();
                         deadlockRollbacks.record(rs.getLong("INT_DEADLOCK_ROLLBACKS"), memberAttrs);
-                        rebinds.record(rs.getLong("INT_AUTO_REBINDS"), rebindAttrs(member, "auto"));
                     }
                 }
             }

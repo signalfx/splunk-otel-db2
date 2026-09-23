@@ -106,31 +106,31 @@ attributes:
   # --- SQL and row activity metric attributes ---
   db2.statement_type:
     description: >
-      Classification of executed SQL statements. commit and rollback are only present
-      when use_snapshot_monitor is enabled.
+      How the SQL statement was prepared. DB2 also classifies the same statements by the
+      operation they perform, which is db2.operation_type on db2.sql.operation.count; the
+      two axes overlap, so they are separate metrics.
     type: string
-    enum: [dynamic, static, failed, select, uid, ddl, commit, rollback]
+    enum: [dynamic, static]
+  db2.operation_type:
+    description: The kind of operation the SQL statement performed.
+    type: string
+    enum: [select, uid, ddl]
   db2.transaction_type:
     description: Whether the transaction was committed or rolled back.
     type: string
     enum: [commit, rollback]
   db2.row_operation:
     description: >
-      The row operation being counted. selected is only present when
-      use_snapshot_monitor is enabled.
+      Which row modification was counted. Mutually exclusive, so summing across this
+      attribute is meaningful. Rows read and rows returned are separate metrics rather
+      than values here, because they are different measurements of the same rows.
     type: string
-    enum: [read, returned, modified, inserted, updated, deleted, selected]
+    enum: [inserted, updated, deleted]
   db2.internal:
     description: >
       True when the activity was initiated internally by the database manager rather
       than requested by an application.
     type: bool
-  db2.rebind_type:
-    description: >
-      How the package was rebound. auto is only present when use_snapshot_monitor
-      is enabled.
-    type: string
-    enum: [implicit, auto]
 
   # --- direct I/O and transaction log metric attributes ---
   # Standard semantic-convention attribute, so it is deliberately not db2-prefixed.
@@ -445,7 +445,32 @@ metrics:
 
   db2.sql.statement.count:
     attributes: [db2.member, db2.statement_type]
-    description: Number of SQL statements executed, by statement type.
+    description: Number of SQL statements executed, by how the statement was prepared.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{statement}"
+
+  db2.sql.operation.count:
+    attributes: [db2.member, db2.operation_type]
+    description: >
+      Number of SQL statements executed, by the kind of operation performed. Separate from
+      db2.sql.statement.count because the two classifications overlap: one statement is
+      counted once in each.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{statement}"
+
+  db2.sql.failed.count:
+    attributes: [db2.member]
+    description: Number of SQL statements that failed.
     enabled: true
     stability: development
     sum:
@@ -467,7 +492,31 @@ metrics:
 
   db2.row.count:
     attributes: [db2.member, db2.row_operation, db2.internal]
-    description: Number of rows affected, by operation.
+    description: >
+      Number of rows inserted, updated or deleted. Holds only that mutually exclusive
+      partition, so aggregating db2.row_operation gives a meaningful total.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.row.read.count:
+    attributes: [db2.member]
+    description: Number of rows read from tables.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.row.returned.count:
+    attributes: [db2.member]
+    description: Number of rows returned to clients.
     enabled: true
     stability: development
     sum:
@@ -510,8 +559,8 @@ metrics:
     unit: "{bind}"
 
   db2.sql.rebind.count:
-    attributes: [db2.member, db2.rebind_type]
-    description: Number of times packages were rebound, by rebind type.
+    attributes: [db2.member]
+    description: Number of times packages were implicitly rebound.
     enabled: true
     stability: development
     sum:
@@ -580,7 +629,9 @@ metrics:
     description: Number of sorts currently active.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "{sort}"
 
@@ -589,7 +640,9 @@ metrics:
     description: Number of hash joins currently active.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "{hash_join}"
 
@@ -598,7 +651,9 @@ metrics:
     description: Number of OLAP functions currently active.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "{function}"
 

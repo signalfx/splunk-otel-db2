@@ -58,6 +58,19 @@ class Db2ReceiverSnapshotIntegrationTest {
         return p;
     }
 
+    /** Distinct values of a string attribute across every point of a metric. */
+    private static java.util.List<String> stringAttributeValues(
+            InMemoryMetricExporter exporter, String metric, String attribute) {
+        return exporter.getFinishedMetricItems().stream()
+            .filter(m -> m.getName().equals(metric))
+            .flatMap(m -> m.getData().getPoints().stream())
+            .map(pt -> pt.getAttributes().get(
+                io.opentelemetry.api.common.AttributeKey.stringKey(attribute)))
+            .filter(java.util.Objects::nonNull)
+            .distinct()
+            .collect(java.util.stream.Collectors.toList());
+    }
+
     private Db2ReceiverConfig buildSnapshotConfig() {
         Db2ReceiverConfig config = new Db2ReceiverConfig();
         config.setHostname(db2.getHost());
@@ -354,31 +367,21 @@ class Db2ReceiverSnapshotIntegrationTest {
                 .until(() -> metricExporter.getFinishedMetricItems().stream()
                     .anyMatch(m -> m.getName().equals("db2.deadlock.rollback.count")));
 
-            // statement_type commit/rollback, row_operation selected and rebind_type auto are
-            // all snapshot-only dimensions on instruments shared with the MON_GET_* path.
-            assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
-                assertThat(metric.getName()).isEqualTo("db2.sql.statement.count");
-                assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
-                    assertThat(pt.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.stringKey("db2.statement_type")))
-                        .isIn("commit", "rollback"));
-            });
+            assertThat(metricExporter.getFinishedMetricItems())
+                .filteredOn(m -> m.getName().equals("db2.deadlock.rollback.count"))
+                .allSatisfy(metric -> assertThat(metric.getLongSumData().getPoints())
+                    .allSatisfy(pt -> assertThat(pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.longKey("db2.member"))).isNotNull()));
 
-            assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
-                assertThat(metric.getName()).isEqualTo("db2.row.count");
-                assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
-                    assertThat(pt.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.stringKey("db2.row_operation")))
-                        .isEqualTo("selected"));
-            });
-
-            assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
-                assertThat(metric.getName()).isEqualTo("db2.sql.rebind.count");
-                assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
-                    assertThat(pt.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.stringKey("db2.rebind_type")))
-                        .isEqualTo("auto"));
-            });
+            // The snapshot path must not reintroduce quantities already available natively:
+            // COMMIT_SQL_STMTS, ROWS_SELECTED and INT_AUTO_REBINDS duplicate MON_GET_DATABASE
+            // columns, so emitting them would double-count within an additive metric.
+            assertThat(stringAttributeValues(metricExporter, "db2.sql.statement.count", "db2.statement_type"))
+                .doesNotContain("commit", "rollback");
+            assertThat(stringAttributeValues(metricExporter, "db2.row.count", "db2.row_operation"))
+                .doesNotContain("selected", "returned", "modified");
+            assertThat(stringAttributeValues(metricExporter, "db2.sql.rebind.count", "db2.rebind_type"))
+                .isEmpty();
         } finally {
             receiver.stop();
             meterProvider.shutdown();

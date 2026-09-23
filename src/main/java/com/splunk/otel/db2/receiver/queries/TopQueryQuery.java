@@ -133,10 +133,12 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_DATABASE%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_BUFFERPOOL%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_TABLESPACE%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_TRANSACTION_LOG%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_DB%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%' " +
         "ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC " +
         "FETCH FIRST %2$d ROWS ONLY";

@@ -235,8 +235,12 @@ class Db2ReceiverIntegrationTest {
 
         assertThat(metricNames(exporter)).contains(
             "db2.sql.statement.count",
+            "db2.sql.operation.count",
+            "db2.sql.failed.count",
             "db2.transaction.count",
             "db2.row.count",
+            "db2.row.read.count",
+            "db2.row.returned.count",
             "db2.sql.compilation.count",
             "db2.sql.compilation.time",
             "db2.sql.bind.count",
@@ -269,22 +273,9 @@ class Db2ReceiverIntegrationTest {
             "db2.log.disk_wait.count"
         );
 
-        // Dimensional attributes must actually be populated, not just the instrument registered.
-        assertThat(exporter.getFinishedMetricItems()).anySatisfy(metric -> {
-            assertThat(metric.getName()).isEqualTo("db2.sql.statement.count");
-            assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
-                assertThat(pt.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.stringKey("db2.statement_type")))
-                    .isIn("dynamic", "static", "failed", "select", "uid", "ddl"));
-        });
-
-        assertThat(exporter.getFinishedMetricItems()).anySatisfy(metric -> {
-            assertThat(metric.getName()).isEqualTo("db2.direct.io.count");
-            assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
-                assertThat(pt.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.stringKey("disk.io.direction")))
-                    .isIn("read", "write"));
-        });
+        // Every individual dimensional series must be present, not merely the metric name:
+        // otherwise dropping one coalesced value still passes because siblings keep the name.
+        assertAllRequiredSeriesPresent(exporter);
 
         // Snapshot-only dimensions must NOT appear on the default path.
         assertThat(metricNames(exporter)).doesNotContain("db2.deadlock.rollback.count");
@@ -780,6 +771,41 @@ class Db2ReceiverIntegrationTest {
         Set.of("db2.deadlock.rollback.count");
 
     /**
+     * Every dimensional value each metric must emit on the default path, as
+     * metric -> attribute -> required values. Asserting metric-name presence alone is not
+     * enough: a coalesced series can disappear while sibling points keep the name alive.
+     */
+    private static final Map<String, Map<String, List<String>>> REQUIRED_SERIES = Map.of(
+        "db2.sql.statement.count",   Map.of("db2.statement_type",  List.of("dynamic", "static")),
+        "db2.sql.operation.count",   Map.of("db2.operation_type",  List.of("select", "uid", "ddl")),
+        "db2.transaction.count",     Map.of("db2.transaction_type", List.of("commit", "rollback")),
+        "db2.row.count",             Map.of("db2.row_operation",   List.of("inserted", "updated", "deleted")),
+        "db2.direct.io.count",       Map.of("disk.io.direction",   List.of("read", "write")),
+        "db2.direct.io.request.count", Map.of("disk.io.direction", List.of("read", "write")),
+        "db2.direct.io.time",        Map.of("disk.io.direction",   List.of("read", "write")),
+        "db2.log.io.pages",          Map.of("disk.io.direction",   List.of("read", "write")),
+        "db2.log.io.count",          Map.of("disk.io.direction",   List.of("read", "write")),
+        "db2.log.space.used.max",    Map.of("db2.log_space_type",  List.of("secondary", "total"))
+    );
+
+    private static void assertAllRequiredSeriesPresent(InMemoryMetricExporter exporter) {
+        REQUIRED_SERIES.forEach((metric, byAttribute) ->
+            byAttribute.forEach((attribute, requiredValues) -> {
+                List<String> observed = exporter.getFinishedMetricItems().stream()
+                    .filter(m -> m.getName().equals(metric))
+                    .flatMap(m -> m.getData().getPoints().stream())
+                    .map(pt -> pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(attribute)))
+                    .filter(java.util.Objects::nonNull)
+                    .distinct()
+                    .collect(Collectors.toList());
+                assertThat(observed)
+                    .as("%s must emit a series for every %s value", metric, attribute)
+                    .containsAll(requiredValues);
+            }));
+    }
+
+    /**
      * Metric names declared in metadata.yaml, read from the file rather than restated here so
      * that declaring a metric without emitting it cannot pass.
      */
@@ -848,6 +874,8 @@ class Db2ReceiverIntegrationTest {
                     .allSatisfy(pt -> assertThat(pt.getAttributes().get(
                         io.opentelemetry.api.common.AttributeKey.longKey("db2.member"))).isNotNull());
             }
+
+            assertAllRequiredSeriesPresent(exporter);
         } finally {
             receiver.stop();
             meterProvider.shutdown();

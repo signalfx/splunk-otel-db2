@@ -81,22 +81,19 @@ public class SortAndDirectIoQuery {
             .setUnit("s")
             .buildObserver();
 
-        // Gauges, not UpDownCounters: these are instantaneous readings, matching the sort
-        // memory gauges above rather than accumulating across intervals.
-        activeSorts = meter.gaugeBuilder("db2.sort.active")
-            .ofLongs()
+        // UpDownCounters, not gauges: these counts are additive across db2.member, so a backend
+        // must be able to sum them. Matches db2.connection.active in DatabaseQuery.
+        activeSorts = meter.upDownCounterBuilder("db2.sort.active")
             .setDescription("Number of sorts currently active.")
             .setUnit("{sort}")
             .buildObserver();
 
-        activeHashJoins = meter.gaugeBuilder("db2.hash_join.active")
-            .ofLongs()
+        activeHashJoins = meter.upDownCounterBuilder("db2.hash_join.active")
             .setDescription("Number of hash joins currently active.")
             .setUnit("{hash_join}")
             .buildObserver();
 
-        activeOlapFunctions = meter.gaugeBuilder("db2.olap_function.active")
-            .ofLongs()
+        activeOlapFunctions = meter.upDownCounterBuilder("db2.olap_function.active")
             .setDescription("Number of OLAP functions currently active.")
             .setUnit("{function}")
             .buildObserver();

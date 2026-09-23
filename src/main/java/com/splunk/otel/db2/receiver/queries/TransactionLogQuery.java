@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.function.Supplier;
 
@@ -177,6 +178,22 @@ public class TransactionLogQuery {
             .build();
     }
 
+    /**
+     * Records a log space reading, skipping DB2's infinite-logging sentinel.
+     *
+     * <p>With LOGSECOND set to -1 the active log is unbounded and DB2 reports these columns as
+     * -1 (or NULL). Emitting that as a byte count would look like negative capacity and could
+     * fire false low-space alerts, so the point is omitted instead: absent is honest, -1 is not.
+     */
+    private static void recordLogSpace(ObservableLongMeasurement instrument, ResultSet rs,
+                                       String column, Attributes attrs) throws SQLException {
+        long value = rs.getLong(column);
+        if (rs.wasNull() || value < 0) {
+            return;
+        }
+        instrument.record(value, attrs);
+    }
+
     private static Attributes logSpaceAttrs(int member, String logSpaceType) {
         return Attributes.builder()
             .put("db2.member", member)
@@ -196,11 +213,13 @@ public class TransactionLogQuery {
                         Attributes readAttrs  = directionAttrs(member, "read");
                         Attributes writeAttrs = directionAttrs(member, "write");
 
-                        logSpaceAvailable.record(rs.getLong("TOTAL_LOG_AVAILABLE"), attrs);
-                        logSpaceUsed     .record(rs.getLong("TOTAL_LOG_USED"),      attrs);
-                        logSpaceUsedMax  .record(rs.getLong("SEC_LOG_USED_TOP"), logSpaceAttrs(member, "secondary"));
-                        logSpaceUsedMax  .record(rs.getLong("TOT_LOG_USED_TOP"), logSpaceAttrs(member, "total"));
-                        secondaryLogsAllocated.record(rs.getLong("SEC_LOGS_ALLOCATED"), attrs);
+                        recordLogSpace(logSpaceAvailable, rs, "TOTAL_LOG_AVAILABLE", attrs);
+                        recordLogSpace(logSpaceUsed,      rs, "TOTAL_LOG_USED",      attrs);
+                        recordLogSpace(logSpaceUsedMax, rs, "SEC_LOG_USED_TOP",
+                            logSpaceAttrs(member, "secondary"));
+                        recordLogSpace(logSpaceUsedMax, rs, "TOT_LOG_USED_TOP",
+                            logSpaceAttrs(member, "total"));
+                        recordLogSpace(secondaryLogsAllocated, rs, "SEC_LOGS_ALLOCATED", attrs);
 
                         logIoPages     .record(rs.getLong("LOG_READS"),        readAttrs);
                         logIoPages     .record(rs.getLong("LOG_WRITES"),       writeAttrs);

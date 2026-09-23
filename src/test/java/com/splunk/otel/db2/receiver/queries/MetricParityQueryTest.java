@@ -137,6 +137,14 @@ class MetricParityQueryTest {
         return Attributes.builder().put("db2.member", member).build();
     }
 
+    /** Distinct values of a string attribute across all points of a metric. */
+    private static Set<String> attributeValues(Collection<MetricData> metrics, String name, String key) {
+        return points(metric(metrics, name)).stream()
+            .map(p -> p.getAttributes().get(AttributeKey.stringKey(key)))
+            .filter(java.util.Objects::nonNull)
+            .collect(Collectors.toSet());
+    }
+
     // ── SqlActivityQuery ─────────────────────────────────────────────────────
 
     private Connection sqlActivityConnection() throws Exception {
@@ -161,8 +169,12 @@ class MetricParityQueryTest {
 
         assertThat(metricNames()).contains(
             "db2.sql.statement.count",
+            "db2.sql.operation.count",
+            "db2.sql.failed.count",
             "db2.transaction.count",
             "db2.row.count",
+            "db2.row.read.count",
+            "db2.row.returned.count",
             "db2.sql.compilation.count",
             "db2.sql.compilation.time",
             "db2.sql.bind.count",
@@ -171,17 +183,39 @@ class MetricParityQueryTest {
     }
 
     @Test
-    void sqlActivityRecordsStatementTypesAsSeparateSeries() throws Exception {
+    void preparationAndOperationAxesAreSeparateMetrics() throws Exception {
         Connection conn = sqlActivityConnection();
         new SqlActivityQuery(() -> conn, "TESTDB", meter, false);
 
         Collection<MetricData> metrics = collect();
         assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "dynamic"))).isEqualTo(11);
         assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "static"))).isEqualTo(12);
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "failed"))).isEqualTo(13);
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "select"))).isEqualTo(14);
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "uid"))).isEqualTo(15);
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "ddl"))).isEqualTo(16);
+        assertThat(valueOf(metrics, "db2.sql.operation.count", attrs(0, "db2.operation_type", "select"))).isEqualTo(14);
+        assertThat(valueOf(metrics, "db2.sql.operation.count", attrs(0, "db2.operation_type", "uid"))).isEqualTo(15);
+        assertThat(valueOf(metrics, "db2.sql.operation.count", attrs(0, "db2.operation_type", "ddl"))).isEqualTo(16);
+        assertThat(valueOf(metrics, "db2.sql.failed.count", memberAttrs(0))).isEqualTo(13);
+    }
+
+    @Test
+    void additiveMetricsDoNotMixOverlappingAxes() throws Exception {
+        Connection conn = sqlActivityConnection();
+        new SqlActivityQuery(() -> conn, "TESTDB", meter, false);
+
+        Collection<MetricData> metrics = collect();
+
+        // db2.sql.statement.count must carry the preparation axis only: mixing in
+        // select/uid/ddl would double-count, since a dynamic SELECT is in both.
+        assertThat(attributeValues(metrics, "db2.sql.statement.count", "db2.statement_type"))
+            .containsExactlyInAnyOrder("dynamic", "static");
+        assertThat(attributeValues(metrics, "db2.sql.operation.count", "db2.operation_type"))
+            .containsExactlyInAnyOrder("select", "uid", "ddl");
+
+        // db2.row.count must carry only the mutually exclusive modification partition;
+        // ROWS_MODIFIED is an aggregate of these and must not appear alongside them.
+        assertThat(attributeValues(metrics, "db2.row.count", "db2.row_operation"))
+            .containsExactlyInAnyOrder("inserted", "updated", "deleted");
+        assertThat(valueOf(metrics, "db2.row.read.count", memberAttrs(0))).isEqualTo(31);
+        assertThat(valueOf(metrics, "db2.row.returned.count", memberAttrs(0))).isEqualTo(32);
     }
 
     @Test
@@ -221,35 +255,29 @@ class MetricParityQueryTest {
         Connection conn = sqlActivityConnection();
         new SqlActivityQuery(() -> conn, "TESTDB", meter, false);
 
-        Collection<MetricData> metrics = collect();
-        Set<String> statementTypes = points(metric(metrics, "db2.sql.statement.count")).stream()
-            .map(p -> p.getAttributes().get(AttributeKey.stringKey("db2.statement_type")))
-            .collect(Collectors.toSet());
-        assertThat(statementTypes).doesNotContain("commit", "rollback");
         assertThat(metricNames()).doesNotContain("db2.deadlock.rollback.count");
     }
 
     @Test
-    void snapshotColumnsAddDimensionsWhenSnapshotMonitorEnabled() throws Exception {
+    void snapshotContributesOnlyTheDeadlockRollbackMetric() throws Exception {
+        // The other SNAP_GET_DB columns duplicate MON_GET_DATABASE values, so emitting them
+        // would double-count. Only INT_DEADLOCK_ROLLBACKS has no native equivalent.
         Map<String, ResultSet> routes = new HashMap<>();
         routes.put("MON_GET_DATABASE", singleRow(0, cols(
-            "DYNAMIC_SQL_STMTS", 11, "IMPLICIT_REBINDS", 42)));
-        routes.put("SNAP_GET_DB", singleRow(0, cols(
-            "COMMIT_SQL_STMTS", 51, "ROLLBACK_SQL_STMTS", 52, "ROWS_SELECTED", 53,
-            "INT_DEADLOCK_ROLLBACKS", 54, "INT_AUTO_REBINDS", 55)));
+            "DYNAMIC_SQL_STMTS", 11, "IMPLICIT_REBINDS", 42, "ROWS_RETURNED", 32)));
+        routes.put("SNAP_GET_DB", singleRow(0, cols("INT_DEADLOCK_ROLLBACKS", 54)));
         Connection conn = routingConnection(routes);
         new SqlActivityQuery(() -> conn, "TESTDB", meter, true);
 
         Collection<MetricData> metrics = collect();
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "commit"))).isEqualTo(51);
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "rollback"))).isEqualTo(52);
-
-        Attributes selected = Attributes.builder()
-            .put("db2.member", 0).put("db2.row_operation", "selected").put("db2.internal", false).build();
-        assertThat(valueOf(metrics, "db2.row.count", selected)).isEqualTo(53);
         assertThat(valueOf(metrics, "db2.deadlock.rollback.count", memberAttrs(0))).isEqualTo(54);
-        assertThat(valueOf(metrics, "db2.sql.rebind.count", attrs(0, "db2.rebind_type", "auto"))).isEqualTo(55);
-        assertThat(valueOf(metrics, "db2.sql.rebind.count", attrs(0, "db2.rebind_type", "implicit"))).isEqualTo(42);
+
+        // No duplicate of a natively available quantity.
+        assertThat(attributeValues(metrics, "db2.sql.statement.count", "db2.statement_type"))
+            .doesNotContain("commit", "rollback");
+        assertThat(attributeValues(metrics, "db2.row.count", "db2.row_operation"))
+            .doesNotContain("selected", "returned", "modified");
+        assertThat(valueOf(metrics, "db2.sql.rebind.count", memberAttrs(0))).isEqualTo(42);
     }
 
     @Test
@@ -388,6 +416,27 @@ class MetricParityQueryTest {
     }
 
     @Test
+    void infiniteLogSpaceSentinelIsNotEmittedAsNegativeBytes() throws Exception {
+        // With LOGSECOND=-1 the active log is unbounded and DB2 reports -1. Emitting that as a
+        // byte count would look like negative capacity and could fire false low-space alerts.
+        Map<String, ResultSet> routes = new LinkedHashMap<>();
+        routes.put("MON_GET_TRANSACTION_LOG", singleRow(0, cols(
+            "TOTAL_LOG_AVAILABLE", -1, "TOTAL_LOG_USED", 100, "LOG_READS", 5)));
+        routes.put("MON_GET_DATABASE", singleRow(0, cols("LOG_DISK_WAITS_TOTAL", 7)));
+        Connection conn = routingConnection(routes);
+        new TransactionLogQuery(() -> conn, "TESTDB", meter);
+
+        Collection<MetricData> metrics = collect();
+
+        // The sentinel is omitted entirely rather than exported as -1.
+        assertThat(metricNames()).doesNotContain("db2.log.space.available");
+
+        // Neighbouring readings in the same row are unaffected.
+        assertThat(valueOf(metrics, "db2.log.space.used", memberAttrs(0))).isEqualTo(100);
+        assertThat(valueOf(metrics, "db2.log.disk_wait.count", memberAttrs(0))).isEqualTo(7);
+    }
+
+    @Test
     void activeLogFileNumbersAreNotEmittedAsMetrics() throws Exception {
         Connection conn = transactionLogConnection();
         new TransactionLogQuery(() -> conn, "TESTDB", meter);
@@ -406,7 +455,7 @@ class MetricParityQueryTest {
         when(snapRs.next()).thenReturn(true, true, false);
         when(snapRs.getInt("DBPARTITIONNUM")).thenReturn(0, 1);
         when(snapRs.getLong(anyString())).thenReturn(0L);
-        when(snapRs.getLong("COMMIT_SQL_STMTS")).thenReturn(61L, 62L);
+        when(snapRs.getLong("INT_DEADLOCK_ROLLBACKS")).thenReturn(61L, 62L);
 
         Map<String, ResultSet> routes = new HashMap<>();
         routes.put("MON_GET_DATABASE", monRs);
@@ -415,8 +464,8 @@ class MetricParityQueryTest {
         new SqlActivityQuery(() -> conn, "TESTDB", meter, true);
 
         Collection<MetricData> metrics = collect();
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(0, "db2.statement_type", "commit"))).isEqualTo(61);
-        assertThat(valueOf(metrics, "db2.sql.statement.count", attrs(1, "db2.statement_type", "commit"))).isEqualTo(62);
+        assertThat(valueOf(metrics, "db2.deadlock.rollback.count", memberAttrs(0))).isEqualTo(61);
+        assertThat(valueOf(metrics, "db2.deadlock.rollback.count", memberAttrs(1))).isEqualTo(62);
     }
 
     @Test
