@@ -275,7 +275,7 @@ class Db2ReceiverIntegrationTest {
             assertThat(metric.getName()).isEqualTo("db2.direct.io.count");
             assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
                 assertThat(pt.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.stringKey("db2.direction")))
+                    io.opentelemetry.api.common.AttributeKey.stringKey("disk.io.direction")))
                     .isIn("read", "write"));
         });
 
@@ -766,5 +766,79 @@ class Db2ReceiverIntegrationTest {
         return exporter.getFinishedMetricItems().stream()
             .map(m -> m.getName())
             .collect(Collectors.toList());
+    }
+
+    /**
+     * Every metric declared in metadata.yaml must actually receive a data point against a real
+     * DB2, and every point must carry db2.member. Registering an instrument is not enough: these
+     * are asynchronous instruments, so a metric with no recorded measurement is absent from the
+     * export. This catches a column that exists but is never read, or a query that silently
+     * returns no rows.
+     */
+    @Test
+    void everyDeclaredMetricReceivesAValue() {
+        InMemoryMetricExporter exporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(exporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2ReceiverConfig config = buildConfig();
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"),
+            (io.opentelemetry.api.logs.Logger) null);
+        receiver.start();
+
+        // db2.deadlock.rollback.count is snapshot-only; covered by the snapshot integration test.
+        List<String> expected = List.of(
+            "db2.connection.count", "db2.connection.active", "db2.connection.max",
+            "db2.lock.wait.count", "db2.lock.wait_time", "db2.lock.timeout.count",
+            "db2.lock.escalation.count", "db2.lock.space_used", "db2.deadlock.count",
+            "db2.sort.count", "db2.sort.overflow.count",
+            "db2.buffer_pool.logical_reads", "db2.buffer_pool.physical_reads",
+            "db2.buffer_pool.writes", "db2.buffer_pool.read_time", "db2.buffer_pool.write_time",
+            "db2.tablespace.size",
+            "db2.sql.statement.count", "db2.transaction.count", "db2.rows.count",
+            "db2.sql.compilation.count", "db2.sql.compilation.time", "db2.sql.bind.count",
+            "db2.sql.rebind.count",
+            "db2.sort.heap.allocated", "db2.sort.shared_heap.allocated",
+            "db2.sort.shared_heap.max", "db2.sort.time", "db2.sort.active",
+            "db2.hash_join.active", "db2.olap_function.active",
+            "db2.direct.io.count", "db2.direct.io.request.count", "db2.direct.io.time",
+            "db2.log.space.available", "db2.log.space.used", "db2.log.space.used.max",
+            "db2.log.secondary_files.allocated", "db2.log.io.pages", "db2.log.io.time",
+            "db2.log.io.count", "db2.log.partial_page_io.count", "db2.log.buffer_full.count",
+            "db2.log.buffer_hit.count", "db2.log.recovery.redo_size",
+            "db2.log.dirty_pages.held_size", "db2.log.hadr.wait.time",
+            "db2.log.hadr.wait.count", "db2.log.disk_wait.time", "db2.log.disk_wait.count"
+        );
+
+        try {
+            Awaitility.await()
+                .atMost(60, TimeUnit.SECONDS)
+                .until(() -> metricNames(exporter).containsAll(expected));
+
+            List<String> missing = expected.stream()
+                .filter(n -> !metricNames(exporter).contains(n))
+                .collect(Collectors.toList());
+            assertThat(missing).as("metrics declared but never emitted").isEmpty();
+
+            // Every emitted point must carry db2.member, and no point may be silently empty.
+            for (String name : expected) {
+                var points = exporter.getFinishedMetricItems().stream()
+                    .filter(m -> m.getName().equals(name))
+                    .flatMap(m -> m.getData().getPoints().stream())
+                    .collect(Collectors.toList());
+                assertThat(points).as("data points for " + name).isNotEmpty();
+                assertThat(points).as("db2.member present on every point of " + name)
+                    .allSatisfy(pt -> assertThat(pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.longKey("db2.member"))).isNotNull());
+            }
+        } finally {
+            receiver.stop();
+            meterProvider.shutdown();
+        }
     }
 }

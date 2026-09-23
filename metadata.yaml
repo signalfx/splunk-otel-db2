@@ -133,8 +133,10 @@ attributes:
     enum: [implicit, auto]
 
   # --- direct I/O and transaction log metric attributes ---
-  db2.direction:
-    description: Whether the operation was a read or a write.
+  # Standard semantic-convention attribute, so it is deliberately not db2-prefixed.
+  # Matches sqlserverreceiver and oracledbreceiver in opentelemetry-collector-contrib.
+  disk.io.direction:
+    description: The direction of the disk I/O operation.
     type: string
     enum: [read, write]
   db2.log_space_type:
@@ -607,7 +609,7 @@ metrics:
     unit: "{function}"
 
   db2.direct.io.count:
-    attributes: [db2.member, db2.direction]
+    attributes: [db2.member, disk.io.direction]
     description: Number of read or write operations that bypass the buffer pool.
     enabled: true
     stability: development
@@ -618,7 +620,7 @@ metrics:
     unit: "{operation}"
 
   db2.direct.io.request.count:
-    attributes: [db2.member, db2.direction]
+    attributes: [db2.member, disk.io.direction]
     description: Number of requests to perform a direct read or write of one or more sectors of data.
     enabled: true
     stability: development
@@ -629,7 +631,7 @@ metrics:
     unit: "{request}"
 
   db2.direct.io.time:
-    attributes: [db2.member, db2.direction]
+    attributes: [db2.member, disk.io.direction]
     description: Total elapsed time spent performing direct reads or writes.
     enabled: true
     stability: development
@@ -678,7 +680,7 @@ metrics:
     unit: "{file}"
 
   db2.log.io.pages:
-    attributes: [db2.member, db2.direction]
+    attributes: [db2.member, disk.io.direction]
     description: Number of log pages read from or written to disk by the logger.
     enabled: true
     stability: development
@@ -689,7 +691,7 @@ metrics:
     unit: "{page}"
 
   db2.log.io.time:
-    attributes: [db2.member, db2.direction]
+    attributes: [db2.member, disk.io.direction]
     description: Total elapsed time spent by the logger reading from or writing to disk.
     enabled: true
     stability: development
@@ -700,7 +702,7 @@ metrics:
     unit: "s"
 
   db2.log.io.count:
-    attributes: [db2.member, db2.direction]
+    attributes: [db2.member, disk.io.direction]
     description: Number of I/O requests issued by the logger to read or write log data.
     enabled: true
     stability: development

@@ -294,13 +294,13 @@ class MetricParityQueryTest {
         assertThat(valueOf(metrics, "db2.hash_join.active", memberAttrs(0))).isEqualTo(5);
         assertThat(valueOf(metrics, "db2.olap_function.active", memberAttrs(0))).isEqualTo(6);
 
-        assertThat(valueOf(metrics, "db2.direct.io.count", attrs(0, "db2.direction", "read"))).isEqualTo(71);
-        assertThat(valueOf(metrics, "db2.direct.io.count", attrs(0, "db2.direction", "write"))).isEqualTo(72);
-        assertThat(valueOf(metrics, "db2.direct.io.request.count", attrs(0, "db2.direction", "read"))).isEqualTo(73);
-        assertThat(valueOf(metrics, "db2.direct.io.request.count", attrs(0, "db2.direction", "write"))).isEqualTo(74);
+        assertThat(valueOf(metrics, "db2.direct.io.count", attrs(0, "disk.io.direction", "read"))).isEqualTo(71);
+        assertThat(valueOf(metrics, "db2.direct.io.count", attrs(0, "disk.io.direction", "write"))).isEqualTo(72);
+        assertThat(valueOf(metrics, "db2.direct.io.request.count", attrs(0, "disk.io.direction", "read"))).isEqualTo(73);
+        assertThat(valueOf(metrics, "db2.direct.io.request.count", attrs(0, "disk.io.direction", "write"))).isEqualTo(74);
         // DIRECT_*_TIME are milliseconds
-        assertThat(valueOf(metrics, "db2.direct.io.time", attrs(0, "db2.direction", "read"))).isEqualTo(3.0);
-        assertThat(valueOf(metrics, "db2.direct.io.time", attrs(0, "db2.direction", "write"))).isEqualTo(4.0);
+        assertThat(valueOf(metrics, "db2.direct.io.time", attrs(0, "disk.io.direction", "read"))).isEqualTo(3.0);
+        assertThat(valueOf(metrics, "db2.direct.io.time", attrs(0, "disk.io.direction", "write"))).isEqualTo(4.0);
     }
 
     @Test
@@ -348,13 +348,13 @@ class MetricParityQueryTest {
         assertThat(valueOf(metrics, "db2.log.space.used.max", attrs(0, "db2.log_space_type", "total"))).isEqualTo(300);
         assertThat(valueOf(metrics, "db2.log.secondary_files.allocated", memberAttrs(0))).isEqualTo(2);
 
-        assertThat(valueOf(metrics, "db2.log.io.pages", attrs(0, "db2.direction", "read"))).isEqualTo(81);
-        assertThat(valueOf(metrics, "db2.log.io.pages", attrs(0, "db2.direction", "write"))).isEqualTo(82);
+        assertThat(valueOf(metrics, "db2.log.io.pages", attrs(0, "disk.io.direction", "read"))).isEqualTo(81);
+        assertThat(valueOf(metrics, "db2.log.io.pages", attrs(0, "disk.io.direction", "write"))).isEqualTo(82);
         // LOG_READ_TIME / LOG_WRITE_TIME are milliseconds
-        assertThat(valueOf(metrics, "db2.log.io.time", attrs(0, "db2.direction", "read"))).isEqualTo(5.0);
-        assertThat(valueOf(metrics, "db2.log.io.time", attrs(0, "db2.direction", "write"))).isEqualTo(6.0);
-        assertThat(valueOf(metrics, "db2.log.io.count", attrs(0, "db2.direction", "read"))).isEqualTo(83);
-        assertThat(valueOf(metrics, "db2.log.io.count", attrs(0, "db2.direction", "write"))).isEqualTo(84);
+        assertThat(valueOf(metrics, "db2.log.io.time", attrs(0, "disk.io.direction", "read"))).isEqualTo(5.0);
+        assertThat(valueOf(metrics, "db2.log.io.time", attrs(0, "disk.io.direction", "write"))).isEqualTo(6.0);
+        assertThat(valueOf(metrics, "db2.log.io.count", attrs(0, "disk.io.direction", "read"))).isEqualTo(83);
+        assertThat(valueOf(metrics, "db2.log.io.count", attrs(0, "disk.io.direction", "write"))).isEqualTo(84);
 
         assertThat(valueOf(metrics, "db2.log.partial_page_io.count", memberAttrs(0))).isEqualTo(85);
         assertThat(valueOf(metrics, "db2.log.buffer_full.count", memberAttrs(0))).isEqualTo(86);

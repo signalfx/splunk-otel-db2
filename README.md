@@ -224,7 +224,7 @@ Additional attributes: `db2.statement_type` (`dynamic`, `static`, `failed`, `sel
 
 ### Sort and direct I/O (`MON_GET_DATABASE`)
 
-Additional attribute: `db2.direction` (`read`, `write`).
+Additional attribute: `disk.io.direction` (`read`, `write`) — the standard semantic-convention attribute, so it is not `db2`-prefixed.
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
@@ -243,7 +243,7 @@ Additional attribute: `db2.direction` (`read`, `write`).
 
 ### Transaction log (`MON_GET_TRANSACTION_LOG`)
 
-Additional attributes: `db2.direction` (`read`, `write`), `db2.log_space_type` (`secondary`, `total`).
+Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_type` (`secondary`, `total`).
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|

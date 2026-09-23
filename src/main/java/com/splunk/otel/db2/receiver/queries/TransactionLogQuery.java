@@ -170,7 +170,7 @@ public class TransactionLogQuery {
     private static Attributes directionAttrs(int member, String direction) {
         return Attributes.builder()
             .put("db2.member", member)
-            .put("db2.direction", direction)
+            .put("disk.io.direction", direction)
             .build();
     }
 
