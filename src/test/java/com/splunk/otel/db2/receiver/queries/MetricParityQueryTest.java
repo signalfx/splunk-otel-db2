@@ -162,7 +162,7 @@ class MetricParityQueryTest {
         assertThat(metricNames()).contains(
             "db2.sql.statement.count",
             "db2.transaction.count",
-            "db2.rows.count",
+            "db2.row.count",
             "db2.sql.compilation.count",
             "db2.sql.compilation.time",
             "db2.sql.bind.count",
@@ -201,8 +201,8 @@ class MetricParityQueryTest {
             .put("db2.member", 0).put("db2.row_operation", "inserted").put("db2.internal", false).build();
         Attributes intInsert = Attributes.builder()
             .put("db2.member", 0).put("db2.row_operation", "inserted").put("db2.internal", true).build();
-        assertThat(valueOf(metrics, "db2.rows.count", appInsert)).isEqualTo(34);
-        assertThat(valueOf(metrics, "db2.rows.count", intInsert)).isEqualTo(37);
+        assertThat(valueOf(metrics, "db2.row.count", appInsert)).isEqualTo(34);
+        assertThat(valueOf(metrics, "db2.row.count", intInsert)).isEqualTo(37);
     }
 
     @Test
@@ -246,7 +246,7 @@ class MetricParityQueryTest {
 
         Attributes selected = Attributes.builder()
             .put("db2.member", 0).put("db2.row_operation", "selected").put("db2.internal", false).build();
-        assertThat(valueOf(metrics, "db2.rows.count", selected)).isEqualTo(53);
+        assertThat(valueOf(metrics, "db2.row.count", selected)).isEqualTo(53);
         assertThat(valueOf(metrics, "db2.deadlock.rollback.count", memberAttrs(0))).isEqualTo(54);
         assertThat(valueOf(metrics, "db2.sql.rebind.count", attrs(0, "db2.rebind_type", "auto"))).isEqualTo(55);
         assertThat(valueOf(metrics, "db2.sql.rebind.count", attrs(0, "db2.rebind_type", "implicit"))).isEqualTo(42);
@@ -285,8 +285,8 @@ class MetricParityQueryTest {
         // SORT_HEAP_ALLOCATED stays in pages (Db2 states no page size for it)
         assertThat(valueOf(metrics, "db2.sort.heap.allocated", memberAttrs(0))).isEqualTo(100);
         // SORT_SHRHEAP_* are documented in 4KB pages and converted to bytes
-        assertThat(valueOf(metrics, "db2.sort.shared_heap.allocated", memberAttrs(0))).isEqualTo(2 * 4096);
-        assertThat(valueOf(metrics, "db2.sort.shared_heap.max", memberAttrs(0))).isEqualTo(3 * 4096);
+        assertThat(valueOf(metrics, "db2.sort.shared.heap.allocated", memberAttrs(0))).isEqualTo(2 * 4096);
+        assertThat(valueOf(metrics, "db2.sort.shared.heap.max", memberAttrs(0))).isEqualTo(3 * 4096);
         // TOTAL_SECTION_SORT_TIME is milliseconds
         assertThat(valueOf(metrics, "db2.sort.time", memberAttrs(0))).isEqualTo(1.5);
 
@@ -359,8 +359,8 @@ class MetricParityQueryTest {
         assertThat(valueOf(metrics, "db2.log.partial_page_io.count", memberAttrs(0))).isEqualTo(85);
         assertThat(valueOf(metrics, "db2.log.buffer_full.count", memberAttrs(0))).isEqualTo(86);
         assertThat(valueOf(metrics, "db2.log.buffer_hit.count", memberAttrs(0))).isEqualTo(87);
-        assertThat(valueOf(metrics, "db2.log.recovery.redo_size", memberAttrs(0))).isEqualTo(88);
-        assertThat(valueOf(metrics, "db2.log.dirty_pages.held_size", memberAttrs(0))).isEqualTo(89);
+        assertThat(valueOf(metrics, "db2.log.recovery.redo", memberAttrs(0))).isEqualTo(88);
+        assertThat(valueOf(metrics, "db2.log.dirty_pages.held", memberAttrs(0))).isEqualTo(89);
         assertThat(valueOf(metrics, "db2.log.hadr.wait.time", memberAttrs(0))).isEqualTo(7.0);
         assertThat(valueOf(metrics, "db2.log.hadr.wait.count", memberAttrs(0))).isEqualTo(90);
     }

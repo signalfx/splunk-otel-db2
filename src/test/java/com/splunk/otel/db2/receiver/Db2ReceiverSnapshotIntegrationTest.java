@@ -365,7 +365,7 @@ class Db2ReceiverSnapshotIntegrationTest {
             });
 
             assertThat(metricExporter.getFinishedMetricItems()).anySatisfy(metric -> {
-                assertThat(metric.getName()).isEqualTo("db2.rows.count");
+                assertThat(metric.getName()).isEqualTo("db2.row.count");
                 assertThat(metric.getLongSumData().getPoints()).anySatisfy(pt ->
                     assertThat(pt.getAttributes().get(
                         io.opentelemetry.api.common.AttributeKey.stringKey("db2.row_operation")))

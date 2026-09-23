@@ -14,16 +14,23 @@ import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.yaml.snakeyaml.Yaml;
 import org.testcontainers.containers.Db2Container;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -229,14 +236,14 @@ class Db2ReceiverIntegrationTest {
         assertThat(metricNames(exporter)).contains(
             "db2.sql.statement.count",
             "db2.transaction.count",
-            "db2.rows.count",
+            "db2.row.count",
             "db2.sql.compilation.count",
             "db2.sql.compilation.time",
             "db2.sql.bind.count",
             "db2.sql.rebind.count",
             "db2.sort.heap.allocated",
-            "db2.sort.shared_heap.allocated",
-            "db2.sort.shared_heap.max",
+            "db2.sort.shared.heap.allocated",
+            "db2.sort.shared.heap.max",
             "db2.sort.time",
             "db2.sort.active",
             "db2.hash_join.active",
@@ -254,8 +261,8 @@ class Db2ReceiverIntegrationTest {
             "db2.log.partial_page_io.count",
             "db2.log.buffer_full.count",
             "db2.log.buffer_hit.count",
-            "db2.log.recovery.redo_size",
-            "db2.log.dirty_pages.held_size",
+            "db2.log.recovery.redo",
+            "db2.log.dirty_pages.held",
             "db2.log.hadr.wait.time",
             "db2.log.hadr.wait.count",
             "db2.log.disk_wait.time",
@@ -768,15 +775,42 @@ class Db2ReceiverIntegrationTest {
             .collect(Collectors.toList());
     }
 
+    /** Metrics that only the snapshot monitor path can emit, covered by the snapshot test. */
+    private static final Set<String> SNAPSHOT_ONLY_METRICS =
+        Set.of("db2.deadlock.rollback.count");
+
+    /**
+     * Metric names declared in metadata.yaml, read from the file rather than restated here so
+     * that declaring a metric without emitting it cannot pass.
+     */
+    static List<String> declaredMetricNames() throws Exception {
+        Path path = Paths.get("metadata.yaml");
+        if (!Files.exists(path)) {
+            throw new IllegalStateException("metadata.yaml not found at " + path.toAbsolutePath()
+                + " — the test's working directory must be the project root");
+        }
+        try (InputStream in = Files.newInputStream(path)) {
+            Map<String, Object> root = new Yaml().load(in);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> metrics = (Map<String, Object>) root.get("metrics");
+            assertThat(metrics).as("metrics block in metadata.yaml").isNotNull().isNotEmpty();
+            return metrics.keySet().stream()
+                .filter(n -> !SNAPSHOT_ONLY_METRICS.contains(n))
+                .collect(Collectors.toList());
+        }
+    }
+
     /**
      * Every metric declared in metadata.yaml must actually receive a data point against a real
      * DB2, and every point must carry db2.member. Registering an instrument is not enough: these
      * are asynchronous instruments, so a metric with no recorded measurement is absent from the
-     * export. This catches a column that exists but is never read, or a query that silently
-     * returns no rows.
+     * export. This catches a column that exists but is never read, a query that silently returns
+     * no rows, and a metric added to metadata.yaml that nothing ever emits.
      */
     @Test
-    void everyDeclaredMetricReceivesAValue() {
+    void everyDeclaredMetricReceivesAValue() throws Exception {
+        List<String> expected = declaredMetricNames();
+
         InMemoryMetricExporter exporter = InMemoryMetricExporter.create();
         SdkMeterProvider meterProvider = SdkMeterProvider.builder()
             .registerMetricReader(
@@ -786,46 +820,24 @@ class Db2ReceiverIntegrationTest {
             )
             .build();
 
-        Db2ReceiverConfig config = buildConfig();
-        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"),
+        Db2Receiver receiver = new Db2Receiver(buildConfig(), meterProvider.get("splunk-otel-db2"),
             (io.opentelemetry.api.logs.Logger) null);
         receiver.start();
 
-        // db2.deadlock.rollback.count is snapshot-only; covered by the snapshot integration test.
-        List<String> expected = List.of(
-            "db2.connection.count", "db2.connection.active", "db2.connection.max",
-            "db2.lock.wait.count", "db2.lock.wait_time", "db2.lock.timeout.count",
-            "db2.lock.escalation.count", "db2.lock.space_used", "db2.deadlock.count",
-            "db2.sort.count", "db2.sort.overflow.count",
-            "db2.buffer_pool.logical_reads", "db2.buffer_pool.physical_reads",
-            "db2.buffer_pool.writes", "db2.buffer_pool.read_time", "db2.buffer_pool.write_time",
-            "db2.tablespace.size",
-            "db2.sql.statement.count", "db2.transaction.count", "db2.rows.count",
-            "db2.sql.compilation.count", "db2.sql.compilation.time", "db2.sql.bind.count",
-            "db2.sql.rebind.count",
-            "db2.sort.heap.allocated", "db2.sort.shared_heap.allocated",
-            "db2.sort.shared_heap.max", "db2.sort.time", "db2.sort.active",
-            "db2.hash_join.active", "db2.olap_function.active",
-            "db2.direct.io.count", "db2.direct.io.request.count", "db2.direct.io.time",
-            "db2.log.space.available", "db2.log.space.used", "db2.log.space.used.max",
-            "db2.log.secondary_files.allocated", "db2.log.io.pages", "db2.log.io.time",
-            "db2.log.io.count", "db2.log.partial_page_io.count", "db2.log.buffer_full.count",
-            "db2.log.buffer_hit.count", "db2.log.recovery.redo_size",
-            "db2.log.dirty_pages.held_size", "db2.log.hadr.wait.time",
-            "db2.log.hadr.wait.count", "db2.log.disk_wait.time", "db2.log.disk_wait.count"
-        );
-
         try {
+            // untilAsserted, not until: on timeout the surfaced error names the absent metrics
+            // instead of a bare ConditionTimeoutException.
             Awaitility.await()
                 .atMost(60, TimeUnit.SECONDS)
-                .until(() -> metricNames(exporter).containsAll(expected));
+                .untilAsserted(() -> {
+                    List<String> emitted = metricNames(exporter);
+                    List<String> missing = expected.stream()
+                        .filter(n -> !emitted.contains(n))
+                        .collect(Collectors.toList());
+                    assertThat(missing).as("declared in metadata.yaml but never emitted").isEmpty();
+                });
 
-            List<String> missing = expected.stream()
-                .filter(n -> !metricNames(exporter).contains(n))
-                .collect(Collectors.toList());
-            assertThat(missing).as("metrics declared but never emitted").isEmpty();
-
-            // Every emitted point must carry db2.member, and no point may be silently empty.
+            // Every emitted point must carry db2.member, and no metric may be silently empty.
             for (String name : expected) {
                 var points = exporter.getFinishedMetricItems().stream()
                     .filter(m -> m.getName().equals(name))

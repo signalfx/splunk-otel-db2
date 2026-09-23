@@ -465,7 +465,7 @@ metrics:
       value_type: int
     unit: "{transaction}"
 
-  db2.rows.count:
+  db2.row.count:
     attributes: [db2.member, db2.row_operation, db2.internal]
     description: Number of rows affected, by operation.
     enabled: true
@@ -546,7 +546,7 @@ metrics:
       value_type: int
     unit: "{page}"
 
-  db2.sort.shared_heap.allocated:
+  db2.sort.shared.heap.allocated:
     attributes: [db2.member]
     description: Total amount of shared sort memory allocated.
     enabled: true
@@ -555,7 +555,7 @@ metrics:
       value_type: int
     unit: "By"
 
-  db2.sort.shared_heap.max:
+  db2.sort.shared.heap.max:
     attributes: [db2.member]
     description: Shared sort memory high watermark.
     enabled: true
@@ -580,9 +580,7 @@ metrics:
     description: Number of sorts currently active.
     enabled: true
     stability: development
-    sum:
-      aggregation_temporality: cumulative
-      monotonic: false
+    gauge:
       value_type: int
     unit: "{sort}"
 
@@ -591,9 +589,7 @@ metrics:
     description: Number of hash joins currently active.
     enabled: true
     stability: development
-    sum:
-      aggregation_temporality: cumulative
-      monotonic: false
+    gauge:
       value_type: int
     unit: "{hash_join}"
 
@@ -602,9 +598,7 @@ metrics:
     description: Number of OLAP functions currently active.
     enabled: true
     stability: development
-    sum:
-      aggregation_temporality: cumulative
-      monotonic: false
+    gauge:
       value_type: int
     unit: "{function}"
 
@@ -725,7 +719,10 @@ metrics:
 
   db2.log.buffer_full.count:
     attributes: [db2.member]
-    description: Number of times agents had to wait for log data to write to disk.
+    description: >
+      Number of times agents had to wait because the log buffer was full while copying log
+      records into it. A log-buffer-sizing signal; contrast db2.log.disk_wait.count, which
+      counts all agent waits on log writes.
     enabled: true
     stability: development
     sum:
@@ -745,7 +742,7 @@ metrics:
       value_type: int
     unit: "{read}"
 
-  db2.log.recovery.redo_size:
+  db2.log.recovery.redo:
     attributes: [db2.member]
     description: Amount of log that would have to be redone for crash recovery.
     enabled: true
@@ -754,7 +751,7 @@ metrics:
       value_type: int
     unit: "By"
 
-  db2.log.dirty_pages.held_size:
+  db2.log.dirty_pages.held:
     attributes: [db2.member]
     description: >
       Amount of log corresponding to the difference between the oldest dirty page and

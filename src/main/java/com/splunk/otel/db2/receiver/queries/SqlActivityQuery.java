@@ -78,7 +78,7 @@ public class SqlActivityQuery {
             .setUnit("{transaction}")
             .buildObserver();
 
-        rows = meter.counterBuilder("db2.rows.count")
+        rows = meter.counterBuilder("db2.row.count")
             .setDescription("Number of rows affected, by operation.")
             .setUnit("{row}")
             .buildObserver();

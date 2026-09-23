@@ -171,7 +171,7 @@ There is no hard limit on the number of databases in a single process. Beyond ~2
 
 All metrics carry `db.namespace` (database name) and `db2.member` (member number) attributes.
 
-### Database (`MON_GET_DATABASE`)
+### Database
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
@@ -187,7 +187,7 @@ All metrics carry `db.namespace` (database name) and `db2.member` (member number
 | `db2.sort.count` | Counter | `{sort}` | Total sorts executed |
 | `db2.sort.overflow.count` | Counter | `{sort}` | Sorts that spilled to disk |
 
-### Buffer pool (`MON_GET_BUFFERPOOL`)
+### Buffer pool
 
 Additional attributes: `db2.bufferpool` (pool name), `db2.read_type` (`data`, `index`, `xda`).
 
@@ -199,7 +199,7 @@ Additional attributes: `db2.bufferpool` (pool name), `db2.read_type` (`data`, `i
 | `db2.buffer_pool.read_time` | Counter | `s` | Time spent reading from disk |
 | `db2.buffer_pool.write_time` | Counter | `s` | Time spent writing to disk |
 
-### Tablespace (`MON_GET_TABLESPACE`)
+### Tablespace
 
 Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.state`, `db2.tablespace.usage` (`capacity`, `used`, `free`).
 
@@ -207,7 +207,7 @@ Additional attributes: `db2.tablespace`, `db2.tablespace.type`, `db2.tablespace.
 |---|---|---|---|
 | `db2.tablespace.size` | UpDownCounter | `By` | Tablespace size broken down by usage |
 
-### SQL and row activity (`MON_GET_DATABASE`)
+### SQL and row activity
 
 Additional attributes: `db2.statement_type` (`dynamic`, `static`, `failed`, `select`, `uid`, `ddl`, and `commit`/`rollback` when `use_snapshot_monitor` is enabled), `db2.transaction_type` (`commit`, `rollback`), `db2.row_operation` (`read`, `returned`, `modified`, `inserted`, `updated`, `deleted`, and `selected` when `use_snapshot_monitor` is enabled), `db2.internal` (`true` when initiated by the database manager rather than an application), `db2.rebind_type` (`implicit`, and `auto` when `use_snapshot_monitor` is enabled).
 
@@ -215,22 +215,22 @@ Additional attributes: `db2.statement_type` (`dynamic`, `static`, `failed`, `sel
 |---|---|---|---|
 | `db2.sql.statement.count` | Counter | `{statement}` | SQL statements executed, by statement type |
 | `db2.transaction.count` | Counter | `{transaction}` | Transactions committed or rolled back |
-| `db2.rows.count` | Counter | `{row}` | Rows affected, by operation |
+| `db2.row.count` | Counter | `{row}` | Rows affected, by operation |
 | `db2.sql.compilation.count` | Counter | `{compilation}` | SQL statement compilations |
 | `db2.sql.compilation.time` | Counter | `s` | Time spent compiling SQL statements |
 | `db2.sql.bind.count` | Counter | `{bind}` | Binds and precompiles attempted |
 | `db2.sql.rebind.count` | Counter | `{rebind}` | Packages rebound, by rebind type |
 | `db2.deadlock.rollback.count` | Counter | `{rollback}` | Internal rollbacks caused by a deadlock (requires `use_snapshot_monitor`) |
 
-### Sort and direct I/O (`MON_GET_DATABASE`)
+### Sort and direct I/O
 
 Additional attribute: `disk.io.direction` (`read`, `write`) — the standard semantic-convention attribute, so it is not `db2`-prefixed.
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
 | `db2.sort.heap.allocated` | Gauge | `{page}` | Allocated pages of sort heap space |
-| `db2.sort.shared_heap.allocated` | Gauge | `By` | Shared sort memory allocated |
-| `db2.sort.shared_heap.max` | Gauge | `By` | Shared sort memory high watermark |
+| `db2.sort.shared.heap.allocated` | Gauge | `By` | Shared sort memory allocated |
+| `db2.sort.shared.heap.max` | Gauge | `By` | Shared sort memory high watermark |
 | `db2.sort.time` | Counter | `s` | Time spent performing section sorts |
 | `db2.sort.active` | UpDownCounter | `{sort}` | Sorts currently active |
 | `db2.hash_join.active` | UpDownCounter | `{hash_join}` | Hash joins currently active |
@@ -239,9 +239,9 @@ Additional attribute: `disk.io.direction` (`read`, `write`) — the standard sem
 | `db2.direct.io.request.count` | Counter | `{request}` | Direct read/write requests |
 | `db2.direct.io.time` | Counter | `s` | Time spent on direct reads/writes |
 
-`db2.sort.heap.allocated` is reported in pages because DB2 does not state a page size for that element. `db2.sort.shared_heap.*` are documented in 4KB pages and are converted to bytes.
+`db2.sort.heap.allocated` is reported in pages because DB2 does not state a page size for that element. `db2.sort.shared.heap.*` are documented in 4KB pages and are converted to bytes.
 
-### Transaction log (`MON_GET_TRANSACTION_LOG`)
+### Transaction log
 
 Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_type` (`secondary`, `total`).
 
@@ -257,14 +257,14 @@ Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_typ
 | `db2.log.partial_page_io.count` | Counter | `{operation}` | Logger writes of partial log data |
 | `db2.log.buffer_full.count` | Counter | `{wait}` | Times agents waited for log data to flush |
 | `db2.log.buffer_hit.count` | Counter | `{read}` | Times an agent read log data from the log buffer |
-| `db2.log.recovery.redo_size` | Gauge | `By` | Log that would be redone for crash recovery |
-| `db2.log.dirty_pages.held_size` | Gauge | `By` | Log held by the oldest dirty page |
+| `db2.log.recovery.redo` | Gauge | `By` | Log that would be redone for crash recovery |
+| `db2.log.dirty_pages.held` | Gauge | `By` | Log held by the oldest dirty page |
 | `db2.log.hadr.wait.time` | Counter | `s` | Logger time waiting on HADR log replication |
 | `db2.log.hadr.wait.count` | Counter | `{wait}` | Times the logger waited on HADR log replication |
 | `db2.log.disk_wait.time` | Counter | `s` | Agent time waiting for log writes to disk |
 | `db2.log.disk_wait.count` | Counter | `{wait}` | Times agents waited for log writes to disk |
 
-`db2.log.disk_wait.*` come from `MON_GET_DATABASE` rather than `MON_GET_TRANSACTION_LOG`, which is where DB2 exposes those two elements. `FIRST_ACTIVE_LOG`, `LAST_ACTIVE_LOG` and `CURRENT_ACTIVE_LOG` are log file numbers rather than measurements and are not emitted.
+Active log file numbers are identifiers rather than measurements and are not emitted as metrics.
 
 ## Query samples (log records)
 

@@ -114,8 +114,11 @@ public class TransactionLogQuery {
             .setUnit("{operation}")
             .buildObserver();
 
+        // Distinct from db2.log.disk_wait.count: this counts only the waits caused by the log
+        // buffer being full, so it is a log-buffer-sizing signal rather than a disk-latency one.
         logBufferFull = meter.counterBuilder("db2.log.buffer_full.count")
-            .setDescription("Number of times agents had to wait for log data to write to disk.")
+            .setDescription("Number of times agents had to wait because the log buffer was full "
+                + "while copying log records into it.")
             .setUnit("{wait}")
             .buildObserver();
 
@@ -124,13 +127,13 @@ public class TransactionLogQuery {
             .setUnit("{read}")
             .buildObserver();
 
-        logToRedoForRecovery = meter.gaugeBuilder("db2.log.recovery.redo_size")
+        logToRedoForRecovery = meter.gaugeBuilder("db2.log.recovery.redo")
             .ofLongs()
             .setDescription("Amount of log that would have to be redone for crash recovery.")
             .setUnit("By")
             .buildObserver();
 
-        logHeldByDirtyPages = meter.gaugeBuilder("db2.log.dirty_pages.held_size")
+        logHeldByDirtyPages = meter.gaugeBuilder("db2.log.dirty_pages.held")
             .ofLongs()
             .setDescription("Amount of log corresponding to the difference between the oldest dirty page and the current log position.")
             .setUnit("By")

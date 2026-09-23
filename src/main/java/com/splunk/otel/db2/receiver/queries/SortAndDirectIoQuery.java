@@ -63,13 +63,13 @@ public class SortAndDirectIoQuery {
             .setUnit("{page}")
             .buildObserver();
 
-        sortSharedHeapAllocated = meter.gaugeBuilder("db2.sort.shared_heap.allocated")
+        sortSharedHeapAllocated = meter.gaugeBuilder("db2.sort.shared.heap.allocated")
             .ofLongs()
             .setDescription("Total amount of shared sort memory allocated.")
             .setUnit("By")
             .buildObserver();
 
-        sortSharedHeapMax = meter.gaugeBuilder("db2.sort.shared_heap.max")
+        sortSharedHeapMax = meter.gaugeBuilder("db2.sort.shared.heap.max")
             .ofLongs()
             .setDescription("Shared sort memory high watermark.")
             .setUnit("By")
@@ -81,17 +81,22 @@ public class SortAndDirectIoQuery {
             .setUnit("s")
             .buildObserver();
 
-        activeSorts = meter.upDownCounterBuilder("db2.sort.active")
+        // Gauges, not UpDownCounters: these are instantaneous readings, matching the sort
+        // memory gauges above rather than accumulating across intervals.
+        activeSorts = meter.gaugeBuilder("db2.sort.active")
+            .ofLongs()
             .setDescription("Number of sorts currently active.")
             .setUnit("{sort}")
             .buildObserver();
 
-        activeHashJoins = meter.upDownCounterBuilder("db2.hash_join.active")
+        activeHashJoins = meter.gaugeBuilder("db2.hash_join.active")
+            .ofLongs()
             .setDescription("Number of hash joins currently active.")
             .setUnit("{hash_join}")
             .buildObserver();
 
-        activeOlapFunctions = meter.upDownCounterBuilder("db2.olap_function.active")
+        activeOlapFunctions = meter.gaugeBuilder("db2.olap_function.active")
+            .ofLongs()
             .setDescription("Number of OLAP functions currently active.")
             .setUnit("{function}")
             .buildObserver();
