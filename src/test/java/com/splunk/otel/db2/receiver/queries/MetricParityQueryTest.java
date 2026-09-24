@@ -154,6 +154,18 @@ class MetricParityQueryTest {
             .collect(Collectors.toSet());
     }
 
+    /** Asserts the recorded instrument kind, so a gauge/sum regression cannot pass silently. */
+    private static void assertKind(Collection<MetricData> metrics, String name,
+                                   io.opentelemetry.sdk.metrics.data.MetricDataType expectedType,
+                                   Boolean expectedMonotonic) {
+        MetricData md = metric(metrics, name);
+        assertThat(md.getType()).as("instrument kind of %s", name).isEqualTo(expectedType);
+        if (expectedMonotonic != null) {
+            assertThat(md.getLongSumData().isMonotonic())
+                .as("monotonicity of %s", name).isEqualTo(expectedMonotonic);
+        }
+    }
+
     // ── SqlActivityQuery ─────────────────────────────────────────────────────
 
     private Connection sqlActivityConnection() throws Exception {
@@ -274,12 +286,20 @@ class MetricParityQueryTest {
 
     @Test
     void snapshotColumnsAreNotQueriedWhenSnapshotMonitorDisabled() throws Exception {
-        // Only MON_GET_DATABASE is stubbed; a SNAP_GET_DB attempt would throw and be logged,
-        // so assert the snapshot-only dimensions are simply absent.
         Connection conn = sqlActivityConnection();
+        Statement st = conn.createStatement();
         new SqlActivityQuery(() -> conn, "TESTDB", meter, false);
 
-        assertThat(metricNames()).doesNotContain("db2.deadlock.rollback.count");
+        Collection<MetricData> metrics = collect();
+        assertThat(namesOf(metrics)).doesNotContain("db2.deadlock.rollback.count");
+
+        // Absence of the metric is not sufficient on its own: an accidental SNAP_GET_DB call
+        // would throw from the mock and be swallowed by the collector, leaving the metric
+        // absent anyway. Assert the statement was never issued.
+        org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+        Mockito.verify(st, Mockito.atLeastOnce()).executeQuery(sql.capture());
+        assertThat(sql.getAllValues()).isNotEmpty();
+        assertThat(sql.getAllValues()).noneMatch(q -> q.contains("SNAP_GET_DB"));
     }
 
     @Test
@@ -353,6 +373,45 @@ class MetricParityQueryTest {
         // DIRECT_*_TIME are milliseconds
         assertThat(valueOf(metrics, "db2.direct.io.time", attrs(0, "disk.io.direction", "read"))).isEqualTo(3.0);
         assertThat(valueOf(metrics, "db2.direct.io.time", attrs(0, "disk.io.direction", "write"))).isEqualTo(4.0);
+    }
+
+    @Test
+    void currentQuantitiesAreNonMonotonicSumsAndWatermarksAreGauges() throws Exception {
+        // Current quantities are additive across db2.member so a backend must sum them;
+        // high-watermarks are not, because per-member peaks happen at different moments.
+        Map<String, ResultSet> routes = new LinkedHashMap<>();
+        routes.put("MON_GET_TRANSACTION_LOG", singleRow(0, cols(
+            "TOTAL_LOG_AVAILABLE", 900, "TOTAL_LOG_USED", 100, "SEC_LOG_USED_TOP", 200,
+            "TOT_LOG_USED_TOP", 300, "SEC_LOGS_ALLOCATED", 2,
+            "LOG_TO_REDO_FOR_RECOVERY", 88, "LOG_HELD_BY_DIRTY_PAGES", 89)));
+        routes.put("MON_GET_DATABASE", singleRow(0, cols("LOG_DISK_WAITS_TOTAL", 7)));
+        Connection logConn = routingConnection(routes);
+        new TransactionLogQuery(() -> logConn, "TESTDB", meter);
+
+        Map<String, ResultSet> sortRoutes = new HashMap<>();
+        sortRoutes.put("MON_GET_DATABASE", singleRow(0, cols(
+            "SORT_HEAP_ALLOCATED", 100, "SORT_SHRHEAP_ALLOCATED", 2, "SORT_SHRHEAP_TOP", 3,
+            "ACTIVE_SORTS", 4, "ACTIVE_HASH_JOINS", 5, "ACTIVE_OLAP_FUNCS", 6)));
+        Connection sortConn = routingConnection(sortRoutes);
+        new SortAndDirectIoQuery(() -> sortConn, "TESTDB", meter);
+
+        Collection<MetricData> metrics = collect();
+        var LONG_SUM = io.opentelemetry.sdk.metrics.data.MetricDataType.LONG_SUM;
+        var LONG_GAUGE = io.opentelemetry.sdk.metrics.data.MetricDataType.LONG_GAUGE;
+
+        for (String additive : java.util.List.of(
+                "db2.sort.heap.allocated", "db2.sort.shared.heap.allocated",
+                "db2.log.space.available", "db2.log.space.used",
+                "db2.log.secondary_files.allocated", "db2.log.recovery.redo",
+                "db2.log.dirty_pages.held",
+                "db2.sort.active", "db2.hash_join.active", "db2.olap_function.active")) {
+            assertKind(metrics, additive, LONG_SUM, false);
+        }
+
+        for (String watermark : java.util.List.of(
+                "db2.sort.shared.heap.max", "db2.log.space.used.max")) {
+            assertKind(metrics, watermark, LONG_GAUGE, null);
+        }
     }
 
     @Test

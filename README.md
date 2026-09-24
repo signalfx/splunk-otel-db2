@@ -155,7 +155,7 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 
 | Collector | Connection | Always open? |
 |---|---|---|
-| Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery) | `metricsConnection` | Yes |
+| Metrics (DatabaseQuery, BufferpoolQuery, TablespaceQuery, SqlActivityQuery, SortAndDirectIoQuery, TransactionLogQuery) | `metricsConnection` | Yes |
 | Query sample + Blocking session (`events.db.server.query_sample.enabled: true`) | `querySampleConnection` | Optional |
 | Top query + Plan (`events.db.server.top_query.enabled: true`) | `topQueryConnection` | Optional |
 
@@ -266,7 +266,7 @@ Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_typ
 | `db2.log.io.time` | Counter | `s` | Logger time spent reading from / writing to disk |
 | `db2.log.io.count` | Counter | `{operation}` | Logger I/O requests |
 | `db2.log.partial_page_io.count` | Counter | `{operation}` | Logger writes of partial log data |
-| `db2.log.buffer_full.count` | Counter | `{wait}` | Times agents waited for log data to flush |
+| `db2.log.buffer_full.count` | Counter | `{wait}` | Times agents waited because the log buffer was full while copying records into it |
 | `db2.log.buffer_hit.count` | Counter | `{read}` | Times an agent read log data from the log buffer |
 | `db2.log.recovery.redo` | UpDownCounter | `By` | Log that would be redone for crash recovery |
 | `db2.log.dirty_pages.held` | UpDownCounter | `By` | Log held by the oldest dirty page |
