@@ -354,8 +354,8 @@ class MetricParityQueryTest {
 
         Collection<MetricData> metrics = collect();
 
-        // SORT_HEAP_ALLOCATED stays in pages (Db2 states no page size for it)
-        assertThat(valueOf(metrics, "db2.sort.heap.allocated", memberAttrs(0))).isEqualTo(100);
+        // All three sort memory readings are 4KB pages converted to bytes
+        assertThat(valueOf(metrics, "db2.sort.heap.allocated", memberAttrs(0))).isEqualTo(100 * 4096);
         // SORT_SHRHEAP_* are documented in 4KB pages and converted to bytes
         assertThat(valueOf(metrics, "db2.sort.shared.heap.allocated", memberAttrs(0))).isEqualTo(2 * 4096);
         assertThat(valueOf(metrics, "db2.sort.shared.heap.max", memberAttrs(0))).isEqualTo(3 * 4096);

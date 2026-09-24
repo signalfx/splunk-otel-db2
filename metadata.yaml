@@ -600,15 +600,17 @@ metrics:
   db2.sort.heap.allocated:
     attributes: [db2.member]
     description: >
-      Total number of allocated pages of sort heap space. Reported in pages because
-      Db2 does not state a page size for this element.
+      Total sort heap space allocated. Db2 reports this element in pages without stating the
+      size; 4KB is taken from its documented comparability with the sheapthres configuration
+      parameter and from the sibling SORT_HEAP_TOP element, which is explicitly documented in
+      4KB pages.
     enabled: true
     stability: development
     sum:
       aggregation_temporality: cumulative
       monotonic: false
       value_type: int
-    unit: "{page}"
+    unit: "By"
 
   db2.sort.shared.heap.allocated:
     attributes: [db2.member]

@@ -239,7 +239,7 @@ Additional attribute: `disk.io.direction` (`read`, `write`) — the standard sem
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `db2.sort.heap.allocated` | UpDownCounter | `{page}` | Allocated pages of sort heap space |
+| `db2.sort.heap.allocated` | UpDownCounter | `By` | Sort heap space allocated |
 | `db2.sort.shared.heap.allocated` | UpDownCounter | `By` | Shared sort memory allocated |
 | `db2.sort.shared.heap.max` | Gauge | `By` | Shared sort memory high watermark |
 | `db2.sort.time` | Counter | `s` | Time spent performing section sorts |
@@ -250,7 +250,7 @@ Additional attribute: `disk.io.direction` (`read`, `write`) — the standard sem
 | `db2.direct.io.request.count` | Counter | `{request}` | Direct read/write requests |
 | `db2.direct.io.time` | Counter | `s` | Time spent on direct reads/writes |
 
-`db2.sort.heap.allocated` is reported in pages because DB2 does not state a page size for that element. `db2.sort.shared.heap.*` are documented in 4KB pages and are converted to bytes.
+All sort memory metrics are reported in bytes. DB2 expresses these elements in 4KB pages: `db2.sort.shared.heap.*` state that explicitly, and for `db2.sort.heap.allocated` the same factor follows from its documented comparability with the `sheapthres` configuration parameter and from the sibling `SORT_HEAP_TOP` element.
 
 ### Transaction log
 

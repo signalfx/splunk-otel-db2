@@ -55,11 +55,14 @@ public class SortAndDirectIoQuery {
     }
 
     private void register(Meter meter) {
-        // SORT_HEAP_ALLOCATED is documented in pages without a stated page size, so it is
-        // reported as pages rather than converted to bytes.
+        // SORT_HEAP_ALLOCATED's own element description says "pages" without stating a size,
+        // but 4KB is well supported: its Usage notes document comparing it directly against
+        // sheapthres, which is specified in 4KB pages, and the sibling private element
+        // SORT_HEAP_TOP is explicitly documented "in 4 KB pages". Sort heap does not track the
+        // database page size. Converted for consistency with the shared-sort metrics below.
         sortHeapAllocated = meter.upDownCounterBuilder("db2.sort.heap.allocated")
-            .setDescription("Total number of allocated pages of sort heap space.")
-            .setUnit("{page}")
+            .setDescription("Total sort heap space allocated.")
+            .setUnit("By")
             .buildObserver();
 
         sortSharedHeapAllocated = meter.upDownCounterBuilder("db2.sort.shared.heap.allocated")
@@ -139,7 +142,8 @@ public class SortAndDirectIoQuery {
                         Attributes readAttrs  = directionAttrs(member, "read");
                         Attributes writeAttrs = directionAttrs(member, "write");
 
-                        sortHeapAllocated.record(rs.getLong("SORT_HEAP_ALLOCATED"), attrs);
+                        sortHeapAllocated.record(
+                            rs.getLong("SORT_HEAP_ALLOCATED") * BYTES_PER_4K_PAGE, attrs);
                         sortSharedHeapAllocated.record(
                             rs.getLong("SORT_SHRHEAP_ALLOCATED") * BYTES_PER_4K_PAGE, attrs);
                         sortSharedHeapMax.record(
