@@ -3,6 +3,7 @@ package com.splunk.otel.db2.receiver;
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.receiver.queries.QuerySampleEvent;
 import com.splunk.otel.db2.receiver.queries.TopQueryEvent;
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
@@ -28,6 +29,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -239,6 +241,7 @@ class Db2ReceiverIntegrationTest {
             "db2.sql.failed.count",
             "db2.transaction.count",
             "db2.row.count",
+            "db2.row.modified.count",
             "db2.row.read.count",
             "db2.row.returned.count",
             "db2.sql.compilation.count",
@@ -771,38 +774,81 @@ class Db2ReceiverIntegrationTest {
         Set.of("db2.deadlock.rollback.count");
 
     /**
-     * Every dimensional value each metric must emit on the default path, as
-     * metric -> attribute -> required values. Asserting metric-name presence alone is not
-     * enough: a coalesced series can disappear while sibling points keep the name alive.
+     * Complete attribute tuples each metric must emit on the default path, excluding
+     * db2.member which varies by deployment. Whole tuples rather than per-attribute value
+     * sets: checking attributes independently lets a combination disappear unnoticed, because
+     * every individual value still shows up on some other point. Dropping all
+     * db2.internal=true rows, for instance, would leave every db2.row_operation value intact.
      */
-    private static final Map<String, Map<String, List<String>>> REQUIRED_SERIES = Map.of(
-        "db2.sql.statement.count",   Map.of("db2.statement_type",  List.of("dynamic", "static")),
-        "db2.sql.operation.count",   Map.of("db2.operation_type",  List.of("select", "uid", "ddl")),
-        "db2.transaction.count",     Map.of("db2.transaction_type", List.of("commit", "rollback")),
-        "db2.row.count",             Map.of("db2.row_operation",   List.of("inserted", "updated", "deleted")),
-        "db2.direct.io.count",       Map.of("disk.io.direction",   List.of("read", "write")),
-        "db2.direct.io.request.count", Map.of("disk.io.direction", List.of("read", "write")),
-        "db2.direct.io.time",        Map.of("disk.io.direction",   List.of("read", "write")),
-        "db2.log.io.pages",          Map.of("disk.io.direction",   List.of("read", "write")),
-        "db2.log.io.count",          Map.of("disk.io.direction",   List.of("read", "write")),
-        "db2.log.space.used.max",    Map.of("db2.log_space_type",  List.of("secondary", "total"))
-    );
+    private static final Map<String, List<Attributes>> REQUIRED_SERIES = buildRequiredSeries();
+
+    private static Map<String, List<Attributes>> buildRequiredSeries() {
+        Map<String, List<Attributes>> required = new LinkedHashMap<>();
+
+        required.put("db2.sql.statement.count", List.of(
+            stringAttrs("db2.statement_type", "dynamic"),
+            stringAttrs("db2.statement_type", "static")));
+
+        required.put("db2.sql.operation.count", List.of(
+            stringAttrs("db2.operation_type", "select"),
+            stringAttrs("db2.operation_type", "uid"),
+            stringAttrs("db2.operation_type", "ddl")));
+
+        required.put("db2.transaction.count", List.of(
+            transactionTuple("commit", false),  transactionTuple("commit", true),
+            transactionTuple("rollback", false), transactionTuple("rollback", true)));
+
+        required.put("db2.row.count", List.of(
+            rowTuple("inserted", false), rowTuple("updated", false), rowTuple("deleted", false),
+            rowTuple("inserted", true),  rowTuple("updated", true),  rowTuple("deleted", true)));
+
+        for (String metric : List.of("db2.direct.io.count", "db2.direct.io.request.count",
+                "db2.direct.io.time", "db2.log.io.pages", "db2.log.io.time", "db2.log.io.count")) {
+            required.put(metric, List.of(
+                stringAttrs("disk.io.direction", "read"),
+                stringAttrs("disk.io.direction", "write")));
+        }
+
+        required.put("db2.log.space.used.max", List.of(
+            stringAttrs("db2.log_space_type", "secondary"),
+            stringAttrs("db2.log_space_type", "total")));
+
+        return required;
+    }
+
+    private static Attributes stringAttrs(String key, String value) {
+        return Attributes.builder().put(key, value).build();
+    }
+
+    private static Attributes transactionTuple(String type, boolean internal) {
+        return Attributes.builder()
+            .put("db2.transaction_type", type).put("db2.internal", internal).build();
+    }
+
+    private static Attributes rowTuple(String operation, boolean internal) {
+        return Attributes.builder()
+            .put("db2.row_operation", operation).put("db2.internal", internal).build();
+    }
+
+    /** True when some point of the metric carries every key/value in the required tuple. */
+    private static boolean hasSeries(InMemoryMetricExporter exporter, String metric, Attributes required) {
+        return exporter.getFinishedMetricItems().stream()
+            .filter(m -> m.getName().equals(metric))
+            .flatMap(m -> m.getData().getPoints().stream())
+            .anyMatch(pt -> required.asMap().entrySet().stream().allMatch(e -> {
+                @SuppressWarnings("unchecked")
+                io.opentelemetry.api.common.AttributeKey<Object> k =
+                    (io.opentelemetry.api.common.AttributeKey<Object>) e.getKey();
+                return e.getValue().equals(pt.getAttributes().get(k));
+            }));
+    }
 
     private static void assertAllRequiredSeriesPresent(InMemoryMetricExporter exporter) {
-        REQUIRED_SERIES.forEach((metric, byAttribute) ->
-            byAttribute.forEach((attribute, requiredValues) -> {
-                List<String> observed = exporter.getFinishedMetricItems().stream()
-                    .filter(m -> m.getName().equals(metric))
-                    .flatMap(m -> m.getData().getPoints().stream())
-                    .map(pt -> pt.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.stringKey(attribute)))
-                    .filter(java.util.Objects::nonNull)
-                    .distinct()
-                    .collect(Collectors.toList());
-                assertThat(observed)
-                    .as("%s must emit a series for every %s value", metric, attribute)
-                    .containsAll(requiredValues);
-            }));
+        List<String> missing = new java.util.ArrayList<>();
+        REQUIRED_SERIES.forEach((metric, tuples) -> tuples.stream()
+            .filter(t -> !hasSeries(exporter, metric, t))
+            .forEach(t -> missing.add(metric + " " + t)));
+        assertThat(missing).as("dimensional series declared but never emitted").isEmpty();
     }
 
     /**

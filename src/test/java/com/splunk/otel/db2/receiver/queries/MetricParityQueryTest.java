@@ -84,10 +84,19 @@ class MetricParityQueryTest {
         return m;
     }
 
+    /**
+     * Performs a collection. The mocked ResultSets are one-shot, so a second collection in the
+     * same test observes no rows and every metric disappears — which silently turns a negative
+     * assertion into a no-op. Call this at most once per test, or use
+     * {@link #namesOf(Collection)} on an already-captured collection.
+     */
     private Set<String> metricNames() {
-        return reader.collectAllMetrics().stream()
-            .map(MetricData::getName)
-            .collect(Collectors.toSet());
+        return namesOf(reader.collectAllMetrics());
+    }
+
+    /** Metric names from an already-collected result, performing no further collection. */
+    private static Set<String> namesOf(Collection<MetricData> metrics) {
+        return metrics.stream().map(MetricData::getName).collect(Collectors.toSet());
     }
 
     private Collection<MetricData> collect() {
@@ -154,7 +163,7 @@ class MetricParityQueryTest {
             "SELECT_SQL_STMTS", 14, "UID_SQL_STMTS", 15, "DDL_SQL_STMTS", 16,
             "TOTAL_APP_COMMITS", 21, "TOTAL_APP_ROLLBACKS", 22,
             "INT_COMMITS", 23, "INT_ROLLBACKS", 24,
-            "ROWS_READ", 31, "ROWS_RETURNED", 32, "ROWS_MODIFIED", 33,
+            "ROWS_READ", 31, "ROWS_RETURNED", 32, "ROWS_MODIFIED", 200,
             "ROWS_INSERTED", 34, "ROWS_UPDATED", 35, "ROWS_DELETED", 36,
             "INT_ROWS_INSERTED", 37, "INT_ROWS_UPDATED", 38, "INT_ROWS_DELETED", 39,
             "BINDS_PRECOMPILES", 41, "IMPLICIT_REBINDS", 42,
@@ -173,6 +182,7 @@ class MetricParityQueryTest {
             "db2.sql.failed.count",
             "db2.transaction.count",
             "db2.row.count",
+            "db2.row.modified.count",
             "db2.row.read.count",
             "db2.row.returned.count",
             "db2.sql.compilation.count",
@@ -216,6 +226,20 @@ class MetricParityQueryTest {
             .containsExactlyInAnyOrder("inserted", "updated", "deleted");
         assertThat(valueOf(metrics, "db2.row.read.count", memberAttrs(0))).isEqualTo(31);
         assertThat(valueOf(metrics, "db2.row.returned.count", memberAttrs(0))).isEqualTo(32);
+    }
+
+    @Test
+    void rowsModifiedIsReportedIndependentlyOfThePartition() throws Exception {
+        // ROWS_MODIFIED is not the sum of inserted+updated+deleted: DB2 also counts rows changed
+        // by triggers and referential integrity, so it must not be derived or dropped. The
+        // fixture deliberately sets it higher than the partition total (34+35+36 = 105).
+        Connection conn = sqlActivityConnection();
+        new SqlActivityQuery(() -> conn, "TESTDB", meter, false);
+
+        Collection<MetricData> metrics = collect();
+        assertThat(valueOf(metrics, "db2.row.modified.count", memberAttrs(0))).isEqualTo(200);
+        assertThat(attributeValues(metrics, "db2.row.count", "db2.row_operation"))
+            .doesNotContain("modified");
     }
 
     @Test
@@ -428,10 +452,12 @@ class MetricParityQueryTest {
 
         Collection<MetricData> metrics = collect();
 
-        // The sentinel is omitted entirely rather than exported as -1.
-        assertThat(metricNames()).doesNotContain("db2.log.space.available");
+        // Assert against the captured collection: calling metricNames() here would collect a
+        // second time, see the exhausted mocks, and pass no matter what was emitted.
+        assertThat(namesOf(metrics)).doesNotContain("db2.log.space.available");
 
-        // Neighbouring readings in the same row are unaffected.
+        // Guards the guard: the sibling readings prove this collection was not empty, so the
+        // assertion above cannot pass merely because nothing was recorded.
         assertThat(valueOf(metrics, "db2.log.space.used", memberAttrs(0))).isEqualTo(100);
         assertThat(valueOf(metrics, "db2.log.disk_wait.count", memberAttrs(0))).isEqualTo(7);
     }

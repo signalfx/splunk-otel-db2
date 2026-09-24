@@ -64,6 +64,7 @@ public class SqlActivityQuery {
     private ObservableLongMeasurement failedStatements;
     private ObservableLongMeasurement transactions;
     private ObservableLongMeasurement rows;
+    private ObservableLongMeasurement rowsModified;
     private ObservableLongMeasurement rowsRead;
     private ObservableLongMeasurement rowsReturned;
     private ObservableLongMeasurement compilations;
@@ -82,7 +83,7 @@ public class SqlActivityQuery {
 
     private void register(Meter meter) {
         statements = meter.counterBuilder("db2.sql.statement.count")
-            .setDescription("Number of SQL statements executed, by how the statement was prepared.")
+            .setDescription("Number of SQL statements attempted, by how the statement was prepared.")
             .setUnit("{statement}")
             .buildObserver();
 
@@ -103,6 +104,12 @@ public class SqlActivityQuery {
 
         rows = meter.counterBuilder("db2.row.count")
             .setDescription("Number of rows inserted, updated or deleted.")
+            .setUnit("{row}")
+            .buildObserver();
+
+        rowsModified = meter.counterBuilder("db2.row.modified.count")
+            .setDescription("Number of rows changed, including rows changed by triggers and "
+                + "referential integrity enforcement, so it can exceed db2.row.count.")
             .setUnit("{row}")
             .buildObserver();
 
@@ -145,7 +152,7 @@ public class SqlActivityQuery {
         meter.batchCallback(
             this::collect,
             statements, operations, failedStatements, transactions,
-            rows, rowsRead, rowsReturned,
+            rows, rowsModified, rowsRead, rowsReturned,
             compilations, compileTime, binds, rebinds, deadlockRollbacks
         );
     }
@@ -208,9 +215,11 @@ public class SqlActivityQuery {
                         transactions.record(rs.getLong("INT_ROLLBACKS"),       transactionAttrs(member, "rollback", true));
 
                         // db2.row.count carries only the mutually exclusive insert/update/delete
-                        // partition. ROWS_MODIFIED is an aggregate of those three, and rows read
-                        // and returned are separate measurements rather than members of the same
-                        // partition, so all three get their own metric.
+                        // partition. Rows modified, read and returned are separate measurements
+                        // rather than members of that partition, so each gets its own metric.
+                        // ROWS_MODIFIED is not simply the sum of the three: DB2 documents it as
+                        // able to exceed them, because it also counts rows changed by triggers
+                        // and referential-integrity enforcement.
                         rows.record(rs.getLong("ROWS_INSERTED"),     rowAttrs(member, "inserted", false));
                         rows.record(rs.getLong("ROWS_UPDATED"),      rowAttrs(member, "updated", false));
                         rows.record(rs.getLong("ROWS_DELETED"),      rowAttrs(member, "deleted", false));
@@ -218,6 +227,7 @@ public class SqlActivityQuery {
                         rows.record(rs.getLong("INT_ROWS_UPDATED"),  rowAttrs(member, "updated", true));
                         rows.record(rs.getLong("INT_ROWS_DELETED"),  rowAttrs(member, "deleted", true));
 
+                        rowsModified.record(rs.getLong("ROWS_MODIFIED"), memberAttrs);
                         rowsRead    .record(rs.getLong("ROWS_READ"),     memberAttrs);
                         rowsReturned.record(rs.getLong("ROWS_RETURNED"), memberAttrs);
 

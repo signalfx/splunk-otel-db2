@@ -57,14 +57,12 @@ public class SortAndDirectIoQuery {
     private void register(Meter meter) {
         // SORT_HEAP_ALLOCATED is documented in pages without a stated page size, so it is
         // reported as pages rather than converted to bytes.
-        sortHeapAllocated = meter.gaugeBuilder("db2.sort.heap.allocated")
-            .ofLongs()
+        sortHeapAllocated = meter.upDownCounterBuilder("db2.sort.heap.allocated")
             .setDescription("Total number of allocated pages of sort heap space.")
             .setUnit("{page}")
             .buildObserver();
 
-        sortSharedHeapAllocated = meter.gaugeBuilder("db2.sort.shared.heap.allocated")
-            .ofLongs()
+        sortSharedHeapAllocated = meter.upDownCounterBuilder("db2.sort.shared.heap.allocated")
             .setDescription("Total amount of shared sort memory allocated.")
             .setUnit("By")
             .buildObserver();

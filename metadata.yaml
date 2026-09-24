@@ -445,7 +445,7 @@ metrics:
 
   db2.sql.statement.count:
     attributes: [db2.member, db2.statement_type]
-    description: Number of SQL statements executed, by how the statement was prepared.
+    description: Number of SQL statements attempted, by how the statement was prepared.
     enabled: true
     stability: development
     sum:
@@ -495,6 +495,19 @@ metrics:
     description: >
       Number of rows inserted, updated or deleted. Holds only that mutually exclusive
       partition, so aggregating db2.row_operation gives a meaningful total.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.row.modified.count:
+    attributes: [db2.member]
+    description: >
+      Number of rows changed. Counts rows changed by triggers and referential integrity
+      enforcement as well, so it can exceed the total of db2.row.count.
     enabled: true
     stability: development
     sum:
@@ -591,7 +604,9 @@ metrics:
       Db2 does not state a page size for this element.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "{page}"
 
@@ -600,7 +615,9 @@ metrics:
     description: Total amount of shared sort memory allocated.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "By"
 
@@ -697,7 +714,9 @@ metrics:
     description: Amount of active log space not being used by uncommitted transactions.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "By"
 
@@ -706,7 +725,9 @@ metrics:
     description: Total amount of active log space currently used.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "By"
 
@@ -724,7 +745,9 @@ metrics:
     description: Total number of secondary log files currently in use.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "{file}"
 
@@ -802,7 +825,9 @@ metrics:
     description: Amount of log that would have to be redone for crash recovery.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "By"
 
@@ -813,7 +838,9 @@ metrics:
       the current log position.
     enabled: true
     stability: development
-    gauge:
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
       value_type: int
     unit: "By"
 

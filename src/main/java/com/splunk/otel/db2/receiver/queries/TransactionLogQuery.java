@@ -70,14 +70,12 @@ public class TransactionLogQuery {
     }
 
     private void register(Meter meter) {
-        logSpaceAvailable = meter.gaugeBuilder("db2.log.space.available")
-            .ofLongs()
+        logSpaceAvailable = meter.upDownCounterBuilder("db2.log.space.available")
             .setDescription("Amount of active log space not being used by uncommitted transactions.")
             .setUnit("By")
             .buildObserver();
 
-        logSpaceUsed = meter.gaugeBuilder("db2.log.space.used")
-            .ofLongs()
+        logSpaceUsed = meter.upDownCounterBuilder("db2.log.space.used")
             .setDescription("Total amount of active log space currently used.")
             .setUnit("By")
             .buildObserver();
@@ -88,8 +86,7 @@ public class TransactionLogQuery {
             .setUnit("By")
             .buildObserver();
 
-        secondaryLogsAllocated = meter.gaugeBuilder("db2.log.secondary_files.allocated")
-            .ofLongs()
+        secondaryLogsAllocated = meter.upDownCounterBuilder("db2.log.secondary_files.allocated")
             .setDescription("Total number of secondary log files currently in use.")
             .setUnit("{file}")
             .buildObserver();
@@ -128,14 +125,12 @@ public class TransactionLogQuery {
             .setUnit("{read}")
             .buildObserver();
 
-        logToRedoForRecovery = meter.gaugeBuilder("db2.log.recovery.redo")
-            .ofLongs()
+        logToRedoForRecovery = meter.upDownCounterBuilder("db2.log.recovery.redo")
             .setDescription("Amount of log that would have to be redone for crash recovery.")
             .setUnit("By")
             .buildObserver();
 
-        logHeldByDirtyPages = meter.gaugeBuilder("db2.log.dirty_pages.held")
-            .ofLongs()
+        logHeldByDirtyPages = meter.upDownCounterBuilder("db2.log.dirty_pages.held")
             .setDescription("Amount of log corresponding to the difference between the oldest dirty page and the current log position.")
             .setUnit("By")
             .buildObserver();

@@ -177,7 +177,7 @@ All metrics carry `db.namespace` (database name) and `db2.member` (member number
 |---|---|---|---|
 | `db2.connection.count` | UpDownCounter | `{connection}` | Current connections |
 | `db2.connection.active` | UpDownCounter | `{connection}` | Connections executing in the engine |
-| `db2.connection.max` | UpDownCounter | `{connection}` | Peak simultaneous connections |
+| `db2.connection.max` | Gauge | `{connection}` | Peak simultaneous connections |
 | `db2.lock.wait.count` | Counter | `{wait}` | Total lock waits |
 | `db2.lock.wait_time` | Counter | `s` | Total time spent waiting for locks |
 | `db2.lock.timeout.count` | Counter | `{timeout}` | Lock timeouts |
@@ -213,11 +213,12 @@ Additional attributes: `db2.statement_type` (`dynamic`, `static`), `db2.operatio
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `db2.sql.statement.count` | Counter | `{statement}` | SQL statements executed, by how the statement was prepared |
+| `db2.sql.statement.count` | Counter | `{statement}` | SQL statements attempted, by how the statement was prepared |
 | `db2.sql.operation.count` | Counter | `{statement}` | SQL statements executed, by the kind of operation performed |
 | `db2.sql.failed.count` | Counter | `{statement}` | SQL statements that failed |
 | `db2.transaction.count` | Counter | `{transaction}` | Transactions committed or rolled back |
 | `db2.row.count` | Counter | `{row}` | Rows inserted, updated or deleted |
+| `db2.row.modified.count` | Counter | `{row}` | Rows changed, including by triggers and referential integrity |
 | `db2.row.read.count` | Counter | `{row}` | Rows read from tables |
 | `db2.row.returned.count` | Counter | `{row}` | Rows returned to clients |
 | `db2.sql.compilation.count` | Counter | `{compilation}` | SQL statement compilations |
@@ -225,6 +226,8 @@ Additional attributes: `db2.statement_type` (`dynamic`, `static`), `db2.operatio
 | `db2.sql.bind.count` | Counter | `{bind}` | Binds and precompiles attempted |
 | `db2.sql.rebind.count` | Counter | `{rebind}` | Packages implicitly rebound |
 | `db2.deadlock.rollback.count` | Counter | `{rollback}` | Internal rollbacks caused by a deadlock (requires `use_snapshot_monitor`) |
+
+`db2.row.modified.count` is not the total of `db2.row.count`: DB2 counts rows changed by triggers and referential integrity enforcement there too, so it can be larger.
 
 `db2.sql.statement.count` and `db2.sql.operation.count` classify the same statements two different ways — a dynamic `SELECT` is counted once in each — so they are separate metrics and must not be added together. For the same reason `db2.row.count` carries only the mutually exclusive insert/update/delete partition, with rows read and rows returned as their own metrics.
 
@@ -236,8 +239,8 @@ Additional attribute: `disk.io.direction` (`read`, `write`) — the standard sem
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `db2.sort.heap.allocated` | Gauge | `{page}` | Allocated pages of sort heap space |
-| `db2.sort.shared.heap.allocated` | Gauge | `By` | Shared sort memory allocated |
+| `db2.sort.heap.allocated` | UpDownCounter | `{page}` | Allocated pages of sort heap space |
+| `db2.sort.shared.heap.allocated` | UpDownCounter | `By` | Shared sort memory allocated |
 | `db2.sort.shared.heap.max` | Gauge | `By` | Shared sort memory high watermark |
 | `db2.sort.time` | Counter | `s` | Time spent performing section sorts |
 | `db2.sort.active` | UpDownCounter | `{sort}` | Sorts currently active |
@@ -255,18 +258,18 @@ Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_typ
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
-| `db2.log.space.available` | Gauge | `By` | Active log space not held by uncommitted transactions |
-| `db2.log.space.used` | Gauge | `By` | Active log space currently used |
+| `db2.log.space.available` | UpDownCounter | `By` | Active log space not held by uncommitted transactions |
+| `db2.log.space.used` | UpDownCounter | `By` | Active log space currently used |
 | `db2.log.space.used.max` | Gauge | `By` | Peak log space used, by log space type |
-| `db2.log.secondary_files.allocated` | Gauge | `{file}` | Secondary log files currently in use |
+| `db2.log.secondary_files.allocated` | UpDownCounter | `{file}` | Secondary log files currently in use |
 | `db2.log.io.pages` | Counter | `{page}` | Log pages read from / written to disk |
 | `db2.log.io.time` | Counter | `s` | Logger time spent reading from / writing to disk |
 | `db2.log.io.count` | Counter | `{operation}` | Logger I/O requests |
 | `db2.log.partial_page_io.count` | Counter | `{operation}` | Logger writes of partial log data |
 | `db2.log.buffer_full.count` | Counter | `{wait}` | Times agents waited for log data to flush |
 | `db2.log.buffer_hit.count` | Counter | `{read}` | Times an agent read log data from the log buffer |
-| `db2.log.recovery.redo` | Gauge | `By` | Log that would be redone for crash recovery |
-| `db2.log.dirty_pages.held` | Gauge | `By` | Log held by the oldest dirty page |
+| `db2.log.recovery.redo` | UpDownCounter | `By` | Log that would be redone for crash recovery |
+| `db2.log.dirty_pages.held` | UpDownCounter | `By` | Log held by the oldest dirty page |
 | `db2.log.hadr.wait.time` | Counter | `s` | Logger time waiting on HADR log replication |
 | `db2.log.hadr.wait.count` | Counter | `{wait}` | Times the logger waited on HADR log replication |
 | `db2.log.disk_wait.time` | Counter | `s` | Agent time waiting for log writes to disk |
