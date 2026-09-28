@@ -58,6 +58,19 @@ class Db2ReceiverSnapshotIntegrationTest {
         return p;
     }
 
+    /** Distinct values of a string attribute across every point of a metric. */
+    private static java.util.List<String> stringAttributeValues(
+            InMemoryMetricExporter exporter, String metric, String attribute) {
+        return exporter.getFinishedMetricItems().stream()
+            .filter(m -> m.getName().equals(metric))
+            .flatMap(m -> m.getData().getPoints().stream())
+            .map(pt -> pt.getAttributes().get(
+                io.opentelemetry.api.common.AttributeKey.stringKey(attribute)))
+            .filter(java.util.Objects::nonNull)
+            .distinct()
+            .collect(java.util.stream.Collectors.toList());
+    }
+
     private Db2ReceiverConfig buildSnapshotConfig() {
         Db2ReceiverConfig config = new Db2ReceiverConfig();
         config.setHostname(db2.getHost());
@@ -322,6 +335,55 @@ class Db2ReceiverSnapshotIntegrationTest {
             } finally { cleanupConn.close(); }
             receiver.stop();
             loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
+    }
+
+    /**
+     * Gates the SNAP_GET_DB supplement in SqlActivityQuery. The snapshot-only columns have no
+     * MON_GET_* equivalent, so without this the SQL would be exercised by nothing: a failure is
+     * only logged as a warning. These are asynchronous instruments, so a failed query records
+     * no measurement and the dimensions below are simply absent.
+     */
+    @Test
+    void snapshotOnlyMetricDimensionsAreEmitted() {
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2Receiver receiver = new Db2Receiver(
+            buildSnapshotConfig(), meterProvider.get("splunk-otel-db2"), (Logger) null);
+        receiver.start();
+
+        try {
+            // db2.deadlock.rollback.count comes only from SNAP_GET_DB.
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .until(() -> metricExporter.getFinishedMetricItems().stream()
+                    .anyMatch(m -> m.getName().equals("db2.deadlock.rollback.count")));
+
+            assertThat(metricExporter.getFinishedMetricItems())
+                .filteredOn(m -> m.getName().equals("db2.deadlock.rollback.count"))
+                .allSatisfy(metric -> assertThat(metric.getLongSumData().getPoints())
+                    .allSatisfy(pt -> assertThat(pt.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.longKey("db2.member"))).isNotNull()));
+
+            // The snapshot path must not reintroduce quantities already available natively:
+            // COMMIT_SQL_STMTS, ROWS_SELECTED and INT_AUTO_REBINDS duplicate MON_GET_DATABASE
+            // columns, so emitting them would double-count within an additive metric.
+            assertThat(stringAttributeValues(metricExporter, "db2.sql.statement.count", "db2.statement_type"))
+                .doesNotContain("commit", "rollback");
+            assertThat(stringAttributeValues(metricExporter, "db2.row.count", "db2.row_operation"))
+                .doesNotContain("selected", "returned", "modified");
+            assertThat(stringAttributeValues(metricExporter, "db2.sql.rebind.count", "db2.rebind_type"))
+                .isEmpty();
+        } finally {
+            receiver.stop();
             meterProvider.shutdown();
         }
     }

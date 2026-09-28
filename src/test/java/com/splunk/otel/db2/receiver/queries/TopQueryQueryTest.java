@@ -425,6 +425,10 @@ class TopQueryQueryTest {
         assertThat(sql).contains("SNAP_GET_APPL_INFO");
         assertThat(sql).contains("SNAP_GET_STMT");
         assertThat(sql).contains("SYSDUMMY1");
+        // The metric collectors' own table functions must be excluded too, or the receiver's
+        // monitoring SQL is ranked as a user top query and consumes explain-plan budget.
+        assertThat(sql).contains("MON_GET_TRANSACTION_LOG");
+        assertThat(sql).contains("SNAP_GET_DB");
     }
 
     @Test

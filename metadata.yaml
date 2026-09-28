@@ -99,7 +99,46 @@ attributes:
   db2.stmt_type:
     description: >
       Statement type from the package cache. D = dynamic SQL, S = static (package) SQL.
+      This is the raw package-cache code carried on top_query events; the metric-side
+      classification is db2.statement_type.
     type: string
+
+  # --- SQL and row activity metric attributes ---
+  db2.statement_type:
+    description: >
+      How the SQL statement was prepared. DB2 also classifies the same statements by the
+      operation they perform, which is db2.operation_type on db2.sql.operation.count; the
+      two axes overlap, so they are separate metrics.
+    type: string
+    enum: [dynamic, static]
+  db2.operation_type:
+    description: The kind of operation the SQL statement performed.
+    type: string
+    enum: [select, uid, ddl]
+  db2.transaction_type:
+    description: Whether the transaction was committed or rolled back.
+    type: string
+    enum: [commit, rollback]
+  db2.row_operation:
+    description: >
+      Which row modification was counted. Mutually exclusive, so summing across this
+      attribute is meaningful. Rows read and rows returned are separate metrics rather
+      than values here, because they are different measurements of the same rows.
+    type: string
+    enum: [inserted, updated, deleted]
+  db2.internal:
+    description: >
+      True when the activity was initiated internally by the database manager rather
+      than requested by an application.
+    type: bool
+
+  # --- direct I/O and transaction log metric attributes ---
+  # Standard semantic-convention attribute, so it is deliberately not db2-prefixed.
+  # Matches sqlserverreceiver and oracledbreceiver in opentelemetry-collector-contrib.
+  disk.io.direction:
+    description: The direction of the disk I/O operation.
+    type: string
+    enum: [read, write]
 
   # --- blocking session event attributes ---
   db2.blocking.blocker.session_id:
@@ -397,6 +436,469 @@ metrics:
       monotonic: false
       value_type: int
     unit: "By"
+
+  # --- SQL and row activity (MON_GET_DATABASE) ---
+
+  db2.sql.statement.count:
+    attributes: [db2.member, db2.statement_type]
+    description: Number of SQL statements attempted, by how the statement was prepared.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{statement}"
+
+  db2.sql.operation.count:
+    attributes: [db2.member, db2.operation_type]
+    description: >
+      Number of SQL statements executed, by the kind of operation performed. Separate from
+      db2.sql.statement.count because the two classifications overlap: one statement is
+      counted once in each.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{statement}"
+
+  db2.sql.failed.count:
+    attributes: [db2.member]
+    description: Number of SQL statements that failed.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{statement}"
+
+  db2.transaction.count:
+    attributes: [db2.member, db2.transaction_type, db2.internal]
+    description: Number of transactions committed or rolled back.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{transaction}"
+
+  db2.row.count:
+    attributes: [db2.member, db2.row_operation, db2.internal]
+    description: >
+      Number of rows inserted, updated or deleted. Holds only that mutually exclusive
+      partition, so aggregating db2.row_operation gives a meaningful total.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.row.modified.count:
+    attributes: [db2.member]
+    description: >
+      Number of rows changed. Counts rows changed by triggers and referential integrity
+      enforcement as well, so it can exceed the total of db2.row.count.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.row.read.count:
+    attributes: [db2.member]
+    description: Number of rows read from tables.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.row.returned.count:
+    attributes: [db2.member]
+    description: Number of rows returned to clients.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{row}"
+
+  db2.sql.compilation.count:
+    attributes: [db2.member]
+    description: Number of SQL statement compilations.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{compilation}"
+
+  db2.sql.compilation.time:
+    attributes: [db2.member]
+    description: Total time spent compiling SQL statements.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: double
+    unit: "s"
+
+  db2.sql.bind.count:
+    attributes: [db2.member]
+    description: Number of binds and precompiles attempted.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{bind}"
+
+  db2.sql.rebind.count:
+    attributes: [db2.member]
+    description: Number of times packages were implicitly rebound.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{rebind}"
+
+  db2.deadlock.rollback.count:
+    attributes: [db2.member]
+    description: >
+      Number of internal rollbacks caused by a deadlock. Only emitted when
+      use_snapshot_monitor is enabled.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{rollback}"
+
+  # --- Sort and direct I/O (MON_GET_DATABASE) ---
+
+  db2.sort.heap.allocated:
+    attributes: [db2.member]
+    description: >
+      Total sort heap space allocated. Db2 reports this element in pages without stating the
+      size; 4KB is taken from its documented comparability with the sheapthres configuration
+      parameter and from the sibling SORT_HEAP_TOP element, which is explicitly documented in
+      4KB pages.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.sort.shared.heap.allocated:
+    attributes: [db2.member]
+    description: Total amount of shared sort memory allocated.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.sort.shared.heap.max:
+    attributes: [db2.member]
+    description: Shared sort memory high watermark.
+    enabled: true
+    stability: development
+    gauge:
+      value_type: int
+    unit: "By"
+
+  db2.sort.time:
+    attributes: [db2.member]
+    description: Total elapsed time spent performing section sorts.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: double
+    unit: "s"
+
+  db2.sort.active:
+    attributes: [db2.member]
+    description: Number of sorts currently active.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{sort}"
+
+  db2.hash_join.active:
+    attributes: [db2.member]
+    description: Number of hash joins currently active.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{hash_join}"
+
+  db2.olap_function.active:
+    attributes: [db2.member]
+    description: Number of OLAP functions currently active.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{function}"
+
+  db2.direct.io.count:
+    attributes: [db2.member, disk.io.direction]
+    description: Number of read or write operations that bypass the buffer pool.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{operation}"
+
+  db2.direct.io.request.count:
+    attributes: [db2.member, disk.io.direction]
+    description: Number of requests to perform a direct read or write of one or more sectors of data.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{request}"
+
+  db2.direct.io.time:
+    attributes: [db2.member, disk.io.direction]
+    description: Total elapsed time spent performing direct reads or writes.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: double
+    unit: "s"
+
+  # --- Transaction log (MON_GET_TRANSACTION_LOG, plus log disk waits from MON_GET_DATABASE) ---
+
+  db2.log.space.available:
+    attributes: [db2.member]
+    description: Amount of active log space not being used by uncommitted transactions.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.log.space.used:
+    attributes: [db2.member]
+    description: Total amount of active log space currently used.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.log.space.used.max:
+    attributes: [db2.member]
+    description: >
+      Maximum amount of total log space used. Includes secondary log space, so
+      db2.log.space.secondary.used.max is a subset of this rather than a disjoint pool —
+      the two must not be added together.
+    enabled: true
+    stability: development
+    gauge:
+      value_type: int
+    unit: "By"
+
+  db2.log.space.secondary.used.max:
+    attributes: [db2.member]
+    description: >
+      Maximum amount of secondary log space used. A subset of db2.log.space.used.max,
+      not a disjoint pool.
+    enabled: true
+    stability: development
+    gauge:
+      value_type: int
+    unit: "By"
+
+  db2.log.secondary_files.allocated:
+    attributes: [db2.member]
+    description: Total number of secondary log files currently in use.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "{file}"
+
+  db2.log.io.pages:
+    attributes: [db2.member, disk.io.direction]
+    description: Number of log pages read from or written to disk by the logger.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{page}"
+
+  db2.log.io.time:
+    attributes: [db2.member, disk.io.direction]
+    description: Total elapsed time spent by the logger reading from or writing to disk.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: double
+    unit: "s"
+
+  db2.log.io.count:
+    attributes: [db2.member, disk.io.direction]
+    description: Number of I/O requests issued by the logger to read or write log data.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{operation}"
+
+  db2.log.partial_page_io.count:
+    attributes: [db2.member]
+    description: Number of I/O requests issued by the logger for writing partial log data.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{operation}"
+
+  db2.log.buffer_full.count:
+    attributes: [db2.member]
+    description: >
+      Number of times agents had to wait because the log buffer was full while copying log
+      records into it. A log-buffer-sizing signal; contrast db2.log.disk_wait.count, which
+      counts all agent waits on log writes.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{wait}"
+
+  db2.log.buffer_hit.count:
+    attributes: [db2.member]
+    description: Number of times an agent read log data from the log buffer.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{read}"
+
+  db2.log.recovery.redo:
+    attributes: [db2.member]
+    description: Amount of log that would have to be redone for crash recovery.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.log.dirty_pages.held:
+    attributes: [db2.member]
+    description: >
+      Amount of log corresponding to the difference between the oldest dirty page and
+      the current log position.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: false
+      value_type: int
+    unit: "By"
+
+  db2.log.hadr.wait.time:
+    attributes: [db2.member]
+    description: Total time the logger spent waiting on HADR log replication.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: double
+    unit: "s"
+
+  db2.log.hadr.wait.count:
+    attributes: [db2.member]
+    description: Number of times the logger waited on HADR log replication.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{wait}"
+
+  db2.log.disk_wait.time:
+    attributes: [db2.member]
+    description: Total time agents spent waiting for log data to be written to disk.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: double
+    unit: "s"
+
+  db2.log.disk_wait.count:
+    attributes: [db2.member]
+    description: Number of times agents waited for log data to be written to disk.
+    enabled: true
+    stability: development
+    sum:
+      aggregation_temporality: cumulative
+      monotonic: true
+      value_type: int
+    unit: "{wait}"
 
 events:
   db.server.query_sample:
