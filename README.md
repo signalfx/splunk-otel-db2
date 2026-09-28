@@ -254,13 +254,14 @@ All sort memory metrics are reported in bytes. DB2 expresses these elements in 4
 
 ### Transaction log
 
-Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_type` (`secondary`, `total`).
+Additional attribute: `disk.io.direction` (`read`, `write`).
 
 | Metric | Type | Unit | Description |
 |---|---|---|---|
 | `db2.log.space.available` | UpDownCounter | `By` | Active log space not held by uncommitted transactions |
 | `db2.log.space.used` | UpDownCounter | `By` | Active log space currently used |
-| `db2.log.space.used.max` | Gauge | `By` | Peak log space used, by log space type |
+| `db2.log.space.used.max` | Gauge | `By` | Peak total log space used, including secondary |
+| `db2.log.space.secondary.used.max` | Gauge | `By` | Peak secondary log space used |
 | `db2.log.secondary_files.allocated` | UpDownCounter | `{file}` | Secondary log files currently in use |
 | `db2.log.io.pages` | Counter | `{page}` | Log pages read from / written to disk |
 | `db2.log.io.time` | Counter | `s` | Logger time spent reading from / writing to disk |
@@ -274,6 +275,8 @@ Additional attributes: `disk.io.direction` (`read`, `write`), `db2.log_space_typ
 | `db2.log.hadr.wait.count` | Counter | `{wait}` | Times the logger waited on HADR log replication |
 | `db2.log.disk_wait.time` | Counter | `s` | Agent time waiting for log writes to disk |
 | `db2.log.disk_wait.count` | Counter | `{wait}` | Times agents waited for log writes to disk |
+
+`db2.log.space.secondary.used.max` is a subset of `db2.log.space.used.max`, not a separate pool — DB2's total log space includes secondary, so the two must not be added together.
 
 Active log file numbers are identifiers rather than measurements and are not emitted as metrics.
 

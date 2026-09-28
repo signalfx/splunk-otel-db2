@@ -409,7 +409,8 @@ class MetricParityQueryTest {
         }
 
         for (String watermark : java.util.List.of(
-                "db2.sort.shared.heap.max", "db2.log.space.used.max")) {
+                "db2.sort.shared.heap.max", "db2.log.space.used.max",
+                "db2.log.space.secondary.used.max")) {
             assertKind(metrics, watermark, LONG_GAUGE, null);
         }
     }
@@ -455,8 +456,10 @@ class MetricParityQueryTest {
 
         assertThat(valueOf(metrics, "db2.log.space.available", memberAttrs(0))).isEqualTo(900);
         assertThat(valueOf(metrics, "db2.log.space.used", memberAttrs(0))).isEqualTo(100);
-        assertThat(valueOf(metrics, "db2.log.space.used.max", attrs(0, "db2.log_space_type", "secondary"))).isEqualTo(200);
-        assertThat(valueOf(metrics, "db2.log.space.used.max", attrs(0, "db2.log_space_type", "total"))).isEqualTo(300);
+        // Separate metrics, not one keyed by log space type: total includes secondary, so a
+        // shared additive attribute would invite a sum that exceeds real log capacity.
+        assertThat(valueOf(metrics, "db2.log.space.secondary.used.max", memberAttrs(0))).isEqualTo(200);
+        assertThat(valueOf(metrics, "db2.log.space.used.max", memberAttrs(0))).isEqualTo(300);
         assertThat(valueOf(metrics, "db2.log.secondary_files.allocated", memberAttrs(0))).isEqualTo(2);
 
         assertThat(valueOf(metrics, "db2.log.io.pages", attrs(0, "disk.io.direction", "read"))).isEqualTo(81);

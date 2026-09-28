@@ -261,6 +261,7 @@ class Db2ReceiverIntegrationTest {
             "db2.log.space.available",
             "db2.log.space.used",
             "db2.log.space.used.max",
+            "db2.log.space.secondary.used.max",
             "db2.log.secondary_files.allocated",
             "db2.log.io.pages",
             "db2.log.io.time",
@@ -808,10 +809,6 @@ class Db2ReceiverIntegrationTest {
                 stringAttrs("disk.io.direction", "read"),
                 stringAttrs("disk.io.direction", "write")));
         }
-
-        required.put("db2.log.space.used.max", List.of(
-            stringAttrs("db2.log_space_type", "secondary"),
-            stringAttrs("db2.log_space_type", "total")));
 
         return required;
     }

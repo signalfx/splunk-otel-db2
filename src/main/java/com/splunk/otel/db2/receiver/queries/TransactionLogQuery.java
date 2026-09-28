@@ -49,6 +49,7 @@ public class TransactionLogQuery {
     private ObservableLongMeasurement logSpaceAvailable;
     private ObservableLongMeasurement logSpaceUsed;
     private ObservableLongMeasurement logSpaceUsedMax;
+    private ObservableLongMeasurement secondaryLogSpaceUsedMax;
     private ObservableLongMeasurement secondaryLogsAllocated;
     private ObservableLongMeasurement logIoPages;
     private ObservableDoubleMeasurement logIoTime;
@@ -80,9 +81,21 @@ public class TransactionLogQuery {
             .setUnit("By")
             .buildObserver();
 
+        // Two metrics rather than one keyed by a log-space-type attribute: total log space
+        // includes secondary, so the two values are nested rather than disjoint and summing
+        // across such an attribute would double-count. Measured on a live instance with
+        // 13 primary and 12 secondary 4MB log files, the two peaks add to 145% of total
+        // capacity, which is impossible for disjoint pools.
         logSpaceUsedMax = meter.gaugeBuilder("db2.log.space.used.max")
             .ofLongs()
-            .setDescription("Maximum amount of log space used, by log space type.")
+            .setDescription("Maximum amount of total log space used, including secondary.")
+            .setUnit("By")
+            .buildObserver();
+
+        secondaryLogSpaceUsedMax = meter.gaugeBuilder("db2.log.space.secondary.used.max")
+            .ofLongs()
+            .setDescription("Maximum amount of secondary log space used. A subset of "
+                + "db2.log.space.used.max, not a disjoint pool.")
             .setUnit("By")
             .buildObserver();
 
@@ -159,7 +172,8 @@ public class TransactionLogQuery {
 
         meter.batchCallback(
             this::collect,
-            logSpaceAvailable, logSpaceUsed, logSpaceUsedMax, secondaryLogsAllocated,
+            logSpaceAvailable, logSpaceUsed, logSpaceUsedMax, secondaryLogSpaceUsedMax,
+            secondaryLogsAllocated,
             logIoPages, logIoTime, logIoOperations, logPartialPageIo,
             logBufferFull, logBufferHits, logToRedoForRecovery, logHeldByDirtyPages,
             hadrWaitTime, hadrWaits, diskWaitTime, diskWaits
@@ -189,13 +203,6 @@ public class TransactionLogQuery {
         instrument.record(value, attrs);
     }
 
-    private static Attributes logSpaceAttrs(int member, String logSpaceType) {
-        return Attributes.builder()
-            .put("db2.member", member)
-            .put("db2.log_space_type", logSpaceType)
-            .build();
-    }
-
     private void collect() {
         try {
             Connection conn = connSupplier.get();
@@ -210,10 +217,8 @@ public class TransactionLogQuery {
 
                         recordLogSpace(logSpaceAvailable, rs, "TOTAL_LOG_AVAILABLE", attrs);
                         recordLogSpace(logSpaceUsed,      rs, "TOTAL_LOG_USED",      attrs);
-                        recordLogSpace(logSpaceUsedMax, rs, "SEC_LOG_USED_TOP",
-                            logSpaceAttrs(member, "secondary"));
-                        recordLogSpace(logSpaceUsedMax, rs, "TOT_LOG_USED_TOP",
-                            logSpaceAttrs(member, "total"));
+                        recordLogSpace(secondaryLogSpaceUsedMax, rs, "SEC_LOG_USED_TOP", attrs);
+                        recordLogSpace(logSpaceUsedMax, rs, "TOT_LOG_USED_TOP", attrs);
                         recordLogSpace(secondaryLogsAllocated, rs, "SEC_LOGS_ALLOCATED", attrs);
 
                         logIoPages     .record(rs.getLong("LOG_READS"),        readAttrs);

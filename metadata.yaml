@@ -139,10 +139,6 @@ attributes:
     description: The direction of the disk I/O operation.
     type: string
     enum: [read, write]
-  db2.log_space_type:
-    description: Which pool of log space the high watermark refers to.
-    type: string
-    enum: [secondary, total]
 
   # --- blocking session event attributes ---
   db2.blocking.blocker.session_id:
@@ -734,8 +730,22 @@ metrics:
     unit: "By"
 
   db2.log.space.used.max:
-    attributes: [db2.member, db2.log_space_type]
-    description: Maximum amount of log space used, by log space type.
+    attributes: [db2.member]
+    description: >
+      Maximum amount of total log space used. Includes secondary log space, so
+      db2.log.space.secondary.used.max is a subset of this rather than a disjoint pool —
+      the two must not be added together.
+    enabled: true
+    stability: development
+    gauge:
+      value_type: int
+    unit: "By"
+
+  db2.log.space.secondary.used.max:
+    attributes: [db2.member]
+    description: >
+      Maximum amount of secondary log space used. A subset of db2.log.space.used.max,
+      not a disjoint pool.
     enabled: true
     stability: development
     gauge:
