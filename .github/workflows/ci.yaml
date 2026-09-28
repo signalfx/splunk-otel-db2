@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Must match the image used by the Db2Container instances in src/test/java.
+  DB2_TEST_IMAGE: icr.io/db2_community/db2:11.5.9.0
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -95,6 +99,13 @@ jobs:
         with:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
+      # Testcontainers applies its own deadline to image resolution, and the Db2 image is
+      # several GB from icr.io. Pulling here means the test only starts an already-local
+      # image, and a registry problem surfaces as an explicit pull failure rather than a
+      # ContainerFetchException during test initialization.
+      - name: Pre-pull DB2 image
+        run: .github/scripts/pull-db2-image.sh "$DB2_TEST_IMAGE"
+
       - name: Run integration tests (live DB2 via Testcontainers)
         run: ./gradlew integrationTest
 
@@ -124,6 +135,10 @@ jobs:
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      # Separate runner from integration-test, so this job pulls the image again from cold.
+      - name: Pre-pull DB2 image
+        run: .github/scripts/pull-db2-image.sh "$DB2_TEST_IMAGE"
 
       - name: Run snapshot monitor integration tests (live DB2 via Testcontainers)
         run: ./gradlew integrationTestSnapshot
