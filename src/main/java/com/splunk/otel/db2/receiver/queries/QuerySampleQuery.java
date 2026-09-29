@@ -181,7 +181,9 @@ public class QuerySampleQuery {
         "       SA.CLIENT_NNAME AS CLIENT_WRKSTNNAME, " +
         "       SA.AGENT_ID AS APPLICATION_HANDLE, " +
         "       SA.DBPARTITIONNUM AS MEMBER, " +
-        "       SA.CLIENT_ACCTNG_ID AS CLIENT_ACCTNG, " +
+        // The snapshot monitor names the accounting string TPMON_ACC_STR; SNAP_GET_APPL_INFO has
+        // no CLIENT_ACCTNG or CLIENT_ACCTNG_ID column (referencing either fails with SQL0206N).
+        "       SA.TPMON_ACC_STR AS CLIENT_ACCTNG, " +
         "       CAST(-1 AS BIGINT) AS CPU_US " +
         "FROM SYSIBM.SYSDUMMY1, " +
         "     TABLE(SNAP_GET_APPL_INFO(CAST(NULL AS VARCHAR(255)), -1)) AS SA, " +
