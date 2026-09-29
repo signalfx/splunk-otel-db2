@@ -5,6 +5,9 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.Severity;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.context.Context;
 
 import java.time.Instant;
 import java.util.concurrent.TimeUnit;
@@ -81,6 +84,7 @@ public final class QuerySampleEvent {
     private String  lockSchema;
     private String  blockingStartTime;
     private Double  waitDurationSec;
+    private SpanContext spanContext;
 
     private QuerySampleEvent(String dbNamespace, String queryText,
                              double sessionDurationSec, long member) {
@@ -133,6 +137,12 @@ public final class QuerySampleEvent {
         return this;
     }
 
+    /**
+     * Links this event to the trace the sampled application was running under, as read from the
+     * session's CLIENT_ACCTNG traceparent. Null when the application did not propagate one.
+     */
+    public QuerySampleEvent spanContext(SpanContext v) { this.spanContext = v; return this; }
+
     public void emit(Logger logger, Instant timestamp) {
         AttributesBuilder b = Attributes.builder()
             .put(DB_SYSTEM,    "ibm.db2")
@@ -170,12 +180,20 @@ public final class QuerySampleEvent {
         boolean isBlocked = waitDurationSec != null;
         Severity severity = isBlocked ? Severity.WARN : Severity.INFO;
 
-        logger.logRecordBuilder()
+        io.opentelemetry.api.logs.LogRecordBuilder builder = logger.logRecordBuilder()
             .setEventName("db.server.query_sample")
             .setSeverity(severity)
             .setSeverityText(isBlocked ? "WARN" : "INFO")
             .setTimestamp(timestamp.toEpochMilli(), TimeUnit.MILLISECONDS)
-            .setAllAttributes(b.build())
-            .emit();
+            .setAllAttributes(b.build());
+
+        // Stamps trace_id/span_id onto the record so the sampled query joins the application's
+        // distributed trace. setContext is the real API — the design doc's setSpanContext does
+        // not exist in the OTel Java Logs API.
+        if (spanContext != null) {
+            builder.setContext(Context.root().with(Span.wrap(spanContext)));
+        }
+
+        builder.emit();
     }
 }

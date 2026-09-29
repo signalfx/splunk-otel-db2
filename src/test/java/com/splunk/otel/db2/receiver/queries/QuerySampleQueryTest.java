@@ -727,4 +727,91 @@ class QuerySampleQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("active");
     }
+
+    private static final String TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736";
+    private static final String SPAN_ID  = "00f067aa0ba902b7";
+
+    @Test
+    void setsRecordSpanContextFromClientAcctngTraceparent() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+
+        io.opentelemetry.api.trace.SpanContext sc =
+            io.opentelemetry.api.trace.Span.fromContext(cap.getValue()).getSpanContext();
+        assertThat(sc.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
+    }
+
+    @Test
+    void doesNotSetSpanContextWhenClientAcctngHasNoTraceparent() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG")).thenReturn("dept=finance");
+
+        query(false).collect();
+
+        verify(logBuilder, never()).setContext(any());
+    }
+
+    @Test
+    void parsesTraceparentFromClientAcctng() {
+        io.opentelemetry.api.trace.SpanContext sc = QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        assertThat(sc).isNotNull();
+        assertThat(sc.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
+        assertThat(sc.isSampled()).isTrue();
+        assertThat(sc.isRemote()).isTrue();
+    }
+
+    @Test
+    void parsesUnsampledTraceFlags() {
+        io.opentelemetry.api.trace.SpanContext sc = QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-00");
+
+        assertThat(sc).isNotNull();
+        assertThat(sc.isSampled()).isFalse();
+    }
+
+    @Test
+    void toleratesSurroundingWhitespace() {
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "  traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01   ")).isNotNull();
+    }
+
+    // CLIENT_ACCTNG is free-form and written by arbitrary client applications, so a bad value must
+    // only cost that record its trace linkage -- it must never throw out of collect().
+    @Test
+    void returnsNullForValuesThatAreNotUsableTraceparents() {
+        assertThat(QuerySampleQuery.parseTraceparent(null)).isNull();
+        assertThat(QuerySampleQuery.parseTraceparent("")).isNull();
+        // an accounting string used for its actual purpose
+        assertThat(QuerySampleQuery.parseTraceparent("dept=finance,batch=nightly")).isNull();
+        // right prefix, truncated value
+        assertThat(QuerySampleQuery.parseTraceparent("traceparent=00-" + TRACE_ID)).isNull();
+        // all-zero ids are invalid per the spec
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-00000000000000000000000000000000-" + SPAN_ID + "-01")).isNull();
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-0000000000000000-01")).isNull();
+        // non-hex and wrong-length ids
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-zzzz2f3577b34da6a3ce929d0e0e4736-" + SPAN_ID + "-01")).isNull();
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-abcd-" + SPAN_ID + "-01")).isNull();
+        // missing flags
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-")).isNull();
+    }
 }

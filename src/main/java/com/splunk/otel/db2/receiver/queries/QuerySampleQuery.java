@@ -2,6 +2,11 @@ package com.splunk.otel.db2.receiver.queries;
 
 import com.splunk.otel.db2.util.SqlObfuscator;
 import io.opentelemetry.api.logs.Logger;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.SpanId;
+import io.opentelemetry.api.trace.TraceFlags;
+import io.opentelemetry.api.trace.TraceId;
+import io.opentelemetry.api.trace.TraceState;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
@@ -57,6 +62,7 @@ public class QuerySampleQuery {
         "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
         "       COALESCE(NULLIF(C.CLIENT_USERID, ''), S.SESSION_AUTH_ID) AS CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
+        "       C.CLIENT_ACCTNG, " +
         "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
         "       CAST(-1 AS BIGINT) AS LOCK_WAIT_TIME_MS, " +
@@ -78,7 +84,7 @@ public class QuerySampleQuery {
         "       CAST(NULL AS CHAR(16) FOR BIT DATA) AS EXEC_ID_BYTES " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
-        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
+        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME, CLIENT_ACCTNG " +
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
@@ -112,6 +118,7 @@ public class QuerySampleQuery {
         "       S.ELAPSED_TIME_SEC AS WALL_ELAPSED_SEC, " +
         "       COALESCE(NULLIF(C.CLIENT_USERID, ''), S.SESSION_AUTH_ID) AS CLIENT_USERID, " +
         "       C.CLIENT_WRKSTNNAME, " +
+        "       C.CLIENT_ACCTNG, " +
         "       S.COORD_MEMBER AS MEMBER, " +
         "       C.TOTAL_CPU_TIME AS CPU_US, " +
         "       COALESCE(A.LOCK_WAIT_TIME, -1) AS LOCK_WAIT_TIME_MS, " +
@@ -133,7 +140,7 @@ public class QuerySampleQuery {
         "       A.EXECUTABLE_ID AS EXEC_ID_BYTES " +
         "FROM SYSIBMADM.MON_CURRENT_SQL S " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, CLIENT_USERID, CLIENT_WRKSTNNAME, MEMBER, " +
-        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME " +
+        "                  TOTAL_CPU_TIME, CLIENT_APPLNAME, CLIENT_ACCTNG " +
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
@@ -174,6 +181,7 @@ public class QuerySampleQuery {
         "       SA.CLIENT_NNAME AS CLIENT_WRKSTNNAME, " +
         "       SA.AGENT_ID AS APPLICATION_HANDLE, " +
         "       SA.DBPARTITIONNUM AS MEMBER, " +
+        "       SA.CLIENT_ACCTNG_ID AS CLIENT_ACCTNG, " +
         "       CAST(-1 AS BIGINT) AS CPU_US " +
         "FROM SYSIBM.SYSDUMMY1, " +
         "     TABLE(SNAP_GET_APPL_INFO(CAST(NULL AS VARCHAR(255)), -1)) AS SA, " +
@@ -284,6 +292,7 @@ public class QuerySampleQuery {
                         }
 
                         QuerySampleEvent ev = QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
+                            .spanContext(parseTraceparent(rs.getString("CLIENT_ACCTNG")))
                             .appHandle(appHandle)
                             .activityState(state)
                             .sessionStatus(deriveSessionStatus(state))
@@ -394,6 +403,37 @@ public class QuerySampleQuery {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) sb.append(String.format("%02x", b));
         return sb.toString();
+    }
+
+    /** Prefix an instrumented application puts on CLIENT_ACCTNG before the traceparent. */
+    private static final String TRACEPARENT_PREFIX = "traceparent=";
+
+    /**
+     * Parses {@code traceparent=<version>-<traceId>-<spanId>-<flags>} out of a session's
+     * CLIENT_ACCTNG, as written by an instrumented application via WLM_SET_CLIENT_INFO.
+     *
+     * <p>Returns null when the value is absent, not a traceparent, or malformed. CLIENT_ACCTNG is
+     * free-form and set by arbitrary client applications, so nothing here may throw — a bad value
+     * must cost the record its trace linkage, not the whole collection cycle.
+     */
+    static SpanContext parseTraceparent(String clientAcctng) {
+        if (clientAcctng == null) return null;
+        String value = clientAcctng.trim();
+        if (!value.startsWith(TRACEPARENT_PREFIX)) return null;
+
+        String[] parts = value.substring(TRACEPARENT_PREFIX.length()).split("-");
+        if (parts.length < 4) return null;
+
+        String traceId = parts[1];
+        String spanId  = parts[2];
+        String flags   = parts[3];
+        if (!TraceId.isValid(traceId) || !SpanId.isValid(spanId) || flags.length() < 2) {
+            log.debug("QuerySampleQuery: ignoring malformed traceparent in CLIENT_ACCTNG");
+            return null;
+        }
+
+        return SpanContext.createFromRemoteParent(
+            traceId, spanId, TraceFlags.fromHex(flags, 0), TraceState.getDefault());
     }
 
     // Converts Db2's CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN" to RFC3339 UTC
