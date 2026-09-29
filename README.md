@@ -308,6 +308,22 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 **Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
 
+### Trace correlation
+
+If the sampled application propagates a W3C traceparent into its Db2 session's client accounting string, the query sample record is linked to that trace — `trace_id` and `span_id` are set as native log record fields (not attributes), so the sampled statement appears on the trace of the request that issued it.
+
+This requires nothing on the Db2 server and no configuration here; it activates automatically whenever the value is present. Applications opt in by stamping the accounting string on the same connection they then query on, before each query:
+
+```sql
+CALL SYSPROC.WLM_SET_CLIENT_INFO(NULL, NULL, NULL, 'traceparent=00-<trace-id>-<span-id>-01', NULL);
+```
+
+The accounting string is parameter 4; parameter 5 is `client_workload` and rejects arbitrary text. Over JDBC, `connection.setClientInfo("ClientAccountingInformation", ...)` has the same effect without the stored procedure.
+
+`CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.CLIENT_ACCTNG_ID` on the snapshot path. Because it is connection-scoped, the stamp and the query must share one physical connection — with a pool, stamp on every borrow so a previous request's trace cannot leak onto a later query. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked.
+
+A working reference implementation and end-to-end verification harness lives at [cd.splunkdev.com/ssirothiya/db2-trace-propagation](https://cd.splunkdev.com/ssirothiya/db2-trace-propagation).
+
 ## Blocking sessions (log records)
 
 Lock contention is detected automatically whenever query sampling is enabled. When a sampled session is waiting for a lock (`LOCKWAIT`), its `db.server.query_sample` record is enriched with blocking attributes and emitted at severity WARN. No separate flag is needed.
