@@ -814,4 +814,55 @@ class QuerySampleQueryTest {
         assertThat(QuerySampleQuery.parseTraceparent(
             "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-")).isNull();
     }
+
+    // Each of these was accepted, or threw, under the previous hand-rolled parser.
+    @Test
+    void rejectsTraceparentsThatViolateTheW3CGrammar() {
+        // non-hex flags -- previously threw IllegalArgumentException out of collect()
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-zz")).isNull();
+        // version ff is forbidden by the spec
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=ff-" + TRACE_ID + "-" + SPAN_ID + "-01")).isNull();
+        // over-long flags
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-0100")).isNull();
+        // trailing field is not allowed on version 00
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01-extra")).isNull();
+        // ids must be lowercase hex
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID.toUpperCase() + "-" + SPAN_ID + "-01")).isNull();
+    }
+
+    // A future version with extra trailing fields must still yield the ids, per the W3C
+    // forward-compatibility rule.
+    @Test
+    void acceptsForwardCompatibleVersion() {
+        io.opentelemetry.api.trace.SpanContext sc = QuerySampleQuery.parseTraceparent(
+            "traceparent=01-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        assertThat(sc).isNotNull();
+        assertThat(sc.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
+    }
+
+    // Regression: a malformed traceparent on one row used to throw out of the row loop, so every
+    // later row in that collection cycle was silently dropped. Both rows must still be emitted.
+    @Test
+    void malformedTraceparentOnFirstRowDoesNotBlockLaterRows() throws Exception {
+        when(rs.next()).thenReturn(true, true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG")).thenReturn(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-zz",   // row 1: non-hex flags
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");  // row 2: valid
+
+        boolean ok = query(false).collect();
+
+        assertThat(ok).isTrue();
+        verify(logBuilder, times(2)).emit();
+        // Only the valid row gets linked; the malformed one is emitted unlinked.
+        verify(logBuilder, times(1)).setContext(any());
+    }
 }

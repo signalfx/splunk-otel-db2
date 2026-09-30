@@ -2,17 +2,18 @@ package com.splunk.otel.db2.receiver.queries;
 
 import com.splunk.otel.db2.util.SqlObfuscator;
 import io.opentelemetry.api.logs.Logger;
+import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
-import io.opentelemetry.api.trace.SpanId;
-import io.opentelemetry.api.trace.TraceFlags;
-import io.opentelemetry.api.trace.TraceId;
-import io.opentelemetry.api.trace.TraceState;
+import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.propagation.TextMapGetter;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.Collections;
 import java.util.function.Supplier;
 
 /**
@@ -410,32 +411,59 @@ public class QuerySampleQuery {
     /** Prefix an instrumented application puts on CLIENT_ACCTNG before the traceparent. */
     private static final String TRACEPARENT_PREFIX = "traceparent=";
 
+    private static final String TRACEPARENT_KEY = "traceparent";
+
+    /**
+     * The carrier is the traceparent value itself rather than a map, so parsing a row allocates
+     * nothing beyond the substring.
+     */
+    private static final TextMapGetter<String> TRACEPARENT_GETTER = new TextMapGetter<String>() {
+        @Override public Iterable<String> keys(String carrier) {
+            return Collections.singleton(TRACEPARENT_KEY);
+        }
+        @Override public String get(String carrier, String key) {
+            return TRACEPARENT_KEY.equals(key) ? carrier : null;
+        }
+    };
+
     /**
      * Parses {@code traceparent=<version>-<traceId>-<spanId>-<flags>} out of a session's
      * CLIENT_ACCTNG, as written by an instrumented application via WLM_SET_CLIENT_INFO.
      *
+     * <p>Validation is delegated to {@link W3CTraceContextPropagator} rather than hand-rolled:
+     * it enforces the full W3C grammar — field count, lengths, lowercase hex, the forbidden
+     * {@code ff} version, all-zero ids — and returns an invalid span context instead of throwing.
+     * Hand-rolled parsing here previously accepted version {@code ff}, over-long flags and trailing
+     * fields, and threw {@code IllegalArgumentException} on non-hex flags.
+     *
      * <p>Returns null when the value is absent, not a traceparent, or malformed. CLIENT_ACCTNG is
      * free-form and set by arbitrary client applications, so nothing here may throw — a bad value
-     * must cost the record its trace linkage, not the whole collection cycle.
+     * must cost that one record its trace linkage, not the rest of the collection cycle. The catch
+     * is defence in depth behind the propagator's contract, not the primary guard.
      */
     static SpanContext parseTraceparent(String clientAcctng) {
         if (clientAcctng == null) return null;
         String value = clientAcctng.trim();
         if (!value.startsWith(TRACEPARENT_PREFIX)) return null;
 
-        String[] parts = value.substring(TRACEPARENT_PREFIX.length()).split("-");
-        if (parts.length < 4) return null;
-
-        String traceId = parts[1];
-        String spanId  = parts[2];
-        String flags   = parts[3];
-        if (!TraceId.isValid(traceId) || !SpanId.isValid(spanId) || flags.length() < 2) {
-            log.debug("QuerySampleQuery: ignoring malformed traceparent in CLIENT_ACCTNG");
+        String traceparent = value.substring(TRACEPARENT_PREFIX.length());
+        SpanContext sc;
+        try {
+            sc = Span.fromContext(
+                    W3CTraceContextPropagator.getInstance()
+                        .extract(Context.root(), traceparent, TRACEPARENT_GETTER))
+                .getSpanContext();
+        } catch (RuntimeException e) {
+            log.debug("QuerySampleQuery: traceparent in CLIENT_ACCTNG could not be parsed: {}",
+                e.getMessage());
             return null;
         }
 
-        return SpanContext.createFromRemoteParent(
-            traceId, spanId, TraceFlags.fromHex(flags, 0), TraceState.getDefault());
+        if (!sc.isValid()) {
+            log.debug("QuerySampleQuery: ignoring malformed traceparent in CLIENT_ACCTNG");
+            return null;
+        }
+        return sc;
     }
 
     // Converts Db2's CHAR(TIMESTAMP) output "YYYY-MM-DD-HH.MM.SS.NNNNNN" to RFC3339 UTC
