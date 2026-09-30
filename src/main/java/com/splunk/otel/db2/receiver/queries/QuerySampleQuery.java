@@ -414,8 +414,9 @@ public class QuerySampleQuery {
     private static final String TRACEPARENT_KEY = "traceparent";
 
     /**
-     * The carrier is the traceparent value itself rather than a map, so parsing a row allocates
-     * nothing beyond the substring.
+     * The carrier is the traceparent value itself rather than a map, which avoids allocating a
+     * carrier map per sampled row. The propagator still allocates its own substrings and span
+     * context.
      */
     private static final TextMapGetter<String> TRACEPARENT_GETTER = new TextMapGetter<String>() {
         @Override public Iterable<String> keys(String carrier) {

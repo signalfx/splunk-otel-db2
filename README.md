@@ -324,7 +324,27 @@ Note this is a privileged call on the *application's* side: Db2 grants no defaul
 
 `CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.TPMON_ACC_STR` on the snapshot path. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked; parsing follows the W3C grammar, so a malformed value never affects any other record.
 
-**Connection pooling.** `CLIENT_ACCTNG` is connection-scoped and persists until it is replaced, so the stamp and the query must share one physical connection, and every checkout must write the field — either the current traceparent, or an empty string when the request has no trace. Skipping the write leaves the previous borrower's traceparent in place and attributes this request's queries to that request's trace, which is worse than no linkage because the result looks correct. Passing an empty string resets the value; passing `NULL` leaves it unchanged, so `NULL` is not a way to clear it. Clearing it again before returning the connection to the pool is a cheap extra safeguard.
+**This takes ownership of `CLIENT_ACCTNG`.** The field has its own pre-existing uses — Db2 can assign workloads on `CURRENT CLIENT_ACCTNG`, and it is recorded in audit events — and the traceparent format above occupies the whole value, so it cannot coexist with an application's own accounting string. Adopting trace correlation means:
+
+- A traced request **replaces** whatever accounting value the application would otherwise set, which can change WLM workload assignment and what appears in audit records. Check for workload definitions or audit policies that read `CLIENT_ACCTNG` before enabling it.
+- An application that needs both has to decide what the field carries. Whether to define a structured value holding a traceparent alongside other fields is still open — see the design doc's open question on this.
+
+**Connection pooling.** `CLIENT_ACCTNG` is connection-scoped and persists until it is replaced, so the stamp and the query must share one physical connection, and every checkout must write the field. Skipping the write leaves the previous borrower's traceparent in place and attributes this request's queries to that request's trace — worse than no linkage, because the result looks correct. On each checkout write:
+
+- the current traceparent, for a traced request;
+- otherwise the application's normal accounting value, if it has one — restoring it rather than blanking it keeps WLM and audit behaviour intact;
+- an empty string only when the application has no accounting value of its own.
+
+Clearing or restoring the field before returning the connection to the pool is a cheap extra safeguard.
+
+The two stamping mechanisms have **opposite null semantics**, verified on 11.5.9.0:
+
+| | `WLM_SET_CLIENT_INFO` (parameter 4) | JDBC `setClientInfo` |
+|---|---|---|
+| `NULL` / Java `null` | leaves the existing value **unchanged** | **clears** the value |
+| `''` (empty string) | clears the value | clears the value |
+
+So `NULL` is not a way to clear the field via the stored procedure, though `null` does clear it over JDBC. Use `''` for both if you want one code path that behaves the same either way.
 
 A working reference implementation and end-to-end verification harness lives at [cd.splunkdev.com/ssirothiya/db2-trace-propagation](https://cd.splunkdev.com/ssirothiya/db2-trace-propagation).
 

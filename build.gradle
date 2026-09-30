@@ -80,6 +80,13 @@ task integrationTestSnapshot(type: Test) {
     includes = ['**/*IntegrationTest*']
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
+    // Without this a passing run prints nothing, so there is no way to tell from CI output which
+    // snapshot tests actually ran.
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        showStandardStreams = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
 
 shadowJar {

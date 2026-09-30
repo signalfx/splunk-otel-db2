@@ -835,16 +835,24 @@ class QuerySampleQueryTest {
             "traceparent=00-" + TRACE_ID.toUpperCase() + "-" + SPAN_ID + "-01")).isNull();
     }
 
-    // A future version with extra trailing fields must still yield the ids, per the W3C
-    // forward-compatibility rule.
+    // Per the W3C forward-compatibility rule, a higher version may carry extra trailing fields and
+    // the ids must still be read. Note version 00 must reject the same trailing field -- that case
+    // is in rejectsTraceparentsThatViolateTheW3CGrammar.
     @Test
-    void acceptsForwardCompatibleVersion() {
-        io.opentelemetry.api.trace.SpanContext sc = QuerySampleQuery.parseTraceparent(
-            "traceparent=01-" + TRACE_ID + "-" + SPAN_ID + "-01");
+    void acceptsForwardCompatibleVersionWithTrailingFields() {
+        io.opentelemetry.api.trace.SpanContext one = QuerySampleQuery.parseTraceparent(
+            "traceparent=01-" + TRACE_ID + "-" + SPAN_ID + "-01-extra");
 
-        assertThat(sc).isNotNull();
-        assertThat(sc.getTraceId()).isEqualTo(TRACE_ID);
-        assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
+        assertThat(one).isNotNull();
+        assertThat(one.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(one.getSpanId()).isEqualTo(SPAN_ID);
+        assertThat(one.isSampled()).isTrue();
+
+        io.opentelemetry.api.trace.SpanContext two = QuerySampleQuery.parseTraceparent(
+            "traceparent=02-" + TRACE_ID + "-" + SPAN_ID + "-01-a-b");
+
+        assertThat(two).isNotNull();
+        assertThat(two.getTraceId()).isEqualTo(TRACE_ID);
     }
 
     // Regression: a malformed traceparent on one row used to throw out of the row loop, so every
