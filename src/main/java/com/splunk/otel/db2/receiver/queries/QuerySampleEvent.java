@@ -187,12 +187,15 @@ public final class QuerySampleEvent {
             .setTimestamp(timestamp.toEpochMilli(), TimeUnit.MILLISECONDS)
             .setAllAttributes(b.build());
 
-        // Stamps trace_id/span_id onto the record so the sampled query joins the application's
-        // distributed trace. setContext is the real API — the design doc's setSpanContext does
-        // not exist in the OTel Java Logs API.
-        if (spanContext != null) {
-            builder.setContext(Context.root().with(Span.wrap(spanContext)));
-        }
+        // Always set the context, so the sampled query joins the application's trace when there is
+        // one and is explicitly unparented when there is not. Leaving it unset is not neutral:
+        // SdkLogRecordBuilder falls back to Context.current(), which would stamp whatever span
+        // happens to be active on the collection thread onto every unlinked sample — the receiver's
+        // own internal span under auto-instrumentation, for instance. Same reasoning as
+        // mysqlreceiver's use of context.Background() for query samples.
+        builder.setContext(spanContext != null
+            ? Context.root().with(Span.wrap(spanContext))
+            : Context.root());
 
         builder.emit();
     }

@@ -322,7 +322,9 @@ The accounting string is parameter 4; parameter 5 is `client_workload` and rejec
 
 Note this is a privileged call on the *application's* side: Db2 grants no default `PUBLIC` privilege on `SYSPROC.WLM_SET_CLIENT_INFO`, so the application user needs `EXECUTE` on it or a sufficient authority. Where that is not available, `connection.setClientInfo("ClientAccountingInformation", ...)` over JDBC produces an identical `CLIENT_ACCTNG` value with no stored-procedure dependency, and is the better default for restricted application users.
 
-`CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.TPMON_ACC_STR` on the snapshot path. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked; parsing follows the W3C grammar, so a malformed value never affects any other record.
+`CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.TPMON_ACC_STR` on the snapshot path. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked; parsing follows the W3C grammar, so a malformed value never affects any other record. The prefix match is case-insensitive.
+
+Only sessions that are currently in a request are linked — those reported as `active` or `waiting`. Because `CLIENT_ACCTNG` outlives the request that set it, an idle session still holds the last traceparent written to it, and linking that would parent the sample to a trace that has already finished. Lock-waiting sessions *are* linked: the statement is executing, just blocked. Sessions in states the receiver cannot positively identify as in-request are emitted unlinked.
 
 **This takes ownership of `CLIENT_ACCTNG`.** The field has its own pre-existing uses — Db2 can assign workloads on `CURRENT CLIENT_ACCTNG`, and it is recorded in audit events — and the traceparent format above occupies the whole value, so it cannot coexist with an application's own accounting string. Adopting trace correlation means:
 
@@ -346,7 +348,24 @@ The two stamping mechanisms have **opposite null semantics**, verified on 11.5.9
 
 So `NULL` is not a way to clear the field via the stored procedure, though `null` does clear it over JDBC. Use `''` for both if you want one code path that behaves the same either way.
 
-A working reference implementation and end-to-end verification harness lives at [cd.splunkdev.com/ssirothiya/db2-trace-propagation](https://cd.splunkdev.com/ssirothiya/db2-trace-propagation).
+A minimal Java example, stamping on borrow and clearing on release:
+
+```java
+Connection conn = pool.borrow();
+try {
+    SpanContext sc = Span.current().getSpanContext();
+    String acctng = sc.isValid()
+        ? String.format("traceparent=00-%s-%s-%s",
+              sc.getTraceId(), sc.getSpanId(), sc.isSampled() ? "01" : "00")
+        : "";   // "" clears; NULL would leave the previous request's value in place
+    conn.setClientInfo("ClientAccountingInformation", acctng);
+
+    // ... run the real query on this same connection ...
+} finally {
+    conn.setClientInfo("ClientAccountingInformation", "");
+    pool.release(conn);
+}
+```
 
 ## Blocking sessions (log records)
 

@@ -294,11 +294,15 @@ public class QuerySampleQuery {
                             if (execIdBytes != null) execIdHex = bytesToHex(execIdBytes);
                         }
 
+                        String sessionStatus = deriveSessionStatus(state);
+
                         QuerySampleEvent ev = QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
-                            .spanContext(parseTraceparent(rs.getString("CLIENT_ACCTNG")))
+                            .spanContext(linksToTrace(sessionStatus)
+                                ? parseTraceparent(rs.getString("CLIENT_ACCTNG"))
+                                : null)
                             .appHandle(appHandle)
                             .activityState(state)
-                            .sessionStatus(deriveSessionStatus(state))
+                            .sessionStatus(sessionStatus)
                             .operationName(opName)
                             .queryStart(startTime)
                             .userName(authId)
@@ -431,21 +435,25 @@ public class QuerySampleQuery {
      * Parses {@code traceparent=<version>-<traceId>-<spanId>-<flags>} out of a session's
      * CLIENT_ACCTNG, as written by an instrumented application via WLM_SET_CLIENT_INFO.
      *
-     * <p>Validation is delegated to {@link W3CTraceContextPropagator} rather than hand-rolled:
-     * it enforces the full W3C grammar — field count, lengths, lowercase hex, the forbidden
-     * {@code ff} version, all-zero ids — and returns an invalid span context instead of throwing.
-     * Hand-rolled parsing here previously accepted version {@code ff}, over-long flags and trailing
-     * fields, and threw {@code IllegalArgumentException} on non-hex flags.
+     * <p>Validation is delegated to {@link W3CTraceContextPropagator} because it enforces the full
+     * W3C grammar — field count, lengths, lowercase hex, the forbidden {@code ff} version, all-zero
+     * ids — and reports failure with an invalid span context rather than an exception.
      *
      * <p>Returns null when the value is absent, not a traceparent, or malformed. CLIENT_ACCTNG is
      * free-form and set by arbitrary client applications, so nothing here may throw — a bad value
      * must cost that one record its trace linkage, not the rest of the collection cycle. The catch
      * is defence in depth behind the propagator's contract, not the primary guard.
+     *
+     * <p>The prefix match is case-insensitive: the convention is ours, the field is free-form, and
+     * silently dropping {@code TRACEPARENT=} would be a confusing way to enforce spelling.
      */
     static SpanContext parseTraceparent(String clientAcctng) {
         if (clientAcctng == null) return null;
         String value = clientAcctng.trim();
-        if (!value.startsWith(TRACEPARENT_PREFIX)) return null;
+        if (value.length() < TRACEPARENT_PREFIX.length()
+            || !value.regionMatches(true, 0, TRACEPARENT_PREFIX, 0, TRACEPARENT_PREFIX.length())) {
+            return null;
+        }
 
         String traceparent = value.substring(TRACEPARENT_PREFIX.length());
         SpanContext sc;
@@ -489,6 +497,24 @@ public class QuerySampleQuery {
     // MongoDB's deriveOperationState(): map raw DB flags to canonical values.
     // Returns null for unknown values so the attribute is omitted rather than
     // emitting a wrong value.
+    /**
+     * Whether a session in this state may carry a usable traceparent.
+     *
+     * <p>CLIENT_ACCTNG is connection-scoped and outlives the request that set it, so a session that
+     * is not currently in a request still holds the last traceparent written to it. Linking those
+     * would parent a query sample to a trace that has already finished — wrong linkage rather than
+     * missing linkage, which is harder to spot because the record looks correct.
+     *
+     * <p>{@code waiting} is included deliberately: a LOCKWAIT session is executing a statement, just
+     * blocked on a lock, so its traceparent is current — and those are the records blocking
+     * detection escalates to WARN, where the correlation is most useful. Unmapped states (snapshot
+     * APPL_STATUS values such as UOWWAIT or CONNECTED, which derive to null) are treated as not in a
+     * request, matching how sqlserverreceiver forces idle blockers to come out unlinked.
+     */
+    static boolean linksToTrace(String sessionStatus) {
+        return "active".equals(sessionStatus) || "waiting".equals(sessionStatus);
+    }
+
     static String deriveSessionStatus(String activityState) {
         if (activityState == null) return null;
         String s = activityState.trim();

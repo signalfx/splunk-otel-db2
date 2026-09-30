@@ -751,8 +751,11 @@ class QuerySampleQueryTest {
         assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
     }
 
+    // setContext must always be called: leaving it unset makes SdkLogRecordBuilder fall back to
+    // Context.current(), which would stamp whatever span is ambient on the collection thread onto
+    // every unlinked sample. Context.root() is the explicit "no parent".
     @Test
-    void doesNotSetSpanContextWhenClientAcctngHasNoTraceparent() throws Exception {
+    void unlinkedRecordIsExplicitlyRootedRatherThanLeftToAmbientContext() throws Exception {
         when(rs.next()).thenReturn(true, false);
         stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
                 5L, "db2inst1", "host", "1", 0L, 0L);
@@ -760,7 +763,98 @@ class QuerySampleQueryTest {
 
         query(false).collect();
 
-        verify(logBuilder, never()).setContext(any());
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().isValid()).isFalse();
+    }
+
+    // Regression for the ambient-context leak: a span active on the collection thread must not end
+    // up on an unlinked record.
+    @Test
+    void ambientSpanOnCollectionThreadDoesNotLeakOntoUnlinkedRecord() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG")).thenReturn(null);
+
+        io.opentelemetry.api.trace.SpanContext ambient =
+            io.opentelemetry.api.trace.SpanContext.create(
+                "11111111111111111111111111111111", "2222222222222222",
+                io.opentelemetry.api.trace.TraceFlags.getSampled(),
+                io.opentelemetry.api.trace.TraceState.getDefault());
+
+        try (io.opentelemetry.context.Scope ignored = io.opentelemetry.context.Context.root()
+                .with(io.opentelemetry.api.trace.Span.wrap(ambient)).makeCurrent()) {
+            query(false).collect();
+        }
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        io.opentelemetry.api.trace.SpanContext used =
+            io.opentelemetry.api.trace.Span.fromContext(cap.getValue()).getSpanContext();
+        assertThat(used.isValid()).isFalse();
+        assertThat(used.getTraceId()).isNotEqualTo("11111111111111111111111111111111");
+    }
+
+    // CLIENT_ACCTNG outlives the request that set it, so a session that is not in a request still
+    // holds a stale traceparent. Linking it would parent the sample to a finished trace.
+    @Test
+    void doesNotLinkSessionsThatAreNotInARequest() {
+        assertThat(QuerySampleQuery.linksToTrace("active")).isTrue();
+        assertThat(QuerySampleQuery.linksToTrace("waiting")).isTrue();
+        assertThat(QuerySampleQuery.linksToTrace("idle")).isFalse();
+        // snapshot APPL_STATUS values such as UOWWAIT / CONNECTED derive to null
+        assertThat(QuerySampleQuery.linksToTrace(null)).isFalse();
+    }
+
+    @Test
+    void idleSessionWithStaleTraceparentIsEmittedUnlinked() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "IDLE", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        // The record is still emitted -- it just carries no trace linkage.
+        verify(logBuilder).emit();
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().isValid()).isFalse();
+    }
+
+    @Test
+    void lockWaitSessionStillLinksBecauseItsStatementIsExecuting() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().getTraceId()).isEqualTo(TRACE_ID);
+    }
+
+    @Test
+    void traceparentPrefixIsCaseInsensitive() {
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "TRACEPARENT=00-" + TRACE_ID + "-" + SPAN_ID + "-01")).isNotNull();
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "TraceParent=00-" + TRACE_ID + "-" + SPAN_ID + "-01")).isNotNull();
+        // the traceparent value itself stays case-sensitive -- uppercase ids are invalid per W3C
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "TRACEPARENT=00-" + TRACE_ID.toUpperCase() + "-" + SPAN_ID + "-01")).isNull();
     }
 
     @Test
@@ -870,7 +964,14 @@ class QuerySampleQueryTest {
 
         assertThat(ok).isTrue();
         verify(logBuilder, times(2)).emit();
-        // Only the valid row gets linked; the malformed one is emitted unlinked.
-        verify(logBuilder, times(1)).setContext(any());
+
+        // setContext is called for both rows -- unlinked records are explicitly rooted -- so the
+        // check is that exactly one of them carries a valid span context.
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder, times(2)).setContext(cap.capture());
+        assertThat(cap.getAllValues())
+            .filteredOn(c -> io.opentelemetry.api.trace.Span.fromContext(c).getSpanContext().isValid())
+            .hasSize(1);
     }
 }
