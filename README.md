@@ -312,15 +312,19 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 If the sampled application propagates a W3C traceparent into its Db2 session's client accounting string, the query sample record is linked to that trace — `trace_id` and `span_id` are set as native log record fields (not attributes), so the sampled statement appears on the trace of the request that issued it.
 
-This requires nothing on the Db2 server and no configuration here; it activates automatically whenever the value is present. Applications opt in by stamping the accounting string on the same connection they then query on, before each query:
+The receiver needs no additional configuration and no new grants for this — `CLIENT_ACCTNG` comes from `MON_GET_CONNECTION`, which query sampling already reads — and it activates automatically whenever the value is present. Applications opt in by stamping the accounting string on the same connection they then query on, before each query:
 
 ```sql
 CALL SYSPROC.WLM_SET_CLIENT_INFO(NULL, NULL, NULL, 'traceparent=00-<trace-id>-<span-id>-01', NULL);
 ```
 
-The accounting string is parameter 4; parameter 5 is `client_workload` and rejects arbitrary text. Over JDBC, `connection.setClientInfo("ClientAccountingInformation", ...)` has the same effect without the stored procedure.
+The accounting string is parameter 4; parameter 5 is `client_workload` and rejects arbitrary text.
 
-`CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.CLIENT_ACCTNG_ID` on the snapshot path. Because it is connection-scoped, the stamp and the query must share one physical connection — with a pool, stamp on every borrow so a previous request's trace cannot leak onto a later query. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked.
+Note this is a privileged call on the *application's* side: Db2 grants no default `PUBLIC` privilege on `SYSPROC.WLM_SET_CLIENT_INFO`, so the application user needs `EXECUTE` on it or a sufficient authority. Where that is not available, `connection.setClientInfo("ClientAccountingInformation", ...)` over JDBC produces an identical `CLIENT_ACCTNG` value with no stored-procedure dependency, and is the better default for restricted application users.
+
+`CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.TPMON_ACC_STR` on the snapshot path. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked; parsing follows the W3C grammar, so a malformed value never affects any other record.
+
+**Connection pooling.** `CLIENT_ACCTNG` is connection-scoped and persists until it is replaced, so the stamp and the query must share one physical connection, and every checkout must write the field — either the current traceparent, or an empty string when the request has no trace. Skipping the write leaves the previous borrower's traceparent in place and attributes this request's queries to that request's trace, which is worse than no linkage because the result looks correct. Passing an empty string resets the value; passing `NULL` leaves it unchanged, so `NULL` is not a way to clear it. Clearing it again before returning the connection to the pool is a cheap extra safeguard.
 
 A working reference implementation and end-to-end verification harness lives at [cd.splunkdev.com/ssirothiya/db2-trace-propagation](https://cd.splunkdev.com/ssirothiya/db2-trace-propagation).
 
