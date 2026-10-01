@@ -65,6 +65,77 @@ public class Db2Receiver {
         this(config, meter, null, metricsConnection);
     }
 
+    /**
+     * Logs what the receiver actually read from config, so a support question about "is top query
+     * on?" is answered by the agent's own log rather than by inferring from which events appear
+     * downstream. Every collection is listed, including the inactive ones, each with the config key
+     * that turned it off — silence about a disabled collection is what makes this hard to diagnose.
+     */
+    private void logCollectionPlan() {
+        log.info("{}", buildCollectionPlan(config, label));
+    }
+
+    /** Pure so the plan can be asserted without starting a receiver or a database. */
+    static String buildCollectionPlan(Db2ReceiverConfig config, String label) {
+        boolean querySample = config.getEvents().getDbServerQuerySample().isEnabled();
+        boolean topQuery    = config.getEvents().getDbServerTopQuery().isEnabled();
+        int     explain     = config.getTopQueryCollection().getMaxExplainEachInterval();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("[").append(label).append("] Collection plan:");
+        sb.append("\n  metrics                : ACTIVE    every ")
+          .append(config.getCollectionIntervalDuration().getSeconds()).append("s");
+
+        sb.append("\n  db.server.query_sample : ");
+        if (querySample) {
+            sb.append("ACTIVE    every ")
+              .append(config.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds())
+              .append("s, max ")
+              .append(config.getQuerySampleCollection().getMaxRowsPerQuery())
+              .append(" rows/cycle");
+        } else {
+            sb.append("INACTIVE  (events.db.server.query_sample.enabled=false)");
+        }
+
+        // Blocking detection has no flag of its own; it rides on query sampling and is unavailable
+        // on the snapshot path. Stating that here avoids the "why is blocking empty?" question.
+        sb.append("\n  blocking detection     : ");
+        if (!querySample) {
+            sb.append("INACTIVE  (requires events.db.server.query_sample.enabled=true)");
+        } else if (config.isUseSnapshotMonitor()) {
+            sb.append("INACTIVE  (not available when use_snapshot_monitor=true)");
+        } else {
+            sb.append("ACTIVE    follows query_sample interval");
+        }
+
+        sb.append("\n  db.server.top_query    : ");
+        if (topQuery) {
+            sb.append("ACTIVE    every ")
+              .append(config.getTopQueryCollection().getCollectionIntervalDuration().getSeconds())
+              .append("s, top ")
+              .append(config.getTopQueryCollection().getTopQueryCount())
+              .append(" of max ")
+              .append(config.getTopQueryCollection().getMaxQuerySampleCount())
+              .append(" candidates");
+        } else {
+            sb.append("INACTIVE  (events.db.server.top_query.enabled=false)");
+        }
+
+        sb.append("\n  query plan (EXPLAIN)   : ");
+        if (!topQuery) {
+            sb.append("INACTIVE  (requires events.db.server.top_query.enabled=true)");
+        } else if (explain <= 0) {
+            sb.append("INACTIVE  (top_query_collection.max_explain_each_interval=0)");
+        } else {
+            sb.append("ACTIVE    max ").append(explain).append(" EXPLAIN/cycle");
+        }
+
+        sb.append("\n  monitor path           : ")
+          .append(config.isUseSnapshotMonitor() ? "SNAP_GET_* (use_snapshot_monitor=true)"
+                                               : "MON_CURRENT_SQL / MON_GET_*");
+        return sb.toString();
+    }
+
     private static String buildLabel(Db2ReceiverConfig config) {
         String name = config.getComponentName();
         return name.isEmpty()
@@ -74,6 +145,7 @@ public class Db2Receiver {
 
     public void start() {
         log.info("[{}] Starting DB2 receiver", label);
+        logCollectionPlan();
 
         Supplier<Connection> metricsConnSupplier = () -> {
             try {
