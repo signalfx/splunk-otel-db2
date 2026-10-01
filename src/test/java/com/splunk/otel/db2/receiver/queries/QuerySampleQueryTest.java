@@ -571,6 +571,41 @@ class QuerySampleQueryTest {
         String sql = sqlCap.getValue();
         assertThat(sql).containsIgnoringCase("BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE");
         assertThat(sql).doesNotContain("BLOCKER_SQL.COORD_MEMBER");
+        // Matching on the handle alone means the holder can have several MON_CURRENT_SQL rows, so
+        // the join must be deduplicated or it multiplies the sampled session.
+        assertThat(sql).contains("BLOCKER_SQL.RN = 1");
+    }
+
+    // Pins the invariant "at most one row per sampled session". On 11.5.9.0 MON_LOCKWAITS was
+    // measured to return a single row per waiting request even with three S-lock holders, so this
+    // guards the other paths the receiver supports (9.7, snapshot, pureScale/DPF subagents) rather
+    // than fixing observed duplication.
+    @Test
+    void lockWaitsIsCollapsedToOneHolderPerRequestor() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+
+        assertThat(sql).contains("PARTITION BY REQ_APPLICATION_HANDLE, REQ_MEMBER");
+        assertThat(sql).contains("LW.RN = 1");
+        // Longest wait wins, with a stable tie-break so the chosen holder does not flap between
+        // collections when two holders have waited equally long.
+        assertThat(sql).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC");
+        assertThat(sql).contains("HLD_APPLICATION_HANDLE) AS RN");
+    }
+
+    @Test
+    void db2_10_5PathAlsoCollapsesLockWaits() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).contains("LW.RN = 1");
+        assertThat(sqlCap.getValue()).contains("BLOCKER_SQL.RN = 1");
     }
 
     @Test
@@ -844,6 +879,81 @@ class QuerySampleQueryTest {
         verify(logBuilder).setContext(cap.capture());
         assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
             .getSpanContext().getTraceId()).isEqualTo(TRACE_ID);
+    }
+
+    // getLong turns SQL NULL into 0, which cleared the >= 0 guard and produced a zero-second
+    // blocking event escalated to WARN, synthesized entirely from missing data.
+    @Test
+    void nullBlockingWaitDoesNotFabricateABlockingEvent() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(0L);
+        when(rs.wasNull()).thenReturn(true);   // the column was SQL NULL
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_DURATION)).isNull();
+        // Severity must not be escalated on the strength of a NULL.
+        verify(logBuilder).setSeverity(Severity.INFO);
+    }
+
+    @Test
+    void realZeroBlockingWaitIsStillReported() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(0L);
+        when(rs.wasNull()).thenReturn(false);  // genuinely zero, not NULL
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_DURATION)).isEqualTo(0.0);
+        verify(logBuilder).setSeverity(Severity.WARN);
+    }
+
+    // The plan hash is only meaningful if something populates db2.query_plan. With plan collection
+    // off -- the default -- a hash the UI can never resolve is worse than no hash.
+    @Test
+    void planHashIsSuppressedWhenPlanCollectionIsDisabled() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getBytes("EXEC_ID_BYTES")).thenReturn(new byte[]{1, 2, 3, 4});
+
+        new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, false,
+            QuerySampleQuery.DB2_VERSION_10_5, 30, false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_PLAN_HASH)).isNull();
+    }
+
+    @Test
+    void planHashIsEmittedWhenPlanCollectionIsEnabled() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getBytes("EXEC_ID_BYTES")).thenReturn(new byte[]{1, 2, 3, 4});
+
+        new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, false,
+            QuerySampleQuery.DB2_VERSION_10_5, 30, true).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_PLAN_HASH)).isEqualTo("01020304");
     }
 
     @Test

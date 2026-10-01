@@ -115,6 +115,12 @@ public class Db2Receiver {
         long intervalSeconds           = config.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds();
         int  querySampleTimeoutSeconds = (int) Math.max(5L, intervalSeconds / 2);
 
+        // db2.query_plan.hash is only useful if something will populate db2.query_plan, which needs
+        // top-query collection enabled and a positive explain budget.
+        boolean planCollectionEnabled =
+            config.getEvents().getDbServerTopQuery().isEnabled()
+                && config.getTopQueryCollection().getMaxExplainEachInterval() > 0;
+
         QuerySampleQuery querySampleQuery = new QuerySampleQuery(
             querySampleConnSupplier,
             config.getDatabase(),
@@ -122,14 +128,18 @@ public class Db2Receiver {
             config.getQuerySampleCollection().getMaxRowsPerQuery(),
             config.isUseSnapshotMonitor(),
             db2Version,
-            querySampleTimeoutSeconds);
+            querySampleTimeoutSeconds,
+            planCollectionEnabled);
 
         querySampleScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "db2-query-sampler[" + label + "]");
             t.setDaemon(true);
             return t;
         });
-        querySampleScheduler.scheduleAtFixedRate(
+        // Fixed delay, not fixed rate: at a fixed rate a collection that overruns its interval
+        // makes every later run fire immediately with no gap, so a slow instance gets queried
+        // continuously — exactly when it can least afford it. Top-query already uses fixed delay.
+        querySampleScheduler.scheduleWithFixedDelay(
             () -> {
                 try {
                     querySampleQuery.collect();
