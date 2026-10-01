@@ -704,6 +704,20 @@ class QuerySampleQueryTest {
         assertThat(QuerySampleQuery.toRfc3339(null)).isNull();
     }
 
+    // Input too short to carry a date and time used to be returned unchanged, producing a value
+    // that looked like a timestamp but had no trailing Z. Downstream needs that Z to build the
+    // blocking-event key, so it broke event merging silently instead of failing. Omit it instead.
+    @Test
+    void toRfc3339OmitsValuesItCannotConvert() {
+        assertThat(QuerySampleQuery.toRfc3339("2024-01-15")).isNull();
+        assertThat(QuerySampleQuery.toRfc3339("")).isNull();
+        assertThat(QuerySampleQuery.toRfc3339("   ")).isNull();
+        assertThat(QuerySampleQuery.toRfc3339("garbage")).isNull();
+        // Exactly 19 chars is the shortest convertible form and must still work.
+        assertThat(QuerySampleQuery.toRfc3339("2024-01-15-12.30.45"))
+            .isEqualTo("2024-01-15T12:30:45Z");
+    }
+
     @Test
     void blockingStartTimeIsEmittedAsRfc3339() throws Exception {
         when(rs.next()).thenReturn(true, false);

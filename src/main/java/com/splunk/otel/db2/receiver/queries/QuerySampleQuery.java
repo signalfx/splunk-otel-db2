@@ -626,7 +626,13 @@ public class QuerySampleQuery {
         if (db2Timestamp == null) return null;
         // "2024-01-15-12.30.45.123456" → "2024-01-15T12:30:45.123456Z"
         String s = db2Timestamp.trim();
-        if (s.length() < 19) return s;
+        // Too short to carry a full date and time. Returning it unchanged produced a value that
+        // looked like a timestamp but had no trailing Z, which downstream requires to build the
+        // blocking-event key — so it broke event merging silently instead of failing. Omit it.
+        if (s.length() < 19) {
+            log.debug("QuerySampleQuery: ignoring unparseable Db2 timestamp '{}'", s);
+            return null;
+        }
         // Replace the date-time separator '-' (position 10) with 'T'
         // and the first two ':'-equivalent '.' separators in the time part
         char[] c = s.toCharArray();

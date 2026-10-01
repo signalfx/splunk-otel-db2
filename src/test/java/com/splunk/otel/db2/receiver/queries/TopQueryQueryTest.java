@@ -424,7 +424,11 @@ class TopQueryQueryTest {
         assertThat(sql).contains("MON_GET_CONNECTION");
         assertThat(sql).contains("SNAP_GET_APPL_INFO");
         assertThat(sql).contains("SNAP_GET_STMT");
-        assertThat(sql).contains("SYSDUMMY1");
+        // Deliberately no SYSDUMMY1 filter: SELECT ... FROM SYSIBM.SYSDUMMY1 is ordinary Db2
+        // application code, so excluding it dropped real customer top queries. The receiver's only
+        // SYSDUMMY1 statement is the snapshot query sample, already covered by the
+        // SNAP_GET_APPL_INFO and SNAP_GET_STMT filters above.
+        assertThat(sql).doesNotContain("SYSDUMMY1");
         // The metric collectors' own table functions must be excluded too, or the receiver's
         // monitoring SQL is ranked as a user top query and consumes explain-plan budget.
         assertThat(sql).contains("MON_GET_TRANSACTION_LOG");
@@ -1265,13 +1269,6 @@ class TopQueryQueryTest {
         assertThat(TopQueryQuery.hexToBytes("0off")).isNull(); // non-hex character
     }
 
-    @Test
-    void sha256HexIsDeterministicAndCorrectLength() {
-        String h = TopQueryQuery.sha256Hex("hello");
-        assertThat(h).hasSize(64).matches("[0-9a-f]+");
-        assertThat(TopQueryQuery.sha256Hex("hello")).isEqualTo(h);
-        assertThat(TopQueryQuery.sha256Hex("other")).isNotEqualTo(h);
-    }
 
     // --- Config validation tests ---
 

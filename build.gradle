@@ -8,6 +8,14 @@ group = 'com.splunk.otel'
 version = '0.1.0'
 
 java {
+    // Pin the JDK Gradle compiles with, rather than inheriting whatever the developer's default is.
+    // Without this, a machine whose default JDK is newer than Gradle 8.8 supports fails with
+    // "Unsupported class file major version", which reads like a code problem rather than a
+    // toolchain mismatch. 17 is what CI uses.
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    // Bytecode stays at 11: the receiver is documented as running on Java 11+.
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
 }

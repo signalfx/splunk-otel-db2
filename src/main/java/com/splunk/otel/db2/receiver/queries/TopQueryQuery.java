@@ -4,7 +4,6 @@ import com.splunk.otel.db2.util.SqlObfuscator;
 import io.opentelemetry.api.logs.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.security.MessageDigest;
 import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -144,7 +143,11 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_DB%%%%' " +
-        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%' " +
+        // No SYSDUMMY1 filter. SELECT ... FROM SYSIBM.SYSDUMMY1 is everyday Db2 application code,
+        // so excluding it dropped legitimate customer top queries. It was also redundant: this
+        // receiver's only SYSDUMMY1 statement is the snapshot query sample, which the
+        // SNAP_GET_APPL_INFO and SNAP_GET_STMT filters above already exclude. Db2 LIKE is
+        // case-sensitive too, so an uppercase pattern would not have caught a lowercase occurrence.
         "ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC " +
         "FETCH FIRST %2$d ROWS ONLY";
 
@@ -407,7 +410,15 @@ public class TopQueryQuery {
                         rs.getLong("SORT_OVERFLOWS")
                     };
                     curr.put(key, c);
-                    // execIdHex is only needed when plan collection is enabled
+                    // execIdHex is only needed when plan collection is enabled.
+                    //
+                    // The baseline key above uses getString while this uses hex(getBytes), which
+                    // looks like one column read two ways. Verified against JCC 11.5.9.0 that they
+                    // agree exactly: getString on this FOR BIT DATA column returns the hex of
+                    // getBytes (64 chars for 32 bytes) with no replacement or control characters, so
+                    // there is no lossy charset decode that could collide distinct sections. Both
+                    // forms are kept because each cache is internally consistent and the explain
+                    // path is specified in terms of the binary id.
                     String execIdHex = null;
                     if (planMaxPerInterval != null) {
                         byte[] execIdBytes = rs.getBytes("EXECUTABLE_ID");
@@ -1037,17 +1048,6 @@ public class TopQueryQuery {
             || sqlState.startsWith("42601") || sqlState.startsWith("42S02");
     }
 
-    public static String sha256Hex(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception e) {
-            return "unknown";
-        }
-    }
 
     // Escapes a string value for embedding inside a JSON string literal.
     // Covers the characters required by RFC 8259 §7: backslash, double-quote,
@@ -1066,11 +1066,6 @@ public class TopQueryQuery {
         return sb.toString();
     }
 
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) sb.append(String.format("%02x", b));
-        return sb.toString();
-    }
 
     static byte[] hexToBytes(String hex) {
         if (hex == null || hex.length() % 2 != 0) return null;
@@ -1084,5 +1079,11 @@ public class TopQueryQuery {
             return null;
         }
         return data;
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
     }
 }
