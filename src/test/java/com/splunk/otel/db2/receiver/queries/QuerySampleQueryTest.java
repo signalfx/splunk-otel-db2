@@ -16,6 +16,7 @@ import java.sql.Statement;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -954,6 +955,25 @@ class QuerySampleQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_PLAN_HASH)).isEqualTo("01020304");
+    }
+
+    // A floor on the sampling interval, mirroring top-query's 60s rule: below this the monitor
+    // queries dominate the instance they are measuring.
+    @Test
+    void querySampleIntervalBelowTheFloorIsRejected() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig.QuerySampleCollectionConfig cfg =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.QuerySampleCollectionConfig();
+
+        cfg.setCollectionInterval("1s");
+        assertThatThrownBy(cfg::getCollectionIntervalDuration)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("must be at least 5s");
+
+        cfg.setCollectionInterval("5s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(5L);
+
+        cfg.setCollectionInterval("30s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(30L);
     }
 
     @Test

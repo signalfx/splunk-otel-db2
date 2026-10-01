@@ -348,7 +348,7 @@ class Db2ReceiverIntegrationTest {
 
         Db2ReceiverConfig config = buildConfig();
         config.getEvents().getDbServerQuerySample().setEnabled(true);
-        config.getQuerySampleCollection().setCollectionInterval("1s");
+        config.getQuerySampleCollection().setCollectionInterval("5s");
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
@@ -482,7 +482,7 @@ class Db2ReceiverIntegrationTest {
 
         Db2ReceiverConfig config = buildConfig();
         config.getEvents().getDbServerQuerySample().setEnabled(true);
-        config.getQuerySampleCollection().setCollectionInterval("1s");
+        config.getQuerySampleCollection().setCollectionInterval("5s");
 
         Properties props = new Properties();
         props.setProperty("user",     db2.getUsername());
