@@ -451,6 +451,131 @@ class Db2ReceiverIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_LOCK_MODE)).isNotNull();
     }
 
+    /**
+     * Proves the traceparent actually round-trips through Db2 on the default path: an application
+     * session stamps CLIENT_ACCTNG, and the receiver reads it back out of MON_GET_CONNECTION and
+     * puts it on the emitted record's span context.
+     *
+     * <p>This is the only kind of test that can catch a wrong column name — a mocked ResultSet
+     * returns whatever it is told regardless of what the server actually exposes.
+     */
+    @Test
+    void querySamplePicksUpTraceparentFromClientAcctng() throws Exception {
+        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        String spanId  = "00f067aa0ba902b7";
+        String traceparent = "traceparent=00-" + traceId + "-" + spanId + "-01";
+
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2ReceiverConfig config = buildConfig();
+        config.getEvents().getDbServerQuerySample().setEnabled(true);
+        config.getQuerySampleCollection().setCollectionInterval("1s");
+
+        Properties props = new Properties();
+        props.setProperty("user",     db2.getUsername());
+        props.setProperty("password", db2.getPassword());
+
+        // Same lock technique as the test above: a real row lock keeps the sampled statement in
+        // MON_CURRENT_SQL deterministically, independent of container speed.
+        Connection ddlConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        try (Statement st = ddlConn.createStatement()) {
+            try { st.execute("DROP TABLE SPLUNK_OTEL_TRACE_TEST"); } catch (Exception ignored) {}
+            st.execute("CREATE TABLE SPLUNK_OTEL_TRACE_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
+        }
+        ddlConn.close();
+
+        Connection ownerConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        ownerConn.setAutoCommit(false);
+        try (Statement st = ownerConn.createStatement()) {
+            st.execute("INSERT INTO SPLUNK_OTEL_TRACE_TEST VALUES (1, 42)");
+        }
+
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Connection bgConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+        bgConn.setAutoCommit(false);
+
+        // Stamp the traceparent on the same session that will run the blocked query.
+        try (java.sql.CallableStatement cs =
+                 bgConn.prepareCall("CALL SYSPROC.WLM_SET_CLIENT_INFO(?,?,?,?,?)")) {
+            cs.setNull(1, java.sql.Types.VARCHAR);
+            cs.setNull(2, java.sql.Types.VARCHAR);
+            cs.setNull(3, java.sql.Types.VARCHAR);
+            cs.setString(4, traceparent);
+            cs.setNull(5, java.sql.Types.VARCHAR);
+            cs.execute();
+        }
+
+        Statement bgStmt = bgConn.createStatement();
+        Future<?> bgQuery = exec.submit(() -> {
+            try {
+                bgStmt.executeQuery("SELECT ID FROM SPLUNK_OTEL_TRACE_TEST WITH RR");
+            } catch (Exception ignored) {
+                // unblocked on rollback/cancel
+            }
+        });
+
+        Thread.sleep(3000);
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        io.opentelemetry.sdk.logs.data.LogRecordData record;
+        try {
+            Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(1, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> {
+                        String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                        return text != null && text.toUpperCase().contains("SPLUNK_OTEL_TRACE_TEST");
+                    }));
+
+            record = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> {
+                    String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                    return text != null && text.toUpperCase().contains("SPLUNK_OTEL_TRACE_TEST");
+                })
+                .findFirst()
+                .orElseThrow();
+        } finally {
+            ownerConn.rollback();
+            ownerConn.close();
+            bgStmt.cancel();
+            bgConn.rollback();
+            bgConn.close();
+            bgQuery.cancel(true);
+            exec.shutdownNow();
+            Connection cleanupConn = DriverManager.getConnection(db2.getJdbcUrl(), props);
+            try (Statement st = cleanupConn.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_OTEL_TRACE_TEST");
+            } finally {
+                cleanupConn.close();
+            }
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
+
+        assertThat(record.getSpanContext().isValid()).isTrue();
+        assertThat(record.getSpanContext().getTraceId()).isEqualTo(traceId);
+        assertThat(record.getSpanContext().getSpanId()).isEqualTo(spanId);
+        assertThat(record.getSpanContext().isSampled()).isTrue();
+        assertThat(record.getSpanContext().isRemote()).isTrue();
+    }
+
     @Test
     void topQueryEmitsObfuscatedRecordAfterTwoCollectionCycles() throws Exception {
         InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();

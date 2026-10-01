@@ -727,4 +727,251 @@ class QuerySampleQueryTest {
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("active");
     }
+
+    private static final String TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736";
+    private static final String SPAN_ID  = "00f067aa0ba902b7";
+
+    @Test
+    void setsRecordSpanContextFromClientAcctngTraceparent() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+
+        io.opentelemetry.api.trace.SpanContext sc =
+            io.opentelemetry.api.trace.Span.fromContext(cap.getValue()).getSpanContext();
+        assertThat(sc.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
+    }
+
+    // setContext must always be called: leaving it unset makes SdkLogRecordBuilder fall back to
+    // Context.current(), which would stamp whatever span is ambient on the collection thread onto
+    // every unlinked sample. Context.root() is the explicit "no parent".
+    @Test
+    void unlinkedRecordIsExplicitlyRootedRatherThanLeftToAmbientContext() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG")).thenReturn("dept=finance");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().isValid()).isFalse();
+    }
+
+    // Regression for the ambient-context leak: a span active on the collection thread must not end
+    // up on an unlinked record.
+    @Test
+    void ambientSpanOnCollectionThreadDoesNotLeakOntoUnlinkedRecord() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG")).thenReturn(null);
+
+        io.opentelemetry.api.trace.SpanContext ambient =
+            io.opentelemetry.api.trace.SpanContext.create(
+                "11111111111111111111111111111111", "2222222222222222",
+                io.opentelemetry.api.trace.TraceFlags.getSampled(),
+                io.opentelemetry.api.trace.TraceState.getDefault());
+
+        try (io.opentelemetry.context.Scope ignored = io.opentelemetry.context.Context.root()
+                .with(io.opentelemetry.api.trace.Span.wrap(ambient)).makeCurrent()) {
+            query(false).collect();
+        }
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        io.opentelemetry.api.trace.SpanContext used =
+            io.opentelemetry.api.trace.Span.fromContext(cap.getValue()).getSpanContext();
+        assertThat(used.isValid()).isFalse();
+        assertThat(used.getTraceId()).isNotEqualTo("11111111111111111111111111111111");
+    }
+
+    // CLIENT_ACCTNG outlives the request that set it, so a session that is not in a request still
+    // holds a stale traceparent. Linking it would parent the sample to a finished trace.
+    @Test
+    void doesNotLinkSessionsThatAreNotInARequest() {
+        assertThat(QuerySampleQuery.linksToTrace("active")).isTrue();
+        assertThat(QuerySampleQuery.linksToTrace("waiting")).isTrue();
+        assertThat(QuerySampleQuery.linksToTrace("idle")).isFalse();
+        // snapshot APPL_STATUS values such as UOWWAIT / CONNECTED derive to null
+        assertThat(QuerySampleQuery.linksToTrace(null)).isFalse();
+    }
+
+    @Test
+    void idleSessionWithStaleTraceparentIsEmittedUnlinked() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "IDLE", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        // The record is still emitted -- it just carries no trace linkage.
+        verify(logBuilder).emit();
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().isValid()).isFalse();
+    }
+
+    @Test
+    void lockWaitSessionStillLinksBecauseItsStatementIsExecuting() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().getTraceId()).isEqualTo(TRACE_ID);
+    }
+
+    @Test
+    void traceparentPrefixIsCaseInsensitive() {
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "TRACEPARENT=00-" + TRACE_ID + "-" + SPAN_ID + "-01")).isNotNull();
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "TraceParent=00-" + TRACE_ID + "-" + SPAN_ID + "-01")).isNotNull();
+        // the traceparent value itself stays case-sensitive -- uppercase ids are invalid per W3C
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "TRACEPARENT=00-" + TRACE_ID.toUpperCase() + "-" + SPAN_ID + "-01")).isNull();
+    }
+
+    @Test
+    void parsesTraceparentFromClientAcctng() {
+        io.opentelemetry.api.trace.SpanContext sc = QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        assertThat(sc).isNotNull();
+        assertThat(sc.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(sc.getSpanId()).isEqualTo(SPAN_ID);
+        assertThat(sc.isSampled()).isTrue();
+        assertThat(sc.isRemote()).isTrue();
+    }
+
+    @Test
+    void parsesUnsampledTraceFlags() {
+        io.opentelemetry.api.trace.SpanContext sc = QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-00");
+
+        assertThat(sc).isNotNull();
+        assertThat(sc.isSampled()).isFalse();
+    }
+
+    @Test
+    void toleratesSurroundingWhitespace() {
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "  traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01   ")).isNotNull();
+    }
+
+    // CLIENT_ACCTNG is free-form and written by arbitrary client applications, so a bad value must
+    // only cost that record its trace linkage -- it must never throw out of collect().
+    @Test
+    void returnsNullForValuesThatAreNotUsableTraceparents() {
+        assertThat(QuerySampleQuery.parseTraceparent(null)).isNull();
+        assertThat(QuerySampleQuery.parseTraceparent("")).isNull();
+        // an accounting string used for its actual purpose
+        assertThat(QuerySampleQuery.parseTraceparent("dept=finance,batch=nightly")).isNull();
+        // right prefix, truncated value
+        assertThat(QuerySampleQuery.parseTraceparent("traceparent=00-" + TRACE_ID)).isNull();
+        // all-zero ids are invalid per the spec
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-00000000000000000000000000000000-" + SPAN_ID + "-01")).isNull();
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-0000000000000000-01")).isNull();
+        // non-hex and wrong-length ids
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-zzzz2f3577b34da6a3ce929d0e0e4736-" + SPAN_ID + "-01")).isNull();
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-abcd-" + SPAN_ID + "-01")).isNull();
+        // missing flags
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-")).isNull();
+    }
+
+    // Each of these was accepted, or threw, under the previous hand-rolled parser.
+    @Test
+    void rejectsTraceparentsThatViolateTheW3CGrammar() {
+        // non-hex flags -- previously threw IllegalArgumentException out of collect()
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-zz")).isNull();
+        // version ff is forbidden by the spec
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=ff-" + TRACE_ID + "-" + SPAN_ID + "-01")).isNull();
+        // over-long flags
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-0100")).isNull();
+        // trailing field is not allowed on version 00
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01-extra")).isNull();
+        // ids must be lowercase hex
+        assertThat(QuerySampleQuery.parseTraceparent(
+            "traceparent=00-" + TRACE_ID.toUpperCase() + "-" + SPAN_ID + "-01")).isNull();
+    }
+
+    // Per the W3C forward-compatibility rule, a higher version may carry extra trailing fields and
+    // the ids must still be read. Note version 00 must reject the same trailing field -- that case
+    // is in rejectsTraceparentsThatViolateTheW3CGrammar.
+    @Test
+    void acceptsForwardCompatibleVersionWithTrailingFields() {
+        io.opentelemetry.api.trace.SpanContext one = QuerySampleQuery.parseTraceparent(
+            "traceparent=01-" + TRACE_ID + "-" + SPAN_ID + "-01-extra");
+
+        assertThat(one).isNotNull();
+        assertThat(one.getTraceId()).isEqualTo(TRACE_ID);
+        assertThat(one.getSpanId()).isEqualTo(SPAN_ID);
+        assertThat(one.isSampled()).isTrue();
+
+        io.opentelemetry.api.trace.SpanContext two = QuerySampleQuery.parseTraceparent(
+            "traceparent=02-" + TRACE_ID + "-" + SPAN_ID + "-01-a-b");
+
+        assertThat(two).isNotNull();
+        assertThat(two.getTraceId()).isEqualTo(TRACE_ID);
+    }
+
+    // Regression: a malformed traceparent on one row used to throw out of the row loop, so every
+    // later row in that collection cycle was silently dropped. Both rows must still be emitted.
+    @Test
+    void malformedTraceparentOnFirstRowDoesNotBlockLaterRows() throws Exception {
+        when(rs.next()).thenReturn(true, true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getString("CLIENT_ACCTNG")).thenReturn(
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-zz",   // row 1: non-hex flags
+            "traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");  // row 2: valid
+
+        boolean ok = query(false).collect();
+
+        assertThat(ok).isTrue();
+        verify(logBuilder, times(2)).emit();
+
+        // setContext is called for both rows -- unlinked records are explicitly rooted -- so the
+        // check is that exactly one of them carries a valid span context.
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder, times(2)).setContext(cap.capture());
+        assertThat(cap.getAllValues())
+            .filteredOn(c -> io.opentelemetry.api.trace.Span.fromContext(c).getSpanContext().isValid())
+            .hasSize(1);
+    }
 }

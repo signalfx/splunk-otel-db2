@@ -308,6 +308,65 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 
 **Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
 
+### Trace correlation
+
+If the sampled application propagates a W3C traceparent into its Db2 session's client accounting string, the query sample record is linked to that trace — `trace_id` and `span_id` are set as native log record fields (not attributes), so the sampled statement appears on the trace of the request that issued it.
+
+The receiver needs no additional configuration and no new grants for this — `CLIENT_ACCTNG` comes from `MON_GET_CONNECTION`, which query sampling already reads — and it activates automatically whenever the value is present. Applications opt in by stamping the accounting string on the same connection they then query on, before each query:
+
+```sql
+CALL SYSPROC.WLM_SET_CLIENT_INFO(NULL, NULL, NULL, 'traceparent=00-<trace-id>-<span-id>-01', NULL);
+```
+
+The accounting string is parameter 4; parameter 5 is `client_workload` and rejects arbitrary text.
+
+Note this is a privileged call on the *application's* side: Db2 grants no default `PUBLIC` privilege on `SYSPROC.WLM_SET_CLIENT_INFO`, so the application user needs `EXECUTE` on it or a sufficient authority. Where that is not available, `connection.setClientInfo("ClientAccountingInformation", ...)` over JDBC produces an identical `CLIENT_ACCTNG` value with no stored-procedure dependency, and is the better default for restricted application users.
+
+`CLIENT_ACCTNG` is read from `MON_GET_CONNECTION` on the default path and from `SNAP_GET_APPL_INFO.TPMON_ACC_STR` on the snapshot path. Values that are absent or not a valid traceparent are ignored and the record is emitted unlinked; parsing follows the W3C grammar, so a malformed value never affects any other record. The prefix match is case-insensitive.
+
+Only sessions that are currently in a request are linked — those reported as `active` or `waiting`. Because `CLIENT_ACCTNG` outlives the request that set it, an idle session still holds the last traceparent written to it, and linking that would parent the sample to a trace that has already finished. Lock-waiting sessions *are* linked: the statement is executing, just blocked. Sessions in states the receiver cannot positively identify as in-request are emitted unlinked.
+
+**This takes ownership of `CLIENT_ACCTNG`.** The field has its own pre-existing uses — Db2 can assign workloads on `CURRENT CLIENT_ACCTNG`, and it is recorded in audit events — and the traceparent format above occupies the whole value, so it cannot coexist with an application's own accounting string. Adopting trace correlation means:
+
+- A traced request **replaces** whatever accounting value the application would otherwise set, which can change WLM workload assignment and what appears in audit records. Check for workload definitions or audit policies that read `CLIENT_ACCTNG` before enabling it.
+- An application that needs both has to decide what the field carries. Whether to define a structured value holding a traceparent alongside other fields is still open — see the design doc's open question on this.
+
+**Connection pooling.** `CLIENT_ACCTNG` is connection-scoped and persists until it is replaced, so the stamp and the query must share one physical connection, and every checkout must write the field. Skipping the write leaves the previous borrower's traceparent in place and attributes this request's queries to that request's trace — worse than no linkage, because the result looks correct. On each checkout write:
+
+- the current traceparent, for a traced request;
+- otherwise the application's normal accounting value, if it has one — restoring it rather than blanking it keeps WLM and audit behaviour intact;
+- an empty string only when the application has no accounting value of its own.
+
+Clearing or restoring the field before returning the connection to the pool is a cheap extra safeguard.
+
+The two stamping mechanisms have **opposite null semantics**, verified on 11.5.9.0:
+
+| | `WLM_SET_CLIENT_INFO` (parameter 4) | JDBC `setClientInfo` |
+|---|---|---|
+| `NULL` / Java `null` | leaves the existing value **unchanged** | **clears** the value |
+| `''` (empty string) | clears the value | clears the value |
+
+So `NULL` is not a way to clear the field via the stored procedure, though `null` does clear it over JDBC. Use `''` for both if you want one code path that behaves the same either way.
+
+A minimal Java example, stamping on borrow and clearing on release:
+
+```java
+Connection conn = pool.borrow();
+try {
+    SpanContext sc = Span.current().getSpanContext();
+    String acctng = sc.isValid()
+        ? String.format("traceparent=00-%s-%s-%s",
+              sc.getTraceId(), sc.getSpanId(), sc.isSampled() ? "01" : "00")
+        : "";   // "" clears; NULL would leave the previous request's value in place
+    conn.setClientInfo("ClientAccountingInformation", acctng);
+
+    // ... run the real query on this same connection ...
+} finally {
+    conn.setClientInfo("ClientAccountingInformation", "");
+    pool.release(conn);
+}
+```
+
 ## Blocking sessions (log records)
 
 Lock contention is detected automatically whenever query sampling is enabled. When a sampled session is waiting for a lock (`LOCKWAIT`), its `db.server.query_sample` record is enriched with blocking attributes and emitted at severity WARN. No separate flag is needed.

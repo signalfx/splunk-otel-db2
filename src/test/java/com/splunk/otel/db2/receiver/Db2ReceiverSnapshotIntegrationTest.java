@@ -243,6 +243,151 @@ class Db2ReceiverSnapshotIntegrationTest {
         assertThat(record.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE)).isNull();
     }
 
+    /**
+     * Proves the traceparent round-trips on the snapshot path, where the accounting string is
+     * exposed as SNAP_GET_APPL_INFO.TPMON_ACC_STR rather than CLIENT_ACCTNG.
+     *
+     * <p>This path is where a wrong column name previously slipped through: the unit tests mock
+     * ResultSet, so CLIENT_ACCTNG_ID looked fine until a live Db2 rejected it with SQL0206N and
+     * took the whole snapshot query down with it. Only an assertion against a real server closes
+     * that gap.
+     */
+    @Test
+    void snapshotPathPicksUpTraceparentFromAccountingString() throws Exception {
+        recycleWithMonitorSwitches();
+
+        String traceId = "0af7651916cd43dd8448eb211c80319c";
+        String spanId  = "b7ad6b7169203331";
+        String traceparent = "traceparent=00-" + traceId + "-" + spanId + "-01";
+
+        InMemoryLogRecordExporter logExporter = InMemoryLogRecordExporter.create();
+        SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+            .addLogRecordProcessor(SimpleLogRecordProcessor.create(logExporter))
+            .build();
+        Logger otelLogger = loggerProvider.get("splunk-otel-db2");
+
+        InMemoryMetricExporter metricExporter = InMemoryMetricExporter.create();
+        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .registerMetricReader(
+                PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build()
+            )
+            .build();
+
+        Db2ReceiverConfig config = buildSnapshotConfig();
+
+        Connection ddlConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        try (Statement st = ddlConn.createStatement()) {
+            try { st.execute("DROP TABLE SPLUNK_SNAP_TRACE_TEST"); } catch (Exception ignored) {}
+            st.execute("CREATE TABLE SPLUNK_SNAP_TRACE_TEST (ID INT NOT NULL PRIMARY KEY, VAL INT)");
+        }
+        ddlConn.close();
+
+        Connection ownerConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        ownerConn.setAutoCommit(false);
+        try (Statement st = ownerConn.createStatement()) {
+            st.execute("INSERT INTO SPLUNK_SNAP_TRACE_TEST VALUES (1, 42)");
+        }
+
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Connection bgConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+        bgConn.setAutoCommit(false);
+
+        try (java.sql.CallableStatement cs =
+                 bgConn.prepareCall("CALL SYSPROC.WLM_SET_CLIENT_INFO(?,?,?,?,?)")) {
+            cs.setNull(1, java.sql.Types.VARCHAR);
+            cs.setNull(2, java.sql.Types.VARCHAR);
+            cs.setNull(3, java.sql.Types.VARCHAR);
+            cs.setString(4, traceparent);
+            cs.setNull(5, java.sql.Types.VARCHAR);
+            cs.execute();
+        }
+
+        Statement bgStmt = bgConn.createStatement();
+        Future<?> bgQuery = exec.submit(() -> {
+            try {
+                bgStmt.executeQuery("SELECT ID FROM SPLUNK_SNAP_TRACE_TEST WITH RR");
+            } catch (Exception ignored) {
+                // unblocked on rollback/cancel
+            }
+        });
+
+        Thread.sleep(3000);
+
+        // If the assertion fails, knowing what the server actually exposed is the whole diagnosis.
+        String acctngSeen = "<not read>";
+        try (Connection diagConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+             Statement diagSt = diagConn.createStatement();
+             java.sql.ResultSet diagRs = diagSt.executeQuery(
+                 "SELECT SA.AGENT_ID, SA.TPMON_ACC_STR " +
+                 "FROM TABLE(SNAP_GET_APPL_INFO(CAST(NULL AS VARCHAR(255)), -1)) AS SA " +
+                 "WHERE SA.TPMON_ACC_STR IS NOT NULL AND SA.TPMON_ACC_STR <> ''")) {
+            StringBuilder sb = new StringBuilder();
+            while (diagRs.next()) {
+                sb.append(String.format("agent=%s acctng=[%s] ",
+                    diagRs.getString("AGENT_ID"), diagRs.getString("TPMON_ACC_STR")));
+            }
+            acctngSeen = sb.length() == 0 ? "<no non-empty TPMON_ACC_STR rows>" : sb.toString();
+        } catch (Exception e) {
+            acctngSeen = "TPMON_ACC_STR probe failed: " + e.getMessage();
+        }
+
+        Db2Receiver receiver = new Db2Receiver(config, meterProvider.get("splunk-otel-db2"), otelLogger);
+        receiver.start();
+
+        io.opentelemetry.sdk.logs.data.LogRecordData record;
+        try {
+            try {
+                Awaitility.await()
+                    .atMost(60, TimeUnit.SECONDS)
+                    .pollInterval(1, TimeUnit.SECONDS)
+                    .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                        .anyMatch(r -> {
+                            String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                            return text != null && text.toUpperCase().contains("SPLUNK_SNAP_TRACE_TEST");
+                        }));
+            } catch (org.awaitility.core.ConditionTimeoutException cte) {
+                throw new AssertionError(
+                    "No query sample for SPLUNK_SNAP_TRACE_TEST after 60s. TPMON_ACC_STR: "
+                        + acctngSeen, cte);
+            }
+
+            record = logExporter.getFinishedLogRecordItems().stream()
+                .filter(r -> {
+                    String text = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                    return text != null && text.toUpperCase().contains("SPLUNK_SNAP_TRACE_TEST");
+                })
+                .findFirst()
+                .orElseThrow();
+        } finally {
+            ownerConn.rollback();
+            ownerConn.close();
+            bgStmt.cancel();
+            bgConn.rollback();
+            bgConn.close();
+            bgQuery.cancel(true);
+            exec.shutdownNow();
+            Connection cleanupConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps());
+            try (Statement st = cleanupConn.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_SNAP_TRACE_TEST");
+            } finally {
+                cleanupConn.close();
+            }
+            receiver.stop();
+            loggerProvider.shutdown();
+            meterProvider.shutdown();
+        }
+
+        assertThat(record.getSpanContext().isValid())
+            .withFailMessage("record not linked to a trace; TPMON_ACC_STR was: %s", acctngSeen)
+            .isTrue();
+        assertThat(record.getSpanContext().getTraceId()).isEqualTo(traceId);
+        assertThat(record.getSpanContext().getSpanId()).isEqualTo(spanId);
+        assertThat(record.getSpanContext().isSampled()).isTrue();
+        assertThat(record.getSpanContext().isRemote()).isTrue();
+    }
+
     @Test
     void snapshotPathDoesNotEmitBlockingAttributes() throws Exception {
         // SYSIBMADM.LOCKWAITS requires DFT_MON_LOCK ON but on snapshot path we don't

@@ -5,6 +5,9 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.Severity;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.context.Context;
 
 import java.time.Instant;
 import java.util.concurrent.TimeUnit;
@@ -81,6 +84,7 @@ public final class QuerySampleEvent {
     private String  lockSchema;
     private String  blockingStartTime;
     private Double  waitDurationSec;
+    private SpanContext spanContext;
 
     private QuerySampleEvent(String dbNamespace, String queryText,
                              double sessionDurationSec, long member) {
@@ -133,6 +137,12 @@ public final class QuerySampleEvent {
         return this;
     }
 
+    /**
+     * Links this event to the trace the sampled application was running under, as read from the
+     * session's CLIENT_ACCTNG traceparent. Null when the application did not propagate one.
+     */
+    public QuerySampleEvent spanContext(SpanContext v) { this.spanContext = v; return this; }
+
     public void emit(Logger logger, Instant timestamp) {
         AttributesBuilder b = Attributes.builder()
             .put(DB_SYSTEM,    "ibm.db2")
@@ -170,12 +180,23 @@ public final class QuerySampleEvent {
         boolean isBlocked = waitDurationSec != null;
         Severity severity = isBlocked ? Severity.WARN : Severity.INFO;
 
-        logger.logRecordBuilder()
+        io.opentelemetry.api.logs.LogRecordBuilder builder = logger.logRecordBuilder()
             .setEventName("db.server.query_sample")
             .setSeverity(severity)
             .setSeverityText(isBlocked ? "WARN" : "INFO")
             .setTimestamp(timestamp.toEpochMilli(), TimeUnit.MILLISECONDS)
-            .setAllAttributes(b.build())
-            .emit();
+            .setAllAttributes(b.build());
+
+        // Always set the context, so the sampled query joins the application's trace when there is
+        // one and is explicitly unparented when there is not. Leaving it unset is not neutral:
+        // SdkLogRecordBuilder falls back to Context.current(), which would stamp whatever span
+        // happens to be active on the collection thread onto every unlinked sample — the receiver's
+        // own internal span under auto-instrumentation, for instance. Same reasoning as
+        // mysqlreceiver's use of context.Background() for query samples.
+        builder.setContext(spanContext != null
+            ? Context.root().with(Span.wrap(spanContext))
+            : Context.root());
+
+        builder.emit();
     }
 }
