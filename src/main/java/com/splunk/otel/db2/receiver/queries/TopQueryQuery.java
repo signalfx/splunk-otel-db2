@@ -93,7 +93,8 @@ public class TopQueryQuery {
     // is never stored or emitted.
     private static final int PLAN_MAX_BYTES = 100 * 1024;
 
-    // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
+    // EXECUTABLE_ID identifies a plan-cache section; it is treated as unique on its own, which
+    // is what lets the plan cache key match the emitted db2.query_plan.hash exactly.
     // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
     //   NUM_EXEC_WITH_METRICS requires WLM activity monitoring and is 0 on most vanilla Db2
     //   installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
@@ -257,7 +258,8 @@ public class TopQueryQuery {
     // The actual schema used is read back from the EXPLAIN_SCHEMA INOUT param after each call.
     private final String explainSchema;
 
-    // Client-side LRU plan cache. Key = "member:executableIdHex". Evicted by LRU + TTL.
+    // Client-side LRU plan cache. Key = executableIdHex, matching the emitted
+    // db2.query_plan.hash. Evicted by LRU + TTL.
     // Single-threaded scheduler — no synchronization needed.
     private final Map<String, PlanCacheEntry> planCache;
 

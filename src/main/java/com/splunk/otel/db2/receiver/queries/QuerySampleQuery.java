@@ -111,7 +111,7 @@ public class QuerySampleQuery {
         "                  HLD_APPLICATION_HANDLE, HLD_MEMBER, LOCK_WAIT_ELAPSED_TIME, " +
         "                  TABSCHEMA, TABNAME, LOCK_OBJECT_TYPE, LOCK_MODE_REQUESTED, " +
         "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE " +
-        "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC, " +
+        "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST, " +
         "                                              REQ_MEMBER, " +
         "                                              HLD_APPLICATION_HANDLE) AS RN " +
         "           FROM SYSIBMADM.MON_LOCKWAITS) AS LW " +
@@ -125,7 +125,7 @@ public class QuerySampleQuery {
         // MON_CURRENT_SQL, which would otherwise multiply the outer row just as MON_LOCKWAITS did.
         "LEFT JOIN (SELECT APPLICATION_HANDLE, STMT_TEXT, " +
         "                  ROW_NUMBER() OVER (PARTITION BY APPLICATION_HANDLE " +
-        "                                     ORDER BY ELAPSED_TIME_SEC DESC) AS RN " +
+        "                                     ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST) AS RN " +
         "           FROM SYSIBMADM.MON_CURRENT_SQL) AS BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_SQL.RN = 1 " +
@@ -141,7 +141,10 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        "ORDER BY S.ELAPSED_TIME_SEC DESC " +
+        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
+        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
+        // row budget.
+        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Db2 10.5+ variant: also LEFT JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
@@ -180,10 +183,23 @@ public class QuerySampleQuery {
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A " +
+        // MON_GET_ACTIVITY(NULL, -2) returns a row per member, so a distributed activity yields
+        // several rows for one (handle, uow, activity) and would multiply the outer row — the same
+        // duplication the lock-wait join had, with the same cost: inflated session counts and
+        // duplicates eating the FETCH FIRST budget. IBM's db2mon.sql collapses activity rows before
+        // joining for this reason. Collapsed here to one row per activity, keeping the member that
+        // waited longest on locks, since that is the member the reported wait should describe.
+        // NULLS LAST so a member with an unknown wait cannot outrank a real one.
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID, " +
+        "                  LOCK_WAIT_TIME, EXECUTABLE_ID, " +
+        "                  ROW_NUMBER() OVER (PARTITION BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID " +
+        "                                     ORDER BY LOCK_WAIT_TIME DESC NULLS LAST, " +
+        "                                              MEMBER) AS RN " +
+        "           FROM TABLE(MON_GET_ACTIVITY(NULL, -2))) AS A " +
         "  ON A.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND A.UOW_ID = S.UOW_ID " +
         " AND A.ACTIVITY_ID = S.ACTIVITY_ID " +
+        " AND A.RN = 1 " +
         // Guarantees at most one row per sampled session, so a blocked session can never be emitted
         // twice at the same timestamp — which would inflate active-session counts and, because
         // FETCH FIRST applies after the join, let duplicates consume the row budget real sessions
@@ -206,7 +222,7 @@ public class QuerySampleQuery {
         "                  HLD_APPLICATION_HANDLE, HLD_MEMBER, LOCK_WAIT_ELAPSED_TIME, " +
         "                  TABSCHEMA, TABNAME, LOCK_OBJECT_TYPE, LOCK_MODE_REQUESTED, " +
         "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE " +
-        "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC, " +
+        "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST, " +
         "                                              REQ_MEMBER, " +
         "                                              HLD_APPLICATION_HANDLE) AS RN " +
         "           FROM SYSIBMADM.MON_LOCKWAITS) AS LW " +
@@ -220,7 +236,7 @@ public class QuerySampleQuery {
         // MON_CURRENT_SQL, which would otherwise multiply the outer row just as MON_LOCKWAITS did.
         "LEFT JOIN (SELECT APPLICATION_HANDLE, STMT_TEXT, " +
         "                  ROW_NUMBER() OVER (PARTITION BY APPLICATION_HANDLE " +
-        "                                     ORDER BY ELAPSED_TIME_SEC DESC) AS RN " +
+        "                                     ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST) AS RN " +
         "           FROM SYSIBMADM.MON_CURRENT_SQL) AS BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_SQL.RN = 1 " +
@@ -237,7 +253,10 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        "ORDER BY S.ELAPSED_TIME_SEC DESC " +
+        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
+        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
+        // row budget.
+        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Snapshot monitor fallback (Db2 9.7+). Blocking detection not available.
@@ -267,7 +286,7 @@ public class QuerySampleQuery {
         "  AND COALESCE(SA.APPL_NAME, '') <> 'splunk-otel-db2' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
-        "ORDER BY TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) DESC " +
+        "ORDER BY TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Idle-blocker plan-cache lookup: get the last SQL executed by a blocking session

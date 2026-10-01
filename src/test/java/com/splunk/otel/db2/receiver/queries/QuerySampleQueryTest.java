@@ -614,6 +614,62 @@ class QuerySampleQueryTest {
         assertThat(sqlCap.getValue()).contains("BLOCKER_SQL.RN = 1");
     }
 
+    // MON_GET_ACTIVITY(NULL, -2) returns a row per member, so a distributed activity would multiply
+    // the outer row just as the lock-wait join did.
+    @Test
+    void activityJoinIsCollapsedToOneRowPerActivity() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+
+        assertThat(sql).contains("PARTITION BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID");
+        assertThat(sql).contains("A.RN = 1");
+        // The un-collapsed form must be gone.
+        assertThat(sql).doesNotContain("TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A");
+    }
+
+    // Db2 sorts NULLs as high, so a plain DESC window puts an unknown value first -- verified
+    // against 11.5.9.0, where ORDER BY V DESC selected the NULL row over a real maximum. Every
+    // descending window that picks a "longest" row must therefore say NULLS LAST, or an unknown
+    // wait beats a real one and an unknown elapsed time beats the longest-running blocker.
+    @Test
+    void descendingWindowsPutNullsLast() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+        ArgumentCaptor<String> cap105 = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(cap105.capture());
+        String sql105 = cap105.getValue();
+
+        assertThat(sql105).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST");
+        assertThat(sql105).contains("ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST");
+        assertThat(sql105).contains("ORDER BY LOCK_WAIT_TIME DESC NULLS LAST");
+
+        // No descending window may be left without it.
+        assertThat(countOccurrences(sql105, "DESC NULLS LAST"))
+            .isEqualTo(countOccurrences(sql105, " DESC"));
+
+        reset(stmt, rs);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+        ArgumentCaptor<String> cap97 = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(cap97.capture());
+        String sql97 = cap97.getValue();
+
+        assertThat(sql97).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST");
+        assertThat(sql97).contains("ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST");
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int n = 0, i = 0;
+        while ((i = haystack.indexOf(needle, i)) >= 0) { n++; i += needle.length(); }
+        return n;
+    }
+
     @Test
     void defaultPathSqlComputesStartTimeServerSide() throws Exception {
         when(rs.next()).thenReturn(false);
