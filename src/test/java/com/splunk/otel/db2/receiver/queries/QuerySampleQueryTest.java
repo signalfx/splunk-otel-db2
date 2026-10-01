@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.mockito.stubbing.OngoingStubbing;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -590,10 +591,14 @@ class QuerySampleQueryTest {
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
 
-        assertThat(sql).contains("PARTITION BY REQ_APPLICATION_HANDLE, REQ_MEMBER");
+        // Application scope, not member scope: MON_CURRENT_SQL aggregates across members and reports
+        // only COORD_MEMBER, so partitioning or joining by member loses the lock wait of any
+        // pureScale/DPF activity waiting on a non-coordinator member.
+        assertThat(sql).contains("PARTITION BY REQ_APPLICATION_HANDLE ");
+        assertThat(sql).doesNotContain("LW.REQ_MEMBER = S.COORD_MEMBER");
         assertThat(sql).contains("LW.RN = 1");
-        // Longest wait wins, with a stable tie-break so the chosen holder does not flap between
-        // collections when two holders have waited equally long.
+        // Longest wait wins, with stable tie-breaks so the choice does not flap between collections
+        // when members or holders have waited equally long.
         assertThat(sql).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC");
         assertThat(sql).contains("HLD_APPLICATION_HANDLE) AS RN");
     }
@@ -900,8 +905,94 @@ class QuerySampleQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_DURATION)).isNull();
-        // Severity must not be escalated on the strength of a NULL.
-        verify(logBuilder).setSeverity(Severity.INFO);
+        // The duration is absent, but IS_BLOCKED == 1 still proves a lock wait, so the record must
+        // stay WARN rather than quietly understating a real block.
+        verify(logBuilder).setSeverity(Severity.WARN);
+    }
+
+    /** Stubs n blocked rows that all name the same idle blocker, forcing the lookup path. */
+    private void stubBlockedRowsWithIdleBlocker(int rows, long blockerHandle) throws Exception {
+        Boolean[] more = new Boolean[rows];
+        java.util.Arrays.fill(more, true);
+        more[rows - 1] = false;
+        when(rs.next()).thenReturn(true, more);
+
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(3L);
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKER_SQL")).thenReturn(null);
+        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T");
+        // The pkg-cache lookup returns nothing; what matters is how often it is attempted.
+        when(prs.next()).thenReturn(false);
+    }
+
+    // One holder commonly blocks many requestors. Without memoization the same package-cache scan
+    // runs once per blocked row, on the sampling connection, while the outer result set is open.
+    @Test
+    void idleBlockerLookupIsMemoizedAcrossRowsWithTheSameHolder() throws Exception {
+        stubBlockedRowsWithIdleBlocker(5, 999L);
+
+        query(false).collect();
+
+        // Five blocked rows naming one holder must cost exactly one lookup.
+        verify(conn, times(1)).prepareStatement(anyString());
+    }
+
+    @Test
+    void idleBlockerLookupsAreCappedPerCollection() throws Exception {
+        int rows = QuerySampleQuery.MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL + 5;
+        Boolean[] more = new Boolean[rows];
+        java.util.Arrays.fill(more, true);
+        more[rows - 1] = false;
+        when(rs.next()).thenReturn(true, more);
+
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(3L);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKER_SQL")).thenReturn(null);
+        when(prs.next()).thenReturn(false);
+        // A distinct holder per row defeats the cache, so only the budget limits the lookups.
+        OngoingStubbing<Object> stub = when(rs.getObject("BLOCKER_HANDLE"));
+        for (long h = 1; h <= rows; h++) stub = stub.thenReturn(h);
+
+        query(false).collect();
+
+        verify(conn, times(QuerySampleQuery.MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL))
+            .prepareStatement(anyString());
+    }
+
+    // The budget must not leak across collections, or one busy interval starves every later one.
+    @Test
+    void idleBlockerBudgetResetsEachCollection() throws Exception {
+        QuerySampleQuery q = query(false);
+
+        stubBlockedRowsWithIdleBlocker(2, 777L);
+        q.collect();
+        verify(conn, times(1)).prepareStatement(anyString());
+
+        // Second collection, same holder: the cache was cleared, so it looks up again.
+        stubBlockedRowsWithIdleBlocker(2, 777L);
+        q.collect();
+        verify(conn, times(2)).prepareStatement(anyString());
+    }
+
+    // NULL would arrive as 0 -- a real member number -- instead of the -2 all-members sentinel,
+    // sending the lookup to the wrong member.
+    @Test
+    void nullBlockerMemberBecomesTheAllMembersSentinel() throws Exception {
+        stubBlockedRowsWithIdleBlocker(1, 555L);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(0L);
+        when(rs.wasNull()).thenReturn(false, true);   // wait-sec present, member NULL
+
+        query(false).collect();
+
+        // IDLE_BLOCKER_SQL binds the member twice (MON_GET_CONNECTION and MON_GET_PKG_CACHE_STMT).
+        verify(pstmt, times(2)).setInt(anyInt(), eq(-2));
     }
 
     @Test

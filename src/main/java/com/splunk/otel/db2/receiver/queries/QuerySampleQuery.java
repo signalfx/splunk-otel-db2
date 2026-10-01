@@ -95,21 +95,27 @@ public class QuerySampleQuery {
         // need.
         //
         // Measured on 11.5.9.0: MON_LOCKWAITS returns one row per waiting request naming a single
-        // holder, even with three concurrent S-lock holders, so it does not multiply there. This is
-        // therefore defensive rather than a fix for observed duplication — the receiver spans 9.7,
-        // 10.5+ and snapshot paths plus pureScale/DPF, where a coordinator activity can have
-        // subagents waiting on more than one member, and the invariant is cheaper to enforce here
-        // than to re-verify per version. Longest wait wins, with HLD_APPLICATION_HANDLE as a stable
-        // tie-break so the chosen holder does not flap between collections.
+        // holder, even with three concurrent S-lock holders, so it does not multiply there. The
+        // dedup is therefore defensive, not a fix for observed duplication — it holds the invariant
+        // across the 9.7, 10.5+ and snapshot paths and across pureScale/DPF, rather than relying on
+        // MON_LOCKWAITS semantics being identical on all of them.
+        //
+        // Matched per application, not per member. MON_CURRENT_SQL aggregates activities across all
+        // members and reports only COORD_MEMBER, so requiring REQ_MEMBER = S.COORD_MEMBER dropped
+        // blocking data for any pureScale/DPF activity whose waiting agent sits on a non-coordinator
+        // member — the sample was still emitted, just silently without its lock wait. Collapsing at
+        // application scope matches the scope of the row this decorates. Longest wait wins, with
+        // REQ_MEMBER then HLD_APPLICATION_HANDLE as tie-breaks so the choice is stable across
+        // collections instead of flapping between equally-blocked members or holders.
         "LEFT JOIN (SELECT REQ_APPLICATION_HANDLE, REQ_MEMBER, " +
         "                  HLD_APPLICATION_HANDLE, HLD_MEMBER, LOCK_WAIT_ELAPSED_TIME, " +
         "                  TABSCHEMA, TABNAME, LOCK_OBJECT_TYPE, LOCK_MODE_REQUESTED, " +
-        "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE, REQ_MEMBER " +
+        "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE " +
         "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC, " +
+        "                                              REQ_MEMBER, " +
         "                                              HLD_APPLICATION_HANDLE) AS RN " +
         "           FROM SYSIBMADM.MON_LOCKWAITS) AS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
-        " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
         " AND LW.RN = 1 " +
         // Joined on APPLICATION_HANDLE alone, deliberately. The handle is system-wide unique in
         // Db2, while LW.HLD_MEMBER is the member holding the lock and MON_CURRENT_SQL.COORD_MEMBER
@@ -184,21 +190,27 @@ public class QuerySampleQuery {
         // need.
         //
         // Measured on 11.5.9.0: MON_LOCKWAITS returns one row per waiting request naming a single
-        // holder, even with three concurrent S-lock holders, so it does not multiply there. This is
-        // therefore defensive rather than a fix for observed duplication — the receiver spans 9.7,
-        // 10.5+ and snapshot paths plus pureScale/DPF, where a coordinator activity can have
-        // subagents waiting on more than one member, and the invariant is cheaper to enforce here
-        // than to re-verify per version. Longest wait wins, with HLD_APPLICATION_HANDLE as a stable
-        // tie-break so the chosen holder does not flap between collections.
+        // holder, even with three concurrent S-lock holders, so it does not multiply there. The
+        // dedup is therefore defensive, not a fix for observed duplication — it holds the invariant
+        // across the 9.7, 10.5+ and snapshot paths and across pureScale/DPF, rather than relying on
+        // MON_LOCKWAITS semantics being identical on all of them.
+        //
+        // Matched per application, not per member. MON_CURRENT_SQL aggregates activities across all
+        // members and reports only COORD_MEMBER, so requiring REQ_MEMBER = S.COORD_MEMBER dropped
+        // blocking data for any pureScale/DPF activity whose waiting agent sits on a non-coordinator
+        // member — the sample was still emitted, just silently without its lock wait. Collapsing at
+        // application scope matches the scope of the row this decorates. Longest wait wins, with
+        // REQ_MEMBER then HLD_APPLICATION_HANDLE as tie-breaks so the choice is stable across
+        // collections instead of flapping between equally-blocked members or holders.
         "LEFT JOIN (SELECT REQ_APPLICATION_HANDLE, REQ_MEMBER, " +
         "                  HLD_APPLICATION_HANDLE, HLD_MEMBER, LOCK_WAIT_ELAPSED_TIME, " +
         "                  TABSCHEMA, TABNAME, LOCK_OBJECT_TYPE, LOCK_MODE_REQUESTED, " +
-        "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE, REQ_MEMBER " +
+        "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE " +
         "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC, " +
+        "                                              REQ_MEMBER, " +
         "                                              HLD_APPLICATION_HANDLE) AS RN " +
         "           FROM SYSIBMADM.MON_LOCKWAITS) AS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
-        " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
         " AND LW.RN = 1 " +
         // Joined on APPLICATION_HANDLE alone, deliberately. The handle is system-wide unique in
         // Db2, while LW.HLD_MEMBER is the member holding the lock and MON_CURRENT_SQL.COORD_MEMBER
@@ -419,7 +431,11 @@ public class QuerySampleQuery {
 
                             String blockingStartTime = toRfc3339(rs.getString("BLOCKING_START_TIME"));
 
-                            ev.lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
+                            // IS_BLOCKED == 1 means a MON_LOCKWAITS row matched, so this session is
+                            // blocked whether or not the elapsed time came back NULL. Severity must
+                            // follow that fact, not the availability of the duration.
+                            ev.blocked(true)
+                              .lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
                               .lockMode(trim(rs.getString("LOCK_MODE")))
                               .lockObjectName(trim(rs.getString("LOCK_OBJECT")))
                               .lockSchema(trim(rs.getString("LOCK_SCHEMA")))
