@@ -32,13 +32,18 @@ import java.util.function.Supplier;
  * (tiebreaker for sub-millisecond queries). Both keys are in their natural units
  * so the sort is always meaningful.
  *
- * Cache key: member + EXECUTABLE_ID uniquely identifies a plan-cache section.
+ * Plan cache key: EXECUTABLE_ID, which is treated as identifying a plan-cache section on its
+ * own. This deliberately matches the emitted db2.query_plan.hash, because that hash is the
+ * plan's object-storage key downstream — keying the cache by member while emitting a bare id
+ * would have the agent and the pipeline disagree about what identifies a plan.
  * Using raw SQL text as a key is incorrect because Db2 can hold multiple sections
  * with identical text for different compilation environments or packages.
  *
  * Baseline cache: bounded TTL map keyed by "member:executableId". Entries are
  * updated each cycle they appear and evicted after {@link #MAX_STALE_CYCLES}
- * consecutive absences.
+ * consecutive absences. This one stays member-qualified: it is internal delta state that is
+ * never emitted, so there is no downstream contract to agree with, and per-member deltas are
+ * the correct granularity for per-member execution counters.
  *
  * Cache-miss classification via INSERT_TIMESTAMP: on a cache miss, the section's
  * INSERT_TIMESTAMP is compared to lastServerScrapeInstant (Db2 CURRENT TIMESTAMP
@@ -561,7 +566,11 @@ public class TopQueryQuery {
             // returns SQLSTATE=55075. Skip static sections to avoid wasting budget.
             if (planMaxPerInterval != null && "D".equals(secType)) {
                 String execIdHex = t[4];
-                String cacheKey = member + ":" + execIdHex;
+                // Keyed by EXECUTABLE_ID alone, matching db2.query_plan.hash exactly. The hash is
+                // what downstream uses as the plan's object-storage key, so a member-qualified cache
+                // key would mean the agent and the rest of the pipeline disagreed about what
+                // identifies a plan — one cache entry per member, but a single object per id.
+                String cacheKey = execIdHex;
                 String planXml = null;
                 String planHash = null;
 
