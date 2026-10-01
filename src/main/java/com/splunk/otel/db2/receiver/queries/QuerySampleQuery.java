@@ -186,20 +186,21 @@ public class QuerySampleQuery {
         // MON_GET_ACTIVITY(NULL, -2) returns a row per member, so a distributed activity yields
         // several rows for one (handle, uow, activity) and would multiply the outer row — the same
         // duplication the lock-wait join had, with the same cost: inflated session counts and
-        // duplicates eating the FETCH FIRST budget. IBM's db2mon.sql collapses activity rows before
-        // joining for this reason. Collapsed here to one row per activity, keeping the member that
-        // waited longest on locks, since that is the member the reported wait should describe.
-        // NULLS LAST so a member with an unknown wait cannot outrank a real one.
+        // duplicates eating the FETCH FIRST budget.
+        //
+        // Aggregated rather than picking one member's row, because db2.wait_time is documented as
+        // cumulative lock wait time: a 4s wait on one member and 6s on another is 10s of waiting,
+        // not 6s. Selecting the largest member would have under-reported every distributed wait.
+        // SUM(LOCK_WAIT_TIME) with MIN(EXECUTABLE_ID) is the collapse IBM's db2mon.sql uses; the
+        // members' rows describe the same section, so MIN is just a deterministic pick.
         "LEFT JOIN (SELECT APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID, " +
-        "                  LOCK_WAIT_TIME, EXECUTABLE_ID, " +
-        "                  ROW_NUMBER() OVER (PARTITION BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID " +
-        "                                     ORDER BY LOCK_WAIT_TIME DESC NULLS LAST, " +
-        "                                              MEMBER) AS RN " +
-        "           FROM TABLE(MON_GET_ACTIVITY(NULL, -2))) AS A " +
+        "                  SUM(LOCK_WAIT_TIME) AS LOCK_WAIT_TIME, " +
+        "                  MIN(EXECUTABLE_ID) AS EXECUTABLE_ID " +
+        "           FROM TABLE(MON_GET_ACTIVITY(NULL, -2)) " +
+        "           GROUP BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID) AS A " +
         "  ON A.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND A.UOW_ID = S.UOW_ID " +
         " AND A.ACTIVITY_ID = S.ACTIVITY_ID " +
-        " AND A.RN = 1 " +
         // Guarantees at most one row per sampled session, so a blocked session can never be emitted
         // twice at the same timestamp — which would inflate active-session counts and, because
         // FETCH FIRST applies after the join, let duplicates consume the row budget real sessions

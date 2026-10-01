@@ -615,9 +615,11 @@ class QuerySampleQueryTest {
     }
 
     // MON_GET_ACTIVITY(NULL, -2) returns a row per member, so a distributed activity would multiply
-    // the outer row just as the lock-wait join did.
+    // the outer row just as the lock-wait join did. It must be aggregated, not reduced to one
+    // member's row: db2.wait_time is documented as cumulative, so picking the largest member would
+    // under-report a distributed wait (4s + 6s must read 10s, not 6s).
     @Test
-    void activityJoinIsCollapsedToOneRowPerActivity() throws Exception {
+    void activityJoinIsAggregatedPerActivityAndSumsWaitTime() throws Exception {
         when(rs.next()).thenReturn(false);
         query105().collect();
 
@@ -625,10 +627,12 @@ class QuerySampleQueryTest {
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
 
-        assertThat(sql).contains("PARTITION BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID");
-        assertThat(sql).contains("A.RN = 1");
-        // The un-collapsed form must be gone.
+        assertThat(sql).contains("SUM(LOCK_WAIT_TIME) AS LOCK_WAIT_TIME");
+        assertThat(sql).contains("MIN(EXECUTABLE_ID) AS EXECUTABLE_ID");
+        assertThat(sql).contains("GROUP BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID");
+        // The un-collapsed form must be gone, and so must the max-pick that under-reported.
         assertThat(sql).doesNotContain("TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A");
+        assertThat(sql).doesNotContain("A.RN = 1");
     }
 
     // Db2 sorts NULLs as high, so a plain DESC window puts an unknown value first -- verified
@@ -645,9 +649,8 @@ class QuerySampleQueryTest {
 
         assertThat(sql105).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST");
         assertThat(sql105).contains("ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST");
-        assertThat(sql105).contains("ORDER BY LOCK_WAIT_TIME DESC NULLS LAST");
 
-        // No descending window may be left without it.
+        // No descending ordering may be left without it.
         assertThat(countOccurrences(sql105, "DESC NULLS LAST"))
             .isEqualTo(countOccurrences(sql105, " DESC"));
 
