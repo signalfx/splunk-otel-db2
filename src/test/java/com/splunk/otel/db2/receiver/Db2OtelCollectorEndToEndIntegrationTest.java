@@ -81,7 +81,7 @@ class Db2OtelCollectorEndToEndIntegrationTest {
         rc.setDatabase(db2.getDatabaseName().toUpperCase());
         rc.setCollectionInterval("2s");
         rc.getEvents().getDbServerQuerySample().setEnabled(true);
-        rc.getQuerySampleCollection().setCollectionInterval("2s");
+        rc.getQuerySampleCollection().setCollectionInterval("5s");
         rc.getEvents().getDbServerTopQuery().setEnabled(false); // prevent start() scheduling 60s cycle; injected below
         rc.getTls().setInsecure(true);
 

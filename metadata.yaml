@@ -205,9 +205,11 @@ attributes:
     description: >
       Db2 EXECUTABLE_ID hex string, uniquely identifying the compiled plan section in the
       package cache. Changes on recompile. On db.server.top_query: always emitted when
-      max_explain_each_interval > 0. On db.server.query_sample: emitted on the Db2 10.5+
-      default path only (MON_GET_ACTIVITY.EXECUTABLE_ID); not available on Db2 < 10.5 or
-      on the snapshot monitor path.
+      max_explain_each_interval > 0. On db.server.query_sample: requires the Db2 10.5+
+      default path (MON_GET_ACTIVITY.EXECUTABLE_ID) and plan collection actually being on,
+      i.e. events.db.server.top_query.enabled plus max_explain_each_interval > 0 — without
+      those nothing populates db2.query_plan, so a hash would reference a plan that can
+      never be resolved. Not available on Db2 < 10.5 or on the snapshot monitor path.
     type: string
 
   # --- query sample event attributes ---
@@ -925,7 +927,7 @@ events:
       - db2.session_id
       - db2.activity_state
       - db2.session_status
-      - db2.query_plan.hash                    # Db2 10.5+ default path only; hex EXECUTABLE_ID of the active section
+      - db2.query_plan.hash                    # Db2 10.5+ default path AND plan collection enabled (top_query + max_explain_each_interval > 0)
       - db2.query_start
       - db2.session.duration
       - db2.member

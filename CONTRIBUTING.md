@@ -30,6 +30,28 @@ When filing an issue, do *NOT* include:
 
 To report a security issue, send an email to security@splunk.com.
 
+## Building
+
+The receiver targets Java 11 and compiles with `options.release = 11`, so a Java 12+ API
+cannot be used by accident.
+
+The build runs on the Gradle wrapper (8.8), which supports JDKs up to 22. If your default
+JDK is newer, Gradle's own daemon cannot start and the build fails with
+`Unsupported class file major version NN` — which looks like a code error but is not. Point
+Gradle at a supported JDK rather than changing your system default:
+
+```bash
+./gradlew build -Dorg.gradle.java.home=/path/to/jdk17
+```
+
+or set it once in `~/.gradle/gradle.properties`:
+
+```properties
+org.gradle.java.home=/path/to/jdk17
+```
+
+CI builds with JDK 17. Any JDK from 11 to 22 works locally.
+
 ## Contributing via Pull Requests
 
 Contributions via Pull Requests (PRs) are much appreciated. Before sending us a

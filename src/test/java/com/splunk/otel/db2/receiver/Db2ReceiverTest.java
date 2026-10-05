@@ -211,4 +211,45 @@ class Db2ReceiverTest {
             .map(MetricData::getName)
             .collect(Collectors.toList());
     }
+
+    // The startup plan must name the config key responsible for every INACTIVE line, otherwise it
+    // does not answer the question it exists to answer.
+    @Test
+    void collectionPlanNamesTheKeyThatDisabledEachCollection() {
+        Db2ReceiverConfig cfg =
+            new Db2ReceiverConfig();
+        cfg.setHostname("h");
+        cfg.setDatabase("D");
+        cfg.getEvents().getDbServerQuerySample().setEnabled(false);
+        cfg.getEvents().getDbServerTopQuery().setEnabled(false);
+
+        String plan = Db2Receiver.buildCollectionPlan(cfg, "h:50000/D");
+
+        assertThat(plan).contains("events.db.server.query_sample.enabled=false");
+        assertThat(plan).contains("events.db.server.top_query.enabled=false");
+        // Blocking and EXPLAIN have no flags of their own; the plan must say what they depend on.
+        assertThat(plan).contains("blocking detection");
+        assertThat(plan).contains("requires events.db.server.query_sample.enabled=true");
+        assertThat(plan).contains("query plan (EXPLAIN)");
+    }
+
+    @Test
+    void collectionPlanReportsIntervalsWhenActive() {
+        Db2ReceiverConfig cfg =
+            new Db2ReceiverConfig();
+        cfg.setHostname("h");
+        cfg.setDatabase("D");
+        cfg.getEvents().getDbServerQuerySample().setEnabled(true);
+        cfg.getQuerySampleCollection().setCollectionInterval("15s");
+        cfg.getEvents().getDbServerTopQuery().setEnabled(true);
+        cfg.getTopQueryCollection().setMaxExplainEachInterval(5);
+
+        String plan = Db2Receiver.buildCollectionPlan(cfg, "h:50000/D");
+
+        assertThat(plan).contains("db.server.query_sample : ACTIVE");
+        assertThat(plan).contains("every 15s");
+        assertThat(plan).contains("db.server.top_query    : ACTIVE");
+        assertThat(plan).contains("max 5 EXPLAIN/cycle");
+    }
+
 }

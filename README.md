@@ -50,7 +50,7 @@ receivers:
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
       explain_schema: ""              # schema where explain tables live (default: USER)
     query_sample_collection:
-      collection_interval: "10s"      # how often to sample active queries
+      collection_interval: "10s"      # how often to sample active queries (minimum 5s)
       max_rows_per_query: 100         # max active sessions fetched per sample
     use_snapshot_monitor: false        # set true for the SNAP_GET_STMT query sample path,
                                        # and to add SNAP_GET_DB SQL activity metrics
@@ -282,7 +282,7 @@ Active log file numbers are identifiers rather than measurements and are not emi
 
 ## Query samples (log records)
 
-Active statements are sampled at `query_sample_collection.collection_interval` and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Active statements are sampled at `query_sample_collection.collection_interval` (minimum **5s**; values below that are rejected at startup) and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
 
@@ -300,7 +300,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `db2.member` | Db2 member number |
 | `db2.cpu_time` | CPU time in seconds (default path only; omitted on snapshot path) |
 | `db2.wait_time` | Lock wait time in seconds (Db2 10.5+ default path only) |
-| `db2.query_plan.hash` | Db2 EXECUTABLE_ID hex string identifying the active plan section; Db2 10.5+ default path only |
+| `db2.query_plan.hash` | Db2 EXECUTABLE_ID hex string identifying the active plan section. Requires the Db2 10.5+ default path **and** plan collection enabled (`events.db.server.top_query.enabled` with `top_query_collection.max_explain_each_interval > 0`) — otherwise nothing populates `db2.query_plan`, so the hash is suppressed rather than pointing at a plan that can never be resolved |
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
@@ -390,7 +390,7 @@ receivers:
       db.server.query_sample:
         enabled: true              # enables query sampling and blocking detection
     query_sample_collection:
-      collection_interval: "10s"  # controls poll cadence for both
+      collection_interval: "10s"  # controls poll cadence for both (minimum 5s)
 ```
 
 | Attribute | Description |

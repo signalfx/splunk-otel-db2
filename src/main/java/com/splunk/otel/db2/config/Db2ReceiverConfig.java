@@ -211,11 +211,20 @@ public class Db2ReceiverConfig {
     // --- query_sample_collection ---
 
     public static class QuerySampleCollectionConfig {
+        /** Floor on the sampling interval. Below this the monitor queries dominate the instance. */
+        static final long MIN_COLLECTION_INTERVAL_SECONDS = 5;
+
         private String collectionInterval = "10s";
         private int maxRowsPerQuery = 100;
 
         public Duration getCollectionIntervalDuration() {
-            return Db2ReceiverConfig.parseDuration(collectionInterval, 10);
+            Duration d = Db2ReceiverConfig.parseDuration(collectionInterval, 10);
+            if (d.getSeconds() < MIN_COLLECTION_INTERVAL_SECONDS) {
+                throw new IllegalArgumentException(
+                    "query_sample_collection.collection_interval must be at least "
+                        + MIN_COLLECTION_INTERVAL_SECONDS + "s, got '" + collectionInterval + "'");
+            }
+            return d;
         }
         public void setCollectionInterval(String v) { this.collectionInterval = v; }
 

@@ -89,11 +89,46 @@ public class QuerySampleQuery {
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN SYSIBMADM.MON_LOCKWAITS LW " +
+        // Guarantees at most one row per sampled session, so a blocked session can never be emitted
+        // twice at the same timestamp — which would inflate active-session counts and, because
+        // FETCH FIRST applies after the join, let duplicates consume the row budget real sessions
+        // need.
+        //
+        // Measured on 11.5.9.0: MON_LOCKWAITS returns one row per waiting request naming a single
+        // holder, even with three concurrent S-lock holders, so it does not multiply there. The
+        // dedup is therefore defensive, not a fix for observed duplication — it holds the invariant
+        // across the 9.7, 10.5+ and snapshot paths and across pureScale/DPF, rather than relying on
+        // MON_LOCKWAITS semantics being identical on all of them.
+        //
+        // Matched per application, not per member. MON_CURRENT_SQL aggregates activities across all
+        // members and reports only COORD_MEMBER, so requiring REQ_MEMBER = S.COORD_MEMBER dropped
+        // blocking data for any pureScale/DPF activity whose waiting agent sits on a non-coordinator
+        // member — the sample was still emitted, just silently without its lock wait. Collapsing at
+        // application scope matches the scope of the row this decorates. Longest wait wins, with
+        // REQ_MEMBER then HLD_APPLICATION_HANDLE as tie-breaks so the choice is stable across
+        // collections instead of flapping between equally-blocked members or holders.
+        "LEFT JOIN (SELECT REQ_APPLICATION_HANDLE, REQ_MEMBER, " +
+        "                  HLD_APPLICATION_HANDLE, HLD_MEMBER, LOCK_WAIT_ELAPSED_TIME, " +
+        "                  TABSCHEMA, TABNAME, LOCK_OBJECT_TYPE, LOCK_MODE_REQUESTED, " +
+        "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE " +
+        "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST, " +
+        "                                              REQ_MEMBER, " +
+        "                                              HLD_APPLICATION_HANDLE) AS RN " +
+        "           FROM SYSIBMADM.MON_LOCKWAITS) AS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
-        " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
+        " AND LW.RN = 1 " +
+        // Joined on APPLICATION_HANDLE alone, deliberately. The handle is system-wide unique in
+        // Db2, while LW.HLD_MEMBER is the member holding the lock and MON_CURRENT_SQL.COORD_MEMBER
+        // is the activity's coordinator — in a partitioned or pureScale instance those differ, so a
+        // member predicate here would silently drop valid distributed blockers.
+        // Deduplicated by handle because a connection can have more than one activity in
+        // MON_CURRENT_SQL, which would otherwise multiply the outer row just as MON_LOCKWAITS did.
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, STMT_TEXT, " +
+        "                  ROW_NUMBER() OVER (PARTITION BY APPLICATION_HANDLE " +
+        "                                     ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST) AS RN " +
+        "           FROM SYSIBMADM.MON_CURRENT_SQL) AS BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        " AND BLOCKER_SQL.RN = 1 " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2))) AS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
@@ -106,7 +141,10 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        "ORDER BY S.ELAPSED_TIME_SEC DESC " +
+        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
+        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
+        // row budget.
+        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Db2 10.5+ variant: also LEFT JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
@@ -145,15 +183,64 @@ public class QuerySampleQuery {
         "           FROM TABLE(MON_GET_CONNECTION(NULL, -2))) AS C " +
         "  ON C.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND C.MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A " +
+        // MON_GET_ACTIVITY(NULL, -2) returns a row per member, so a distributed activity yields
+        // several rows for one (handle, uow, activity) and would multiply the outer row — the same
+        // duplication the lock-wait join had, with the same cost: inflated session counts and
+        // duplicates eating the FETCH FIRST budget.
+        //
+        // Aggregated rather than picking one member's row, because db2.wait_time is documented as
+        // cumulative lock wait time: a 4s wait on one member and 6s on another is 10s of waiting,
+        // not 6s. Selecting the largest member would have under-reported every distributed wait.
+        // SUM(LOCK_WAIT_TIME) with MIN(EXECUTABLE_ID) is the collapse IBM's db2mon.sql uses; the
+        // members' rows describe the same section, so MIN is just a deterministic pick.
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID, " +
+        "                  SUM(LOCK_WAIT_TIME) AS LOCK_WAIT_TIME, " +
+        "                  MIN(EXECUTABLE_ID) AS EXECUTABLE_ID " +
+        "           FROM TABLE(MON_GET_ACTIVITY(NULL, -2)) " +
+        "           GROUP BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID) AS A " +
         "  ON A.APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
         " AND A.UOW_ID = S.UOW_ID " +
         " AND A.ACTIVITY_ID = S.ACTIVITY_ID " +
-        "LEFT JOIN SYSIBMADM.MON_LOCKWAITS LW " +
+        // Guarantees at most one row per sampled session, so a blocked session can never be emitted
+        // twice at the same timestamp — which would inflate active-session counts and, because
+        // FETCH FIRST applies after the join, let duplicates consume the row budget real sessions
+        // need.
+        //
+        // Measured on 11.5.9.0: MON_LOCKWAITS returns one row per waiting request naming a single
+        // holder, even with three concurrent S-lock holders, so it does not multiply there. The
+        // dedup is therefore defensive, not a fix for observed duplication — it holds the invariant
+        // across the 9.7, 10.5+ and snapshot paths and across pureScale/DPF, rather than relying on
+        // MON_LOCKWAITS semantics being identical on all of them.
+        //
+        // Matched per application, not per member. MON_CURRENT_SQL aggregates activities across all
+        // members and reports only COORD_MEMBER, so requiring REQ_MEMBER = S.COORD_MEMBER dropped
+        // blocking data for any pureScale/DPF activity whose waiting agent sits on a non-coordinator
+        // member — the sample was still emitted, just silently without its lock wait. Collapsing at
+        // application scope matches the scope of the row this decorates. Longest wait wins, with
+        // REQ_MEMBER then HLD_APPLICATION_HANDLE as tie-breaks so the choice is stable across
+        // collections instead of flapping between equally-blocked members or holders.
+        "LEFT JOIN (SELECT REQ_APPLICATION_HANDLE, REQ_MEMBER, " +
+        "                  HLD_APPLICATION_HANDLE, HLD_MEMBER, LOCK_WAIT_ELAPSED_TIME, " +
+        "                  TABSCHEMA, TABNAME, LOCK_OBJECT_TYPE, LOCK_MODE_REQUESTED, " +
+        "                  ROW_NUMBER() OVER (PARTITION BY REQ_APPLICATION_HANDLE " +
+        "                                     ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST, " +
+        "                                              REQ_MEMBER, " +
+        "                                              HLD_APPLICATION_HANDLE) AS RN " +
+        "           FROM SYSIBMADM.MON_LOCKWAITS) AS LW " +
         "  ON LW.REQ_APPLICATION_HANDLE = S.APPLICATION_HANDLE " +
-        " AND LW.REQ_MEMBER = S.COORD_MEMBER " +
-        "LEFT JOIN SYSIBMADM.MON_CURRENT_SQL BLOCKER_SQL " +
+        " AND LW.RN = 1 " +
+        // Joined on APPLICATION_HANDLE alone, deliberately. The handle is system-wide unique in
+        // Db2, while LW.HLD_MEMBER is the member holding the lock and MON_CURRENT_SQL.COORD_MEMBER
+        // is the activity's coordinator — in a partitioned or pureScale instance those differ, so a
+        // member predicate here would silently drop valid distributed blockers.
+        // Deduplicated by handle because a connection can have more than one activity in
+        // MON_CURRENT_SQL, which would otherwise multiply the outer row just as MON_LOCKWAITS did.
+        "LEFT JOIN (SELECT APPLICATION_HANDLE, STMT_TEXT, " +
+        "                  ROW_NUMBER() OVER (PARTITION BY APPLICATION_HANDLE " +
+        "                                     ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST) AS RN " +
+        "           FROM SYSIBMADM.MON_CURRENT_SQL) AS BLOCKER_SQL " +
         "  ON BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
+        " AND BLOCKER_SQL.RN = 1 " +
         "LEFT JOIN (SELECT APPLICATION_HANDLE, SESSION_AUTH_ID, CLIENT_WRKSTNNAME, MEMBER " +
         "           FROM TABLE(MON_GET_CONNECTION(CAST(NULL AS BIGINT), -2))) AS BLOCKER_CON " +
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
@@ -167,7 +254,10 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        "ORDER BY S.ELAPSED_TIME_SEC DESC " +
+        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
+        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
+        // row budget.
+        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Snapshot monitor fallback (Db2 9.7+). Blocking detection not available.
@@ -197,7 +287,7 @@ public class QuerySampleQuery {
         "  AND COALESCE(SA.APPL_NAME, '') <> 'splunk-otel-db2' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND COALESCE(SS.STMT_TEXT, S.TEXT, '') NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
-        "ORDER BY TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) DESC " +
+        "ORDER BY TIMESTAMPDIFF(2, CHAR(CURRENT TIMESTAMP - SS.STMT_START)) DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Idle-blocker plan-cache lookup: get the last SQL executed by a blocking session
@@ -222,6 +312,29 @@ public class QuerySampleQuery {
     private final int db2Version;
     private final int queryTimeoutSeconds;
 
+    /**
+     * Whether anything will actually populate {@code db2.query_plan}. When plan collection is off —
+     * which is the default, since {@code max_explain_each_interval} defaults to 0 — emitting
+     * {@code db2.query_plan.hash} advertises a plan that can never be resolved, so the hash is
+     * suppressed instead.
+     */
+    private final boolean planCollectionEnabled;
+
+    /**
+     * Cap on idle-blocker plan-cache lookups per collection, mirroring the explain path's budget.
+     * Each lookup scans MON_GET_PKG_CACHE_STMT on the sampling connection while the outer result
+     * set is still open, so an uncapped run could issue one per sampled row every interval.
+     */
+    static final int MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL = 10;
+
+    /**
+     * Idle blockers resolved in this collection, keyed by {@code member:handle}. A single holder
+     * commonly blocks many requestors, which would otherwise repeat the same lookup per blocked
+     * row. Cleared each collection so a blocker's statement is never reported from stale state.
+     */
+    private final java.util.Map<String, String> idleBlockerSqlCache = new java.util.HashMap<>();
+    private int idleBlockerLookupsThisInterval;
+
     public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
                             Logger otelLogger, int maxQuerySampleCount,
                             boolean useSnapshotMonitor) {
@@ -237,6 +350,14 @@ public class QuerySampleQuery {
     public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
                             Logger otelLogger, int maxQuerySampleCount,
                             boolean useSnapshotMonitor, int db2Version, int queryTimeoutSeconds) {
+        this(connSupplier, dbName, otelLogger, maxQuerySampleCount, useSnapshotMonitor, db2Version,
+            queryTimeoutSeconds, true);
+    }
+
+    public QuerySampleQuery(Supplier<Connection> connSupplier, String dbName,
+                            Logger otelLogger, int maxQuerySampleCount,
+                            boolean useSnapshotMonitor, int db2Version, int queryTimeoutSeconds,
+                            boolean planCollectionEnabled) {
         this.connSupplier         = connSupplier;
         this.dbName               = dbName;
         this.otelLogger           = otelLogger;
@@ -244,6 +365,7 @@ public class QuerySampleQuery {
         this.useSnapshotMonitor   = useSnapshotMonitor;
         this.db2Version           = db2Version;
         this.queryTimeoutSeconds  = queryTimeoutSeconds;
+        this.planCollectionEnabled = planCollectionEnabled;
         log.info("QuerySampleQuery: using {} path{}, timeout={}s{}",
             useSnapshotMonitor ? "SNAP_GET_*" : "MON_CURRENT_SQL",
             (!useSnapshotMonitor && db2Version >= DB2_VERSION_10_5) ? " with MON_GET_ACTIVITY (10.5+)" : "",
@@ -252,6 +374,11 @@ public class QuerySampleQuery {
     }
 
     public boolean collect() {
+        // Per-interval state: the cache must not carry a blocker's statement across collections,
+        // and the budget resets so a busy interval does not starve the next one.
+        idleBlockerSqlCache.clear();
+        idleBlockerLookupsThisInterval = 0;
+
         String sqlTemplate;
         if (useSnapshotMonitor) {
             sqlTemplate = SQL_SNAP;
@@ -289,7 +416,7 @@ public class QuerySampleQuery {
                         long cpuUs        = rs.getLong("CPU_US");
                         long waitMs       = useSnapshotMonitor ? -1L : rs.getLong("LOCK_WAIT_TIME_MS");
                         String execIdHex  = null;
-                        if (!useSnapshotMonitor) {
+                        if (!useSnapshotMonitor && planCollectionEnabled) {
                             byte[] execIdBytes = rs.getBytes("EXEC_ID_BYTES");
                             if (execIdBytes != null) execIdHex = bytesToHex(execIdBytes);
                         }
@@ -315,28 +442,42 @@ public class QuerySampleQuery {
                         // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
                         // HLD_APPLICATION_HANDLE is NULL (global lock or unidentified holder).
                         if (!useSnapshotMonitor && rs.getInt("IS_BLOCKED") == 1) {
-                            double waitSec = rs.getLong("BLOCKING_WAIT_SEC");
+                            // getLong turns SQL NULL into 0, and 0 clears waitDurationSeconds'
+                            // >= 0 guard — which would set the attribute, escalate the record to
+                            // WARN and report a zero-second lock wait that never happened.
+                            // wasNull must be read immediately after the getter.
+                            long waitSecRaw = rs.getLong("BLOCKING_WAIT_SEC");
+                            boolean haveWaitSec = !rs.wasNull();
 
                             String blockingStartTime = toRfc3339(rs.getString("BLOCKING_START_TIME"));
 
-                            ev.lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
+                            // IS_BLOCKED == 1 means a MON_LOCKWAITS row matched, so this session is
+                            // blocked whether or not the elapsed time came back NULL. Severity must
+                            // follow that fact, not the availability of the duration.
+                            ev.blocked(true)
+                              .lockObjectType(trim(rs.getString("LOCK_OBJECT_TYPE")))
                               .lockMode(trim(rs.getString("LOCK_MODE")))
                               .lockObjectName(trim(rs.getString("LOCK_OBJECT")))
                               .lockSchema(trim(rs.getString("LOCK_SCHEMA")))
-                              .blockingStartTime(blockingStartTime)
-                              .waitDurationSeconds(waitSec);
+                              .blockingStartTime(blockingStartTime);
+                            if (haveWaitSec) {
+                                ev.waitDurationSeconds(waitSecRaw);
+                            }
 
                             // Blocker identity is NULL for global lock waits or unknown holders.
                             Object blockerHandleObj = rs.getObject("BLOCKER_HANDLE");
                             if (blockerHandleObj != null) {
                                 long    blockerHandleLong = ((Number) blockerHandleObj).longValue();
-                                long    blockerMember     = rs.getLong("BLOCKER_MEMBER");
+                                // NULL would arrive as 0 — a real member number — instead of the
+                                // -2 "all members" sentinel the lookup expects.
+                                long    blockerMemberRaw  = rs.getLong("BLOCKER_MEMBER");
+                                long    blockerMember     = rs.wasNull() ? -2L : blockerMemberRaw;
                                 String  blockerRawSql = rs.getString("BLOCKER_SQL");
-                                // BLOCKER_IS_IDLE=1 when BLOCKER_SQL join returned no active
-                                // statement — but this is ambiguous: could be a genuinely idle
-                                // holder OR a cross-member miss after the member-qualified join.
-                                // Use the pkg cache lookup result to confirm: found = truly idle;
-                                // not found = unknown, omit is_idle rather than report false data.
+                                // BLOCKER_IS_IDLE=1 when the BLOCKER_SQL join returned no active
+                                // statement, which is ambiguous: a genuinely idle holder, or one
+                                // whose statement is not in MON_CURRENT_SQL at this instant. Use
+                                // the pkg cache lookup to disambiguate: found = truly idle; not
+                                // found = unknown, so omit is_idle rather than report false data.
                                 boolean mayBeIdle = rs.getInt("BLOCKER_IS_IDLE") == 1;
 
                                 String blockerObf = null;
@@ -351,7 +492,8 @@ public class QuerySampleQuery {
                                     isIdle = false;
                                 } else if (blockerObf == null) {
                                     // No active SQL — try pkg cache to confirm idleness
-                                    blockerObf = fetchIdleBlockerSql(conn, blockerHandleLong, blockerMember);
+                                    blockerObf = fetchIdleBlockerSqlBudgeted(
+                                        conn, blockerHandleLong, blockerMember);
                                     if (blockerObf != null) {
                                         isIdle = true; // pkg cache confirms: holder is idle
                                     }
@@ -377,6 +519,28 @@ public class QuerySampleQuery {
             log.warn("QuerySampleQuery collection failed: {}", e.getMessage(), e);
             return false;
         }
+    }
+
+    /**
+     * Resolves an idle blocker's last statement from the package cache, memoized per collection and
+     * capped at {@link #MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL}. Returns null when the budget is
+     * exhausted, which the caller treats the same as a cache miss: is_idle is omitted rather than
+     * guessed.
+     */
+    private String fetchIdleBlockerSqlBudgeted(Connection conn, long blockerHandle, long blockerMember) {
+        String key = blockerMember + ":" + blockerHandle;
+        if (idleBlockerSqlCache.containsKey(key)) {
+            return idleBlockerSqlCache.get(key);
+        }
+        if (idleBlockerLookupsThisInterval >= MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL) {
+            log.debug("QuerySampleQuery: idle blocker lookup budget ({}) exhausted this interval",
+                MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL);
+            return null;
+        }
+        idleBlockerLookupsThisInterval++;
+        String sql = fetchIdleBlockerSql(conn, blockerHandle, blockerMember);
+        idleBlockerSqlCache.put(key, sql);
+        return sql;
     }
 
     private String fetchIdleBlockerSql(Connection conn, long blockerHandle, long blockerMember) {
@@ -482,7 +646,13 @@ public class QuerySampleQuery {
         if (db2Timestamp == null) return null;
         // "2024-01-15-12.30.45.123456" → "2024-01-15T12:30:45.123456Z"
         String s = db2Timestamp.trim();
-        if (s.length() < 19) return s;
+        // Too short to carry a full date and time. Returning it unchanged produced a value that
+        // looked like a timestamp but had no trailing Z, which downstream requires to build the
+        // blocking-event key — so it broke event merging silently instead of failing. Omit it.
+        if (s.length() < 19) {
+            log.debug("QuerySampleQuery: ignoring unparseable Db2 timestamp '{}'", s);
+            return null;
+        }
         // Replace the date-time separator '-' (position 10) with 'T'
         // and the first two ':'-equivalent '.' separators in the time part
         char[] c = s.toCharArray();

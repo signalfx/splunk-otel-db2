@@ -4,7 +4,6 @@ import com.splunk.otel.db2.util.SqlObfuscator;
 import io.opentelemetry.api.logs.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.security.MessageDigest;
 import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -32,13 +31,18 @@ import java.util.function.Supplier;
  * (tiebreaker for sub-millisecond queries). Both keys are in their natural units
  * so the sort is always meaningful.
  *
- * Cache key: member + EXECUTABLE_ID uniquely identifies a plan-cache section.
+ * Plan cache key: EXECUTABLE_ID, which is treated as identifying a plan-cache section on its
+ * own. This deliberately matches the emitted db2.query_plan.hash, because that hash is the
+ * plan's object-storage key downstream — keying the cache by member while emitting a bare id
+ * would have the agent and the pipeline disagree about what identifies a plan.
  * Using raw SQL text as a key is incorrect because Db2 can hold multiple sections
  * with identical text for different compilation environments or packages.
  *
  * Baseline cache: bounded TTL map keyed by "member:executableId". Entries are
  * updated each cycle they appear and evicted after {@link #MAX_STALE_CYCLES}
- * consecutive absences.
+ * consecutive absences. This one stays member-qualified: it is internal delta state that is
+ * never emitted, so there is no downstream contract to agree with, and per-member deltas are
+ * the correct granularity for per-member execution counters.
  *
  * Cache-miss classification via INSERT_TIMESTAMP: on a cache miss, the section's
  * INSERT_TIMESTAMP is compared to lastServerScrapeInstant (Db2 CURRENT TIMESTAMP
@@ -89,7 +93,8 @@ public class TopQueryQuery {
     // is never stored or emitted.
     private static final int PLAN_MAX_BYTES = 100 * 1024;
 
-    // EXECUTABLE_ID uniquely identifies a plan-cache section (member + exec ID = unique key).
+    // EXECUTABLE_ID identifies a plan-cache section; it is treated as unique on its own, which
+    // is what lets the plan cache key match the emitted db2.query_plan.hash exactly.
     // NUM_EXECUTIONS: total executions (always populated); used for filter, db2.executions, and avg.
     //   NUM_EXEC_WITH_METRICS requires WLM activity monitoring and is 0 on most vanilla Db2
     //   installations, which would cause fast queries (STMT_EXEC_TIME=0) to be dropped.
@@ -139,7 +144,11 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_DB%%%%' " +
-        "  AND STMT_TEXT NOT LIKE '%%%%SYSDUMMY1%%%%' " +
+        // No SYSDUMMY1 filter. SELECT ... FROM SYSIBM.SYSDUMMY1 is everyday Db2 application code,
+        // so excluding it dropped legitimate customer top queries. It was also redundant: this
+        // receiver's only SYSDUMMY1 statement is the snapshot query sample, which the
+        // SNAP_GET_APPL_INFO and SNAP_GET_STMT filters above already exclude. Db2 LIKE is
+        // case-sensitive too, so an uppercase pattern would not have caught a lowercase occurrence.
         "ORDER BY STMT_EXEC_TIME DESC, NUM_EXECUTIONS DESC " +
         "FETCH FIRST %2$d ROWS ONLY";
 
@@ -249,7 +258,8 @@ public class TopQueryQuery {
     // The actual schema used is read back from the EXPLAIN_SCHEMA INOUT param after each call.
     private final String explainSchema;
 
-    // Client-side LRU plan cache. Key = "member:executableIdHex". Evicted by LRU + TTL.
+    // Client-side LRU plan cache. Key = executableIdHex, matching the emitted
+    // db2.query_plan.hash. Evicted by LRU + TTL.
     // Single-threaded scheduler — no synchronization needed.
     private final Map<String, PlanCacheEntry> planCache;
 
@@ -402,7 +412,15 @@ public class TopQueryQuery {
                         rs.getLong("SORT_OVERFLOWS")
                     };
                     curr.put(key, c);
-                    // execIdHex is only needed when plan collection is enabled
+                    // execIdHex is only needed when plan collection is enabled.
+                    //
+                    // The baseline key above uses getString while this uses hex(getBytes), which
+                    // looks like one column read two ways. Verified against JCC 11.5.9.0 that they
+                    // agree exactly: getString on this FOR BIT DATA column returns the hex of
+                    // getBytes (64 chars for 32 bytes) with no replacement or control characters, so
+                    // there is no lossy charset decode that could collide distinct sections. Both
+                    // forms are kept because each cache is internally consistent and the explain
+                    // path is specified in terms of the binary id.
                     String execIdHex = null;
                     if (planMaxPerInterval != null) {
                         byte[] execIdBytes = rs.getBytes("EXECUTABLE_ID");
@@ -561,7 +579,11 @@ public class TopQueryQuery {
             // returns SQLSTATE=55075. Skip static sections to avoid wasting budget.
             if (planMaxPerInterval != null && "D".equals(secType)) {
                 String execIdHex = t[4];
-                String cacheKey = member + ":" + execIdHex;
+                // Keyed by EXECUTABLE_ID alone, matching db2.query_plan.hash exactly. The hash is
+                // what downstream uses as the plan's object-storage key, so a member-qualified cache
+                // key would mean the agent and the rest of the pipeline disagreed about what
+                // identifies a plan — one cache entry per member, but a single object per id.
+                String cacheKey = execIdHex;
                 String planXml = null;
                 String planHash = null;
 
@@ -1028,17 +1050,6 @@ public class TopQueryQuery {
             || sqlState.startsWith("42601") || sqlState.startsWith("42S02");
     }
 
-    public static String sha256Hex(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception e) {
-            return "unknown";
-        }
-    }
 
     // Escapes a string value for embedding inside a JSON string literal.
     // Covers the characters required by RFC 8259 §7: backslash, double-quote,
@@ -1057,11 +1068,6 @@ public class TopQueryQuery {
         return sb.toString();
     }
 
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) sb.append(String.format("%02x", b));
-        return sb.toString();
-    }
 
     static byte[] hexToBytes(String hex) {
         if (hex == null || hex.length() % 2 != 0) return null;
@@ -1075,5 +1081,11 @@ public class TopQueryQuery {
             return null;
         }
         return data;
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
     }
 }

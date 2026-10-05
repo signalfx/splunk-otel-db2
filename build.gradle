@@ -12,6 +12,21 @@ java {
     targetCompatibility = JavaVersion.VERSION_11
 }
 
+tasks.withType(JavaCompile).configureEach {
+    // release, not just source/target: source/target produce Java 11 bytecode but still compile
+    // against the running JDK's class library, so a Java 12+ method can slip in and fail at runtime
+    // on the Java 11 the receiver advertises. release pins the API surface too.
+    //
+    // Deliberately no java.toolchain pin here. It would force a specific JDK to be present and, with
+    // no provisioning resolver configured, breaks the build outright on a machine that has only the
+    // Java 11 this project supports. It also would not fix the problem it looked like it fixed: when
+    // the default JDK is newer than Gradle 8.8 supports, Gradle's own daemon cannot start, which is
+    // what produces "Unsupported class file major version" — a toolchain is declared too late to
+    // help. The remedy there is to point Gradle at a supported JDK (org.gradle.java.home or
+    // JAVA_HOME), which CONTRIBUTING documents.
+    options.release = 11
+}
+
 application {
     mainClass = 'com.splunk.otel.db2.Main'
 }

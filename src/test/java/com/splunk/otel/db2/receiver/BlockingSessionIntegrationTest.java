@@ -114,7 +114,7 @@ class BlockingSessionIntegrationTest {
         config.setDatabase(db2.getDatabaseName().toUpperCase());
         config.setCollectionInterval("2s");
         config.getEvents().getDbServerQuerySample().setEnabled(true);
-        config.getQuerySampleCollection().setCollectionInterval("2s");
+        config.getQuerySampleCollection().setCollectionInterval("5s");
         config.getTls().setInsecure(true);
         return config;
     }
@@ -296,15 +296,77 @@ class BlockingSessionIntegrationTest {
 
     @Test
     void noBlockingAttributesWhenNothingIsBlocked() throws Exception {
-        // No lock contention — all query_sample records should lack blocking attributes
+        // Sleeping and asserting zero blocking events proves nothing: if no samples were collected
+        // at all, the assertion passes vacuously — which is what happened when the interval was
+        // raised. So drive a query that must be sampled, wait for it to actually appear, and only
+        // then assert that nothing in the sample carries blocking attributes.
+        //
+        // The query is a deliberately slow read against a table nothing else writes, so it is long
+        // enough to catch yet takes no conflicting lock.
+        Connection ddl = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
+        try (Statement st = ddl.createStatement()) {
+            try { st.execute("DROP TABLE SPLUNK_OTEL_NOBLOCK_TEST"); } catch (Exception ignored) { }
+            st.execute("CREATE TABLE SPLUNK_OTEL_NOBLOCK_TEST (ID INT NOT NULL PRIMARY KEY)");
+            for (int i = 1; i <= 200; i++) {
+                st.execute("INSERT INTO SPLUNK_OTEL_NOBLOCK_TEST VALUES (" + i + ")");
+            }
+        }
+        ddl.close();
+
         receiver = buildReceiver(buildConfig());
         receiver.start();
 
-        Thread.sleep(8000); // 3+ collection cycles
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Connection busyConn = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
+        Statement busyStmt = busyConn.createStatement();
+        Future<?> busy = exec.submit(() -> {
+            try {
+                // Three-way self join over 200 rows: slow enough to be in MON_CURRENT_SQL across
+                // several polls, and read-only so it cannot block or be blocked.
+                for (int i = 0; i < 40; i++) {
+                    busyStmt.executeQuery(
+                        "SELECT COUNT(*) FROM SPLUNK_OTEL_NOBLOCK_TEST a, SPLUNK_OTEL_NOBLOCK_TEST b, "
+                            + "SPLUNK_OTEL_NOBLOCK_TEST c WHERE MOD(a.ID + b.ID + c.ID, 7) > 2")
+                        .close();
+                }
+            } catch (Exception ignored) {
+                // cancelled during teardown
+            }
+        });
 
-        long blockingEvents = logExporter.getFinishedLogRecordItems().stream()
-            .filter(r -> r.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE) != null)
-            .count();
-        assertThat(blockingEvents).isZero();
+        try {
+            // The real assertion's precondition: sampling is demonstrably working.
+            Awaitility.await()
+                .atMost(60, TimeUnit.SECONDS)
+                .pollInterval(1, TimeUnit.SECONDS)
+                .until(() -> logExporter.getFinishedLogRecordItems().stream()
+                    .anyMatch(r -> {
+                        String t = r.getAttributes().get(QuerySampleEvent.DB_QUERY_TEXT);
+                        return t != null && t.toUpperCase().contains("SPLUNK_OTEL_NOBLOCK_TEST");
+                    }));
+
+            List<LogRecordData> samples = logExporter.getFinishedLogRecordItems();
+            assertThat(samples).isNotEmpty();
+
+            long blockingEvents = samples.stream()
+                .filter(r -> r.getAttributes().get(QuerySampleEvent.DB2_BLOCKER_APP_HANDLE) != null)
+                .count();
+            assertThat(blockingEvents).isZero();
+
+            // Nothing is blocked, so no record should have been escalated either.
+            assertThat(samples).allSatisfy(
+                r -> assertThat(r.getSeverity()).isEqualTo(Severity.INFO));
+        } finally {
+            busyStmt.cancel();
+            busy.cancel(true);
+            exec.shutdownNow();
+            busyConn.close();
+            Connection cleanup = DriverManager.getConnection(db2.getJdbcUrl(), jdbcProps);
+            try (Statement st = cleanup.createStatement()) {
+                st.execute("DROP TABLE SPLUNK_OTEL_NOBLOCK_TEST");
+            } finally {
+                cleanup.close();
+            }
+        }
     }
 }
