@@ -13,6 +13,17 @@ concurrency:
 
 on:
   workflow_dispatch:
+    inputs:
+      chart_repo_owner:
+        description: >-
+          Owner of the repository hosting the chart index. Override to rehearse the publish
+          path against a scratch public repository.
+        required: false
+        default: signalfx
+      chart_repo_name:
+        description: Repository hosting the chart index (gh-pages branch).
+        required: false
+        default: splunk-otel-db2
   push:
     branches:
       - main
@@ -28,6 +39,10 @@ permissions:
 env:
   # Must match the image used by the Db2Container instances in src/test/java.
   DB2_TEST_IMAGE: icr.io/db2_community/db2:11.5.9.0
+  # Publish target. Defaulted rather than hardcoded so the release path can be rehearsed
+  # against a scratch public repository before it is trusted against the real one.
+  CHART_REPO_OWNER: ${{ inputs.chart_repo_owner || 'signalfx' }}
+  CHART_REPO_NAME: ${{ inputs.chart_repo_name || 'splunk-otel-db2' }}
 
 jobs:
   build:
@@ -341,7 +356,7 @@ jobs:
           test -f ".cr-release-packages/splunk-otel-db2-${VERSION}.tgz"
 
           cr upload \
-            --owner signalfx --git-repo splunk-otel-db2 \
+            --owner "$CHART_REPO_OWNER" --git-repo "$CHART_REPO_NAME" \
             --token "$CR_TOKEN" \
             --package-path .cr-release-packages \
             --skip-existing
@@ -349,7 +364,7 @@ jobs:
           # No --charts-repo: cr 1.7.0 does not accept it and points index entries at the
           # GitHub release assets cr upload just created, which is what we want.
           cr index \
-            --owner signalfx --git-repo splunk-otel-db2 \
+            --owner "$CHART_REPO_OWNER" --git-repo "$CHART_REPO_NAME" \
             --token "$CR_TOKEN" \
             --package-path .cr-release-packages \
             --index-path .cr-index/index.yaml \
@@ -358,11 +373,12 @@ jobs:
       - name: Verify the version is now on the index
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
         run: |
           # Guards against a publish path that exits 0 without publishing. Pages needs a
           # moment to serve the new commit, so poll rather than check once.
           for attempt in $(seq 1 10); do
-            if curl -sS --max-time 20 https://signalfx.github.io/splunk-otel-db2/index.yaml \
+            if curl -sS --max-time 20 "$INDEX_URL" \
                  | yq e ".entries[\"splunk-otel-db2\"][].version" - 2>/dev/null \
                  | grep -qx "$VERSION"; then
               echo "index.yaml now lists $VERSION"

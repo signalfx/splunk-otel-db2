@@ -18,7 +18,11 @@ set -uo pipefail
 
 readonly CHART_FILE="${CHART_FILE:-packaging/helm/Chart.yaml}"
 readonly CHART_NAME="${CHART_NAME:-splunk-otel-db2}"
-readonly INDEX_URL="${INDEX_URL:-https://signalfx.github.io/splunk-otel-db2/index.yaml}"
+# Owner and repo are overridable so the whole publish path can be rehearsed against a
+# scratch public repository before it runs against the real one.
+readonly CHART_REPO_OWNER="${CHART_REPO_OWNER:-signalfx}"
+readonly CHART_REPO_NAME="${CHART_REPO_NAME:-splunk-otel-db2}"
+readonly INDEX_URL="${INDEX_URL:-https://${CHART_REPO_OWNER}.github.io/${CHART_REPO_NAME}/index.yaml}"
 
 die() {
   echo "::error::$*" >&2
@@ -44,8 +48,10 @@ readonly FLOOR_PATCH="${BASH_REMATCH[3]}"
 # collide with whatever is already released.
 index=$(mktemp)
 trap 'rm -f "$index"' EXIT
-http_code=$(curl -sS --max-time 30 -o "$index" -w '%{http_code}' "$INDEX_URL" 2>/dev/null)
+curl_out=$(curl -sS --max-time 30 -o "$index" -w '%{http_code} %{redirect_url}' "$INDEX_URL" 2>/dev/null)
 curl_status=$?
+http_code=${curl_out%% *}
+redirect=${curl_out#* }
 
 if [ "$curl_status" -ne 0 ]; then
   die "could not reach $INDEX_URL (curl exit $curl_status); refusing to guess a version"
@@ -63,6 +69,17 @@ case "$http_code" in
   404)
     echo "No index at $INDEX_URL yet; treating $floor as the first release" >&2
     published=""
+    ;;
+  30[1278])
+    # GitHub serves Pages for a private or internal repository from a generated
+    # *.pages.github.io host behind authentication, and redirects the canonical
+    # <owner>.github.io/<repo> path there. Following the redirect does not help: the
+    # destination requires a login, so no anonymous consumer can read the index either.
+    die "$INDEX_URL redirected to ${redirect:-an unknown location}.
+A redirect to a *.pages.github.io host means the repository is private or internal, so the
+chart index is not anonymously reachable and neither Helm nor a dependent chart can fetch
+it. The repository must be public for the canonical URL to serve. Refusing to guess a
+version."
     ;;
   *)
     die "unexpected HTTP $http_code from $INDEX_URL; refusing to guess a version"
