@@ -275,6 +275,21 @@ jobs:
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
+      - name: Require the gh-pages branch
+        run: |
+          # cr index --push runs `git worktree add --detach <dir> origin/gh-pages` and does
+          # not create the branch; a missing ref fails with "invalid reference". Checking
+          # first keeps that failure out of the middle of the transaction, where cr upload
+          # would already have created a GitHub release with no matching index entry.
+          if ! git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
+            echo "::error::The gh-pages branch does not exist, so the chart index cannot be" \
+                 "published. Create it once with:" \
+                 "git switch --orphan gh-pages && git commit --allow-empty -m 'Initialize gh-pages'" \
+                 "&& git push -u origin gh-pages — then enable GitHub Pages on that branch."
+            exit 1
+          fi
+          echo "origin/gh-pages present at $(git rev-parse --short origin/gh-pages)"
+
       - name: Set up Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
 
