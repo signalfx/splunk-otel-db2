@@ -86,7 +86,19 @@ receivers:
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────
 otlp:
-  endpoint: "http://otel-collector:4317"
+  # Leave empty to derive the endpoint from the parent release when this chart is installed
+  # as a dependency of splunk-otel-collector. Required when installing standalone, where the
+  # collector Service name cannot be known.
+  endpoint: ""
+  # Which collector Service to derive the endpoint from: "agent" or "gateway".
+  # Ignored when `endpoint` is set, and overridden to "gateway" if the parent chart passes
+  # `global.gateway.enabled: true`.
+  #
+  # "agent" targets <release>-splunk-otel-collector-agent, which is always deployed upstream
+  # but is internalTrafficPolicy: Local — it only reaches an agent Pod on this Pod's own Node.
+  # "gateway" targets <release>-splunk-otel-collector, which is cluster-wide routable but is
+  # only deployed when the parent sets gateway.enabled.
+  collectorTarget: "agent"
   headers: {}
   compression: ""
   tls:

@@ -7,6 +7,7 @@ A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and active que
 - Java 11+
 - IBM Db2 9.7+ (current metric scrapers require 10.5+; 9.7–10.1 support planned via snapshot monitor fallback; integration-tested against 11.5)
 - Docker (for integration tests)
+- Helm 3.12+ (for the Helm chart; it uses `.Chart.IsRoot` to tell a standalone install from a subchart)
 
 ## Quick start
 
@@ -652,8 +653,14 @@ otlp:
 ```
 
 ```bash
-helm install my-db2 packaging/helm -f my-values.yaml
+helm repo add splunk-otel-db2 https://signalfx.github.io/splunk-otel-db2
+helm repo update splunk-otel-db2
+helm install my-db2 splunk-otel-db2/splunk-otel-db2 -f my-values.yaml
 ```
+
+To install from a checkout instead, point at the chart directory: `helm install my-db2 packaging/helm -f my-values.yaml`.
+
+`otlp.endpoint` is required for a standalone install. The chart can only derive an endpoint when it runs as a dependency of `splunk-otel-collector`, so rendering without one fails with a message saying so rather than defaulting to a name that does not resolve.
 
 **OTel Collector outside the cluster** (external host or IP):
 
@@ -700,6 +707,47 @@ receivers:
 imagePullSecrets:
   - name: ghcr-credentials
 ```
+
+### As a splunk-otel-collector subchart
+
+The chart can be installed as a dependency of [splunk-otel-collector-chart](https://github.com/signalfx/splunk-otel-collector-chart), so one release deploys both the collector and the Db2 receiver. Add to that chart's `Chart.yaml`:
+
+```yaml
+  - name: splunk-otel-db2
+    version: 0.1.0
+    alias: db2
+    repository: https://signalfx.github.io/splunk-otel-db2
+    condition: db2.enabled
+```
+
+The alias must stay lowercase and hyphen-free — that chart uppercases aliases into resource names and hyphens break its template rendering.
+
+Values then nest under the alias, and `otlp.endpoint` can be omitted:
+
+```yaml
+db2:
+  enabled: true
+  receivers:
+    - name: default
+      hostname: "db2.example.com"
+      port: 50000
+      database: "PROD"
+      collectionInterval: "30s"
+      credentialsSecret: "my-db2-credentials"
+      tls:
+        insecure: true
+```
+
+**How the endpoint is chosen.** With `otlp.endpoint` empty, the chart derives it from the parent release name:
+
+| `otlp.collectorTarget` | Service | Reachability |
+| --- | --- | --- |
+| `agent` (default) | `<release>-splunk-otel-collector-agent` | `internalTrafficPolicy: Local` — only an agent Pod on this Pod's own Node |
+| `gateway` | `<release>-splunk-otel-collector` | cluster-wide |
+
+The agent is the default because the agent DaemonSet is always deployed upstream while the gateway is opt-in. The tradeoff is that `Local` traffic policy means exports blackhole if this Pod's Node has no healthy agent, so prefer `collectorTarget: gateway` wherever the gateway is enabled.
+
+Setting `gateway.enabled: true` on the parent does **not** switch the target on its own. Helm exposes parent values to a subchart only through `global`, so a top-level `gateway.enabled` is invisible here. Either set `db2.otlp.collectorTarget: gateway`, or have the parent pass `global.gateway.enabled: true`.
 
 ### Docker
 
@@ -808,6 +856,40 @@ The receiver sets the following OTel resource attributes on all telemetry. Any a
 | `server.port` | configured port (integer) |
 | `db.system.name` | `ibm.db2` |
 | `db.namespace` | configured database name |
+
+## Releases
+
+Every merge to `main` publishes a chart and a matching image. The chart goes to the gh-pages Helm repo at `https://signalfx.github.io/splunk-otel-db2`; the image goes to `ghcr.io/signalfx/splunk-otel-db2`.
+
+**The patch number is derived, not stored.** `version` in [packaging/helm/Chart.yaml](packaging/helm/Chart.yaml) is a *floor* that pins only major and minor. On each main merge, [next-version.sh](.github/scripts/next-version.sh) reads the published `index.yaml`, finds the highest patch already released in that major.minor series, and publishes the next one:
+
+```
+floor 0.1.0, nothing published yet   ->  0.1.0
+floor 0.1.0, 0.1.0 published         ->  0.1.1
+floor 0.1.0, 0.1.7 published         ->  0.1.8
+```
+
+Deriving it keeps CI from committing a version bump back to `main`, which would retrigger the release and loop. Preview what the next merge would publish:
+
+```bash
+make next-version
+```
+
+**To release a minor or major**, edit the floor in `Chart.yaml` — set it to `0.2.0` and the next merge publishes exactly that, then `0.2.1`, `0.2.2`, and so on. A floor *ahead* of what is published is rejected, because chart-releaser refuses to overwrite a release and its own error does not explain why.
+
+The chart's `version` and `appVersion` are always the same value, and CI verifies the image for that `appVersion` exists before releasing the chart — a chart pointing at an image tag that was never pushed fails at install time, not at release time.
+
+Pushing a `v<x>.<y>.<z>` tag overrides the derivation and publishes that exact version, which is the escape hatch for re-releasing a specific commit.
+
+### One-time setup
+
+The gh-pages Helm repo needs its branch to exist before the first release; chart-releaser will not create it:
+
+```bash
+git switch --orphan gh-pages && git commit --allow-empty -m "Initialize gh-pages" && git push -u origin gh-pages
+```
+
+Then enable GitHub Pages for the repository, serving from the `gh-pages` branch root.
 
 ## License
 

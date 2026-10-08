@@ -80,6 +80,9 @@ jobs:
       - name: Lint Helm chart
         run: helm lint packaging/helm
 
+      - name: Check rendered output
+        run: .github/scripts/helm-render-checks.sh
+
   integration-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -150,6 +153,33 @@ jobs:
           name: integration-test-snapshot-report
           path: build/reports/tests/integrationTestSnapshot/
 
+  version:
+    # Resolve the single version used by both the image tags and the chart, so an
+    # appVersion can never point at an image tag that was never pushed.
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+       startsWith(github.ref, 'refs/heads/v') ||
+       startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: resolve
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # An explicit tag is a deliberate override; honour it verbatim rather than
+            # deriving, so re-tagging a commit publishes the version that was asked for.
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            .github/scripts/next-version.sh
+          fi
+
   publish-image:
     # Publish to ghcr.io on merges to main/version branches and semver tags only
     if: >-
@@ -157,7 +187,7 @@ jobs:
       (github.ref == 'refs/heads/main' ||
        startsWith(github.ref, 'refs/heads/v') ||
        startsWith(github.ref, 'refs/tags/v'))
-    needs: [build, docker-build, helm-lint, integration-test, integration-test-snapshot]
+    needs: [version, build, docker-build, helm-lint, integration-test, integration-test-snapshot]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -180,12 +210,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Stamp jar version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # The jar version is baked into the image at build time, so it has to be stamped
+          # before the build rather than committed back to the branch.
+          sed -i "s/^version = '.*'$/version = '${VERSION}'/" build.gradle
+          grep -q "^version = '${VERSION}'$" build.gradle
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
           images: ghcr.io/signalfx/splunk-otel-db2
           tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -203,3 +243,63 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-chart:
+    # Only main publishes charts. Version branches and tags still publish images, but a
+    # chart released off a side branch would land a version in the index that main would
+    # then try to reuse.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [version, publish-image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # chart-releaser needs the full history to tell which tags already exist.
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+
+      - name: Stage chart with resolved version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # chart-releaser discovers charts as <charts_dir>/<name>/Chart.yaml, but this
+          # chart lives directly at packaging/helm. Stage a correctly shaped copy instead
+          # of moving the chart and breaking every documented path.
+          mkdir -p .cr-staging
+          cp -r packaging/helm .cr-staging/splunk-otel-db2
+          cd .cr-staging/splunk-otel-db2
+          VERSION="$VERSION" yq e -i '.version = strenv(VERSION)' Chart.yaml
+          VERSION="$VERSION" yq e -i '.appVersion = strenv(VERSION)' Chart.yaml
+          yq e '{"version": .version, "appVersion": .appVersion}' Chart.yaml
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the chart's appVersion image exists
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # publish-image ran first, so this is a guard against the two drifting apart
+          # rather than a race. A chart whose appVersion has no image fails at install.
+          docker manifest inspect "ghcr.io/signalfx/splunk-otel-db2:${VERSION}" >/dev/null
+
+      - name: Release chart to gh-pages
+        uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
+        with:
+          charts_dir: .cr-staging
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

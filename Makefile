@@ -1,4 +1,4 @@
-.PHONY: build test integration-test run jar clean docker-build docker-push helm-lint help
+.PHONY: build test integration-test run jar clean docker-build docker-push helm-lint next-version help
 
 IMAGE_REPO ?= ghcr.io/signalfx/splunk-otel-db2
 IMAGE_TAG  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -30,6 +30,10 @@ docker-push:
 
 helm-lint:
 	helm lint packaging/helm
+	.github/scripts/helm-render-checks.sh
+
+next-version:
+	@.github/scripts/next-version.sh
 
 help:
 	@echo "Available targets:"
@@ -41,4 +45,5 @@ help:
 	@echo "  clean             - Clean build outputs"
 	@echo "  docker-build      - Build Docker image (IMAGE_REPO, IMAGE_TAG overridable)"
 	@echo "  docker-push       - Push Docker image to registry"
-	@echo "  helm-lint         - Lint the Helm chart"
+	@echo "  helm-lint         - Lint the Helm chart and check its rendered output"
+	@echo "  next-version      - Print the version the next main merge would publish"
