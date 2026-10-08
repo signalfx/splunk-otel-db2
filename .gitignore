@@ -5,5 +5,5 @@ build/
 out/
 buildSrc/.gradle/
 buildSrc/build/
-.cr-staging/
 .cr-release-packages/
+.cr-index/

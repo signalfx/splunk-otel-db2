@@ -722,6 +722,13 @@ The chart can be installed as a dependency of [splunk-otel-collector-chart](http
 
 The alias must stay lowercase and hyphen-free — that chart uppercases aliases into resource names and hyphens break its template rendering.
 
+Two further changes are required in that chart, and skipping either breaks it for **every** user of it, not just those enabling this receiver:
+
+1. `values.yaml` must set `db2.enabled: false`. Helm ignores a `condition` whose values path does not resolve and installs the subchart anyway, so omitting the key deploys a Db2 receiver into every existing install on upgrade.
+2. `values.schema.json` must declare a `db2` property. That schema sets `additionalProperties: false` at the top level, so an undeclared key makes the chart fail to render at its defaults with `additional properties 'db2' not allowed`.
+
+Both are handled in [signalfx/splunk-otel-collector-chart#2641](https://github.com/signalfx/splunk-otel-collector-chart/pull/2641).
+
 Values then nest under the alias, and `otlp.endpoint` can be omitted:
 
 ```yaml
@@ -748,6 +755,10 @@ db2:
 The agent is the default because the agent DaemonSet is always deployed upstream while the gateway is opt-in. The tradeoff is that `Local` traffic policy means exports blackhole if this Pod's Node has no healthy agent, so prefer `collectorTarget: gateway` wherever the gateway is enabled.
 
 Setting `gateway.enabled: true` on the parent does **not** switch the target on its own. Helm exposes parent values to a subchart only through `global`, so a top-level `gateway.enabled` is invisible here. Either set `db2.otlp.collectorTarget: gateway`, or have the parent pass `global.gateway.enabled: true`.
+
+The derived name reproduces the collector chart's own `fullname` helper, including the rule that the chart-name suffix is dropped when the release name already contains it — release `my-splunk-otel-collector` resolves to `my-splunk-otel-collector-agent`, not `my-splunk-otel-collector-splunk-otel-collector-agent`.
+
+**Set `db2.otlp.endpoint` explicitly if the parent release uses `fullnameOverride` or `nameOverride`.** Those keys live at the parent's top level, which `global` does not expose, so derivation cannot see them and would resolve to a Service that does not exist.
 
 ### Docker
 

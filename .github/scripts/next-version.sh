@@ -53,8 +53,12 @@ fi
 
 case "$http_code" in
   200)
-    published=$(yq e ".entries[\"${CHART_NAME}\"][].version // \"\"" "$index" 2>/dev/null \
-      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+    # A parse failure must be fatal. Treating malformed YAML as "nothing published" would
+    # select the floor and overwrite a release that already exists.
+    if ! parsed=$(yq e ".entries[\"${CHART_NAME}\"][].version // \"\"" "$index" 2>&1); then
+      die "could not parse $INDEX_URL as a Helm repository index: $parsed"
+    fi
+    published=$(printf '%s\n' "$parsed" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
     ;;
   404)
     echo "No index at $INDEX_URL yet; treating $floor as the first release" >&2

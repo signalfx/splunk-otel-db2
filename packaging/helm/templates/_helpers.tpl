@@ -79,13 +79,36 @@ agent. Prefer the gateway when it is deployed.
 {{- if dig "gateway" "enabled" false (.Values.global | default dict) -}}
 {{- $target = "gateway" -}}
 {{- end -}}
+{{- $fullname := include "splunk-otel-db2.collectorFullname" . -}}
 {{- if eq $target "gateway" -}}
-http://{{ .Release.Name }}-splunk-otel-collector:4317
+http://{{ $fullname }}:4317
 {{- else if eq $target "agent" -}}
-http://{{ .Release.Name }}-splunk-otel-collector-agent:4317
+http://{{ $fullname }}-agent:4317
 {{- else -}}
 {{- fail (printf "otlp.collectorTarget must be \"agent\" or \"gateway\", got %q" $target) -}}
 {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Reproduce splunk-otel-collector.fullname so derived Service names match the parent's.
+
+That helper collapses the chart-name suffix when the release name already contains it, so
+release "my-splunk-otel-collector" yields "my-splunk-otel-collector", not
+"my-splunk-otel-collector-splunk-otel-collector". Appending the suffix unconditionally
+produces a Service name that does not exist — and "my-splunk-otel-collector" is the release
+name in the collector chart's own documented install command.
+
+This cannot honour the parent's fullnameOverride or nameOverride, because Helm exposes
+parent values to a subchart only through `global` and those keys live at the parent's top
+level. A release using either must set otlp.endpoint explicitly.
+*/}}
+{{- define "splunk-otel-db2.collectorFullname" -}}
+{{- $name := "splunk-otel-collector" -}}
+{{- if contains $name .Release.Name -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
 

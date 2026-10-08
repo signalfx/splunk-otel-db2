@@ -119,7 +119,23 @@ else
     || fail "rejected, but not for collectorTarget; got: $out"
 fi
 
-echo "7. an explicit endpoint still wins as a subchart"
+echo "7. the derived name collapses when the release name contains the chart name"
+# The collector's fullname helper does not append the chart-name suffix when the release
+# name already contains it. These release names are the regression that an arbitrary name
+# like "testrel" cannot catch, and "my-splunk-otel-collector" is the one in the collector
+# chart's own documented install command.
+for rel in my-splunk-otel-collector splunk-otel-collector splunk-otel-collector-prod; do
+  if out=$(helm template "$rel" "$PARENT" -f "$SUB_VALUES" 2>&1); then
+    got=$(printf '%s' "$out" | endpoint_of)
+    [ "$got" = "http://${rel}-agent:4317" ] \
+      && pass "release '$rel' derived $got" \
+      || fail "release '$rel': expected http://${rel}-agent:4317, got '$got'"
+  else
+    fail "release '$rel' render failed: $out"
+  fi
+done
+
+echo "8. an explicit endpoint still wins as a subchart"
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.endpoint=http://explicit:4317' 2>&1); then
   got=$(printf '%s' "$out" | endpoint_of)
