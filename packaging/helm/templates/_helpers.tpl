@@ -65,9 +65,20 @@ its top level is invisible here. Honour `global.gateway.enabled` when the parent
 pass it down, and otherwise fall back to this chart's own otlp.collectorTarget.
 
 The agent Service is `internalTrafficPolicy: Local`, so it only resolves to an agent Pod on
-the same Node. That is the default because the agent DaemonSet is always enabled upstream
-while the gateway is not, but it means exports blackhole if this Pod's Node has no healthy
-agent. Prefer the gateway when it is deployed.
+the same Node. That is the default because the agent DaemonSet is enabled upstream by
+default while the gateway is not, but it means exports blackhole if this Pod's Node has no
+healthy agent. Prefer the gateway when it is deployed.
+
+The agent Service is also not always rendered: the parent gates it on
+`agent.service.enabled`, and never creates it on EKS Fargate, which cannot run DaemonSets.
+Those configurations need `otlp.collectorTarget: gateway` or an explicit otlp.endpoint,
+and cannot be detected from here because the gating values are parent top-level values.
+
+Addresses are emitted as cluster FQDNs rather than short names so they do not depend on the
+Pod's resolv.conf search order and can cross namespaces. The namespace defaults to this
+release's, which is wrong when the parent sets namespaceOverride — another top-level value
+invisible here — so otlp.collectorNamespace exists to correct it without having to write
+out the whole endpoint.
 */}}
 {{- define "splunk-otel-db2.otlpEndpoint" -}}
 {{- if .Values.otlp.endpoint -}}
@@ -80,10 +91,11 @@ agent. Prefer the gateway when it is deployed.
 {{- $target = "gateway" -}}
 {{- end -}}
 {{- $fullname := include "splunk-otel-db2.collectorFullname" . -}}
+{{- $ns := .Values.otlp.collectorNamespace | default .Release.Namespace -}}
 {{- if eq $target "gateway" -}}
-http://{{ $fullname }}:4317
+http://{{ $fullname }}.{{ $ns }}.svc.cluster.local:4317
 {{- else if eq $target "agent" -}}
-http://{{ $fullname }}-agent:4317
+http://{{ $fullname }}-agent.{{ $ns }}.svc.cluster.local:4317
 {{- else -}}
 {{- fail (printf "otlp.collectorTarget must be \"agent\" or \"gateway\", got %q" $target) -}}
 {{- end -}}

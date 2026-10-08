@@ -758,6 +758,10 @@ Setting `gateway.enabled: true` on the parent does **not** switch the target on 
 
 The derived name reproduces the collector chart's own `fullname` helper, including the rule that the chart-name suffix is dropped when the release name already contains it — release `my-splunk-otel-collector` resolves to `my-splunk-otel-collector-agent`, not `my-splunk-otel-collector-splunk-otel-collector-agent`.
 
+Endpoints are emitted as cluster FQDNs (`<service>.<namespace>.svc.cluster.local`) so they do not depend on the Pod's DNS search order. The namespace defaults to the release's; set `db2.otlp.collectorNamespace` when the parent uses `namespaceOverride`, which relocates those Services.
+
+**The agent Service is not always deployed.** The parent omits it when `agent.service.enabled` is `false`, and never creates it on EKS Fargate, which cannot run DaemonSets — the `distribution-eks-fargate` example renders a gateway `service.yaml` and no `service-agent.yaml`. In those configurations the default target resolves to nothing and exports are silently dropped, so set `db2.otlp.collectorTarget: gateway` or an explicit `db2.otlp.endpoint`. This chart cannot detect the case, because the gating values are parent top-level values.
+
 **Set `db2.otlp.endpoint` explicitly if the parent release uses `fullnameOverride` or `nameOverride`.** Those keys live at the parent's top level, which `global` does not expose, so derivation cannot see them and would resolve to a Service that does not exist.
 
 ### Docker
