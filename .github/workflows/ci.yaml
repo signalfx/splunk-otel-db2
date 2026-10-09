@@ -1,11 +1,26 @@
 name: CI build
 
 concurrency:
+  # Supersede earlier runs of the same PR or branch. The key includes the SHA for pushes,
+  # so no push run is ever cancelled by a later one. Serialising releases is handled by a
+  # non-cancelling lock on the release job itself, which also needs `queue: max` — that
+  # cannot be combined with cancel-in-progress: true, so it cannot live here.
   group: ci-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 on:
   workflow_dispatch:
+    inputs:
+      chart_repo_owner:
+        description: >-
+          Owner of the repository hosting the chart index. Override to rehearse the publish
+          path against a scratch public repository.
+        required: false
+        default: signalfx
+      chart_repo_name:
+        description: Repository hosting the chart index (gh-pages branch).
+        required: false
+        default: splunk-otel-db2
   push:
     branches:
       - main
@@ -21,6 +36,10 @@ permissions:
 env:
   # Must match the image used by the Db2Container instances in src/test/java.
   DB2_TEST_IMAGE: icr.io/db2_community/db2:11.5.9.0
+  # Publish target. Defaulted rather than hardcoded so the release path can be rehearsed
+  # against a scratch public repository before it is trusted against the real one.
+  CHART_REPO_OWNER: ${{ inputs.chart_repo_owner || 'signalfx' }}
+  CHART_REPO_NAME: ${{ inputs.chart_repo_name || 'splunk-otel-db2' }}
 
 jobs:
   build:
@@ -79,6 +98,9 @@ jobs:
 
       - name: Lint Helm chart
         run: helm lint packaging/helm
+
+      - name: Check rendered output
+        run: .github/scripts/helm-render-checks.sh
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -150,8 +172,10 @@ jobs:
           name: integration-test-snapshot-report
           path: build/reports/tests/integrationTestSnapshot/
 
-  publish-image:
-    # Publish to ghcr.io on merges to main/version branches and semver tags only
+  release:
+    # Resolve, image and chart live in one job so the whole sequence holds a single
+    # concurrency lock. Split across jobs the lock is per-job, and another run could take
+    # it between this run's resolve and its publish, allocate the same version, and race.
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' ||
@@ -159,19 +183,64 @@ jobs:
        startsWith(github.ref, 'refs/tags/v'))
     needs: [build, docker-build, helm-lint, integration-test, integration-test-snapshot]
     runs-on: ubuntu-24.04
+    concurrency:
+      # queue: max retains every pending release rather than discarding all but the newest,
+      # which is what "every merge publishes" requires: the default queue: single cancels
+      # an older pending run when a third lands. It cannot be combined with
+      # cancel-in-progress: true, which is why this lock is here and not workflow-level.
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+      queue: max
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          # Full history so cr can see existing tags. Credentials stay persisted because
+          # cr index --push pushes to gh-pages through this checkout's remote.
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Require the gh-pages branch
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # cr index --push runs `git worktree add --detach <dir> origin/gh-pages` and does
+          # not create the branch; a missing ref fails with "invalid reference". Checking
+          # before anything is published keeps that failure out of the middle of the
+          # transaction, where cr upload would already have created a GitHub release.
+          if ! git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
+            echo "::error::The gh-pages branch does not exist, so the chart index cannot be" \
+                 "published. Create it once with:" \
+                 "git switch --orphan gh-pages && git commit --allow-empty -m 'Initialize gh-pages'" \
+                 "&& git push -u origin gh-pages - then enable GitHub Pages on that branch."
+            exit 1
+          fi
+          echo "origin/gh-pages present at $(git rev-parse --short origin/gh-pages)"
+
+      - name: Resolve version
+        id: resolve
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # An explicit tag is a deliberate override; honour it verbatim rather than
+            # deriving, so re-tagging a commit publishes the version that was asked for.
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            .github/scripts/next-version.sh
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -180,12 +249,61 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Refuse to republish a released version
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
+        run: |
+          set -euo pipefail
+          # The chart index is the single source of truth for "this version is released",
+          # the same signal splunk-otel-collector-chart's own release workflow uses. It is
+          # written last, so a version appears there only once every other artifact landed.
+          #
+          # Checking the registry instead would be wrong in both directions: an image can
+          # exist from a release that died before the index was updated, in which case the
+          # retry that would finish it must be allowed; and a v*.*.* tag bypasses the
+          # already-published check in next-version.sh, so only an index check catches a
+          # re-tag of a version that really was released.
+          code=$(curl -sS --max-time 30 -o /tmp/index.yaml -w '%{http_code}' "$INDEX_URL" || echo 000)
+          case "$code" in
+            200)
+              # Not `yq ... | grep -q`: grep -q exits on first match, SIGPIPEs yq, and
+              # under pipefail the pipeline then reports failure even though it matched -
+              # which silently disables this guard. Capture first, match without a pipe.
+              released=$(yq e ".entries[\"splunk-otel-db2\"][].version" /tmp/index.yaml)
+              if grep -Fxq -- "$VERSION" <<<"$released"; then
+                echo "::error::$VERSION is already on the chart index, so a release pointing" \
+                     "at it exists. Rebuilding would swap the image behind that release:" \
+                     "appVersion stays the same while the digest changes, and under" \
+                     "imagePullPolicy IfNotPresent nodes can run different images for one" \
+                     "chart version. Publish a new version instead."
+                exit 1
+              fi
+              echo "$VERSION is not on the index yet; proceeding"
+              ;;
+            404) echo "No index published yet; proceeding" ;;
+            *)   echo "::error::unexpected HTTP $code from $INDEX_URL"; exit 1 ;;
+          esac
+
+      - name: Stamp jar version
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          # The jar version is baked into the image at build time, so it has to be stamped
+          # before the build rather than committed back to the branch.
+          sed -i "s/^version = '.*'$/version = '${VERSION}'/" build.gradle
+          grep -q "^version = '${VERSION}'$" build.gradle
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
           images: ghcr.io/signalfx/splunk-otel-db2
           tags: |
+            # Only refs that can advance the chart index may claim a semantic tag. A v*.x
+            # branch derives from an index it never updates, so it would re-emit the same
+            # tag on every push and collide with the next release from main.
+            type=raw,value=${{ steps.resolve.outputs.version }},enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -203,3 +321,127 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Chart publishing is main-only. A chart released from a side branch would occupy a
+      # version in the index that a later main release would try to reuse.
+      - name: Stamp chart version
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          cd packaging/helm
+          VERSION="$VERSION" yq e -i '.version = strenv(VERSION)' Chart.yaml
+          VERSION="$VERSION" yq e -i '.appVersion = strenv(VERSION)' Chart.yaml
+          yq e '{"version": .version, "appVersion": .appVersion}' Chart.yaml
+
+      - name: Install chart-releaser
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
+        with:
+          install_only: true
+
+      - name: Package the chart and create the release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # cr is driven directly rather than through the action's default path. That path
+          # discovers charts with `git diff --name-only <latest_tag> -- <charts_dir>`, so it
+          # only releases when tracked files under charts_dir changed and silently reports
+          # "Nothing to do" otherwise. Calling cr explicitly makes the release
+          # unconditional and keeps the chart at packaging/helm, which is not the
+          # <charts_dir>/<name>/Chart.yaml layout that discovery expects.
+          mkdir -p .cr-release-packages .cr-index
+          helm package packaging/helm \
+            --version "$VERSION" --app-version "$VERSION" \
+            --destination .cr-release-packages
+          test -f ".cr-release-packages/splunk-otel-db2-${VERSION}.tgz"
+
+          # --commit pins the release tag to the commit this run built. Without it cr tags
+          # whatever the default branch points at, which can have moved on during the run,
+          # so the tag would not describe the image and chart that were published.
+          cr upload \
+            --owner "$CHART_REPO_OWNER" --git-repo "$CHART_REPO_NAME" \
+            --token "$CR_TOKEN" \
+            --package-path .cr-release-packages \
+            --commit "$GITHUB_SHA" \
+            --skip-existing
+
+      - name: Set up JDK 17
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: true
+
+      - name: Attach the fat jar to the release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The systemd install needs the jar from somewhere. It is published only here, as
+          # an asset on the release cr upload just created, so its version always matches
+          # the chart and image from this same run. build.gradle was stamped earlier, so
+          # shadowJar emits splunk-otel-db2-<version>.jar.
+          ./gradlew shadowJar --no-daemon -q
+          jar="build/libs/splunk-otel-db2-${VERSION}.jar"
+          test -f "$jar"
+          # --clobber so a retry after a partial release can re-upload. The version is
+          # guaranteed fresh by the image-tag guard, so this cannot overwrite a prior release.
+          gh release upload "splunk-otel-db2-${VERSION}" "$jar" --clobber
+          gh release view "splunk-otel-db2-${VERSION}" --json assets \
+            --jq '.assets[] | "published asset: \(.name) (\(.size) bytes)"'
+
+      - name: Publish the index
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # This is the commit point and must stay the last publishing action. A version
+          # appears on the index only once the image, the release and the jar are all in
+          # place, which is what makes the index trustworthy as the "is it released" signal
+          # the guard above reads. Writing it earlier would let the index advertise a
+          # version whose jar never uploaded.
+          #
+          # No --charts-repo: cr 1.7.0 does not accept it, and index entries already point
+          # at the GitHub release assets cr upload created.
+          cr index \
+            --owner "$CHART_REPO_OWNER" --git-repo "$CHART_REPO_NAME" \
+            --token "$CR_TOKEN" \
+            --package-path .cr-release-packages \
+            --index-path .cr-index/index.yaml \
+            --push
+
+      - name: Verify the version is now on the index
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
+        run: |
+          # Guards against a publish path that exits 0 without publishing. Pages took about
+          # a minute to serve a new commit when this was rehearsed, so poll rather than
+          # check once.
+          for attempt in $(seq 1 10); do
+            # Avoid `... | grep -q` under pipefail; see the guard step above.
+            listed=$(curl -sS --max-time 20 "$INDEX_URL" 2>/dev/null \
+                       | yq e ".entries[\"splunk-otel-db2\"][].version" - 2>/dev/null || true)
+            if grep -Fxq -- "$VERSION" <<<"$listed"; then
+              echo "index.yaml now lists $VERSION"
+              exit 0
+            fi
+            echo "attempt $attempt: $VERSION not on the index yet; retrying in 15s"
+            sleep 15
+          done
+          echo "::error::$VERSION was never published to the index"
+          exit 1

@@ -38,7 +38,7 @@ data:
 
     exporters:
       otlp:
-        endpoint: {{ .Values.otlp.endpoint | quote }}
+        endpoint: {{ include "splunk-otel-db2.otlpEndpoint" . | quote }}
         {{- if .Values.otlp.compression }}
         compression: {{ .Values.otlp.compression | quote }}
         {{- end }}

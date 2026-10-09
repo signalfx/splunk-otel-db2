@@ -1,0 +1,18 @@
+# Minimal values that render the chart standalone.
+#
+# The chart intentionally refuses to render without credentials and without an OTLP
+# endpoint, so the defaults alone cannot be templated. This file supplies both so render
+# checks exercise the real templates rather than the failure guards.
+receivers:
+  - name: default
+    hostname: db2.example.com
+    port: 50000
+    database: SAMPLE
+    collectionInterval: "30s"
+    username: test-user
+    password: test-password
+    tls:
+      insecure: true
+
+otlp:
+  endpoint: "http://otel-collector:4317"

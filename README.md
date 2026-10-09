@@ -1,12 +1,25 @@
 # splunk-otel-db2
 
-A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and active query samples from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud.
+A standalone OpenTelemetry receiver for IBM Db2. Collects metrics, active query samples, blocking sessions and top queries from a Db2 database and emits them as OTLP over gRPC.
+
+**It works alongside an OTel Collector, not instead of one.** The receiver reads Db2 over JDBC, converts what it finds into OTLP, and exports it — it does not store, aggregate or forward to a backend itself. Something must be listening on the OTLP endpoint you configure: an OpenTelemetry Collector, the Splunk Distribution of the OpenTelemetry Collector, or any OTLP-compatible receiver. That Collector is what enriches the data and forwards it to Splunk Observability Cloud or elsewhere.
+
+```
+                    JDBC                      OTLP/gRPC                        
+  ┌────────┐                ┌──────────────┐              ┌───────────────┐    
+  │  Db2   │ ◀────────────▶ │ splunk-otel- │ ───────────▶ │ OTel Collector│ ──▶ Splunk Observability Cloud
+  │ server │   monitoring   │     db2      │   port 4317  │  (you run it) │     (or any OTLP backend)
+  └────────┘     queries    └──────────────┘              └───────────────┘    
+```
+
+The receiver runs as its own process — a Deployment on Kubernetes, a systemd service, or a bare JVM. It is not a Collector plugin and is not compiled into the Collector binary, so adding it never changes an existing Collector pipeline.
 
 ## Requirements
 
 - Java 11+
 - IBM Db2 9.7+ (current metric scrapers require 10.5+; 9.7–10.1 support planned via snapshot monitor fallback; integration-tested against 11.5)
 - Docker (for integration tests)
+- Helm 3.12+ (for the Helm chart; it uses `.Chart.IsRoot` to tell a standalone install from a subchart)
 
 ## Quick start
 
@@ -166,6 +179,452 @@ There is no connection pool — the monitoring workload fires queries at interva
 Heap grows with the number of configured databases: each database gets its own OTel SDK pipeline, metric readers, OTLP exporters, schedulers, and in-memory caches (top-query delta baseline, query-sample deduplication). At steady state expect roughly 50–80 MB base plus ~15–30 MB per additional database. The dominant per-cycle allocation is the `MON_GET_PKG_CACHE_STMT` result set (all matching rows are loaded; `top_query_count` limits how many are emitted after sorting) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
 
 There is no hard limit on the number of databases in a single process. Beyond ~20–30 databases, heap pressure becomes the practical ceiling — raise `-Xmx` or split databases across multiple processes as needed.
+
+## Required permissions
+
+Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
+
+```bash
+# Create the OS user on the Db2 server (Linux example)
+useradd -m db2mon
+echo 'db2mon:<password>' | chpasswd
+```
+
+```sql
+-- Connect to the database as SYSADM or DBADM, then grant:
+
+-- Basic connect
+GRANT CONNECT ON DATABASE TO USER db2mon;
+
+-- Stored procedure called unconditionally on every connection
+GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
+
+-- Core metrics scrapers
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TRANSACTION_LOG TO USER db2mon;
+
+-- Top query collection (events.db.server.top_query.enabled: true)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
+
+-- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
+-- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
+-- Requires explain tables to be created once per schema — run as the monitoring user:
+--   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
+-- Then grant the procedure and the explain tables:
+GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
+-- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
+-- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
+
+-- Query sampling (events.db.server.query_sample.enabled: true, default path)
+GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+
+-- Db2 10.5+ wait time attribute (db2.wait_time)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
+
+-- Blocking session detection (runs automatically with events.db.server.query_sample.enabled: true)
+GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
+-- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
+
+-- Snapshot monitor path (use_snapshot_monitor: true)
+-- Note: blocking detection is NOT available on this path.
+-- IMPORTANT: the EXECUTE grants below are necessary but NOT sufficient. Every SNAP_GET_*
+-- function additionally requires the user to hold SYSMON, SYSCTRL, SYSMAINT or SYSADM
+-- instance-level authority — see the note after this block.
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
+-- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
+-- SNAP_GET_DB supplies the SQL activity metrics that have no MON_GET_* equivalent
+-- (see "SQL and row activity" under Metrics).
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_DB TO USER db2mon;
+-- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
+--   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
+--   db2stop force && db2start
+-- This setting takes effect only after the instance is cycled; without the restart
+-- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
+```
+
+> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
+
+### Snapshot monitor authority (`use_snapshot_monitor: true`)
+
+The `SNAP_GET_*` functions are gated on **instance-level authority in addition to the `EXECUTE` grant**. DB2 requires one of `SYSMON`, `SYSCTRL`, `SYSMAINT` or `SYSADM`. A least-privilege monitoring user that has only been granted `EXECUTE` will silently receive no snapshot data — the receiver logs a warning and the snapshot-only metrics and dimensions are simply absent.
+
+`SYSMON` is the least-privileged option and is the one to use. It is granted by OS group, not by SQL, so it needs a DBM CFG change and an instance restart:
+
+```bash
+# Run as the instance owner. Replace db2mon_grp with the OS group your monitoring user belongs to.
+db2 UPDATE DBM CFG USING SYSMON_GROUP db2mon_grp
+db2stop force && db2start
+```
+
+Verify the user actually holds it:
+
+```sql
+SELECT AUTHORITY, D_USER, D_GROUP
+FROM TABLE(SYSPROC.AUTH_LIST_AUTHORITIES_FOR_AUTHID(CURRENT USER, 'U'))
+WHERE AUTHORITY = 'SYSMON';
+```
+
+A `Y` in `D_USER` or `D_GROUP` means the authority is held. If both are `N`, the snapshot path will not return data regardless of the `EXECUTE` grants. This applies to the query sample snapshot path (`SNAP_GET_APPL_INFO`, `SNAP_GET_STMT`) as well as the SQL activity metrics (`SNAP_GET_DB`).
+
+## Installation
+
+There are three ways to run the receiver. Two things are true of all of them:
+
+- **A Db2 monitoring user must exist first** — see [Required permissions](#required-permissions) above.
+- **An OTel Collector must be reachable.** The receiver only emits OTLP over gRPC; it needs something listening on the `otlp.endpoint` you configure. If nothing is, the receiver starts and scrapes Db2 normally but every export fails, so check its logs for export errors before assuming Db2 is the problem.
+
+If you do not already run an OTel Collector, [option 1B](#option-1b--scraper-and-otel-collector-together) deploys one alongside the receiver on Kubernetes, and [option 3B](#docker-compose) does the same with docker-compose.
+
+| | Method | Use it when | What you get |
+| --- | --- | --- | --- |
+| **1** | [Helm](#option-1--helm-kubernetes) | Running on Kubernetes | A Deployment, managed by Helm |
+| **2** | [systemd](#option-2--systemd-linux-host) | Running on a Linux host, long-lived | A managed service that restarts on boot |
+| **3** | [Jar or Docker](#option-3--jar-or-docker-single-host) | Trying it out, or no service manager | A foreground process |
+
+Replace `0.1.0` in the commands below with the version you want. Released versions are listed on the [releases page](https://github.com/signalfx/splunk-otel-db2/releases).
+
+---
+
+### Option 1 — Helm (Kubernetes)
+
+Pick one of two shapes depending on whether you already run an OTel Collector in the cluster.
+
+| | Shape | Deploys | Choose when |
+| --- | --- | --- | --- |
+| **1A** | Scraper only | Db2 receiver | You already have an OTel Collector running |
+| **1B** | Scraper **and** OTel Collector | Db2 receiver + full `splunk-otel-collector` | You want one release to deploy everything |
+
+#### Option 1A — Scraper only
+
+The receiver runs on its own and exports to an OTel Collector that already exists, anywhere — in the cluster, on another host, or any OTLP endpoint.
+
+**Step 1 — Create the credentials Secret.** The chart reads `DB2_USER` and `DB2_PASSWORD` from a Secret you own:
+
+```bash
+kubectl create secret generic my-db2-credentials \
+  --from-literal=DB2_USER=db2mon \
+  --from-literal=DB2_PASSWORD='<password>'
+```
+
+**Step 2 — Write `my-values.yaml`.** Use a values file rather than `--set`; shell globbing mangles the array syntax, and `--set receivers[0].x` replaces the whole array element rather than merging into it.
+
+```yaml
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    credentialsSecret: "my-db2-credentials"
+    tls:
+      insecure: true
+
+otlp:
+  # Required here. In-cluster OTel Collector:
+  endpoint: "http://my-otelcol-opentelemetry-collector.monitoring.svc.cluster.local:4317"
+  # ...or one outside the cluster:
+  # endpoint: "http://collector.example.com:4317"
+  tls:
+    insecure: true
+```
+
+`otlp.endpoint` is **required** for this shape. The chart can only derive an endpoint when it runs as a dependency of `splunk-otel-collector` (option 1B), so rendering without one fails with a message saying so rather than silently defaulting to a name that does not resolve.
+
+**Step 3 — Install.**
+
+```bash
+helm repo add splunk-otel-db2 https://signalfx.github.io/splunk-otel-db2
+```
+
+```bash
+helm repo update splunk-otel-db2
+```
+
+```bash
+helm install my-db2 splunk-otel-db2/splunk-otel-db2 -f my-values.yaml
+```
+
+To install from a checkout instead, point at the chart directory: `helm install my-db2 packaging/helm -f my-values.yaml`.
+
+**Step 4 — Verify.**
+
+```bash
+kubectl logs -l app.kubernetes.io/name=splunk-otel-db2 -f
+```
+
+<details>
+<summary>Letting the chart create the Secret instead (not recommended for production)</summary>
+
+Set `username` and `password` directly and omit `credentialsSecret`. The values end up in the release manifest, so anyone with `helm get values` access can read them:
+
+```yaml
+receivers:
+  - name: default
+    hostname: "db2.example.com"
+    port: 50000
+    database: "PROD"
+    collectionInterval: "30s"
+    username: "db2mon"
+    password: "secret"
+    tls:
+      insecure: true
+```
+</details>
+
+<details>
+<summary>Pulling the image from a private registry</summary>
+
+```yaml
+imagePullSecrets:
+  - name: ghcr-credentials
+```
+</details>
+
+#### Option 1B — Scraper and OTel Collector together
+
+Install this chart as a dependency of [splunk-otel-collector-chart](https://github.com/signalfx/splunk-otel-collector-chart), so a single release deploys the Collector and the Db2 receiver. The receiver still runs as its own Deployment and exports *into* the Collector — it is not a Collector receiver.
+
+**Step 1 — Add the dependency** to that chart's `Chart.yaml`:
+
+```yaml
+  - name: splunk-otel-db2
+    version: 0.1.0
+    alias: db2
+    repository: https://signalfx.github.io/splunk-otel-db2
+    condition: db2.enabled
+```
+
+The alias must stay lowercase and hyphen-free — that chart uppercases aliases into resource names, and hyphens break its template rendering.
+
+**Step 2 — Make two further changes in that chart.** Skipping either breaks it for **every** user of it, not only those enabling this receiver:
+
+1. `values.yaml` must set `db2.enabled: false`. Helm ignores a `condition` whose values path does not resolve and installs the subchart anyway, so omitting the key deploys a Db2 receiver into every existing install on upgrade.
+2. `values.schema.json` must declare a `db2` property. That schema sets `additionalProperties: false` at the top level, so an undeclared key makes the chart fail to render at its defaults with `additional properties 'db2' not allowed`.
+
+Both are handled in [signalfx/splunk-otel-collector-chart#2641](https://github.com/signalfx/splunk-otel-collector-chart/pull/2641).
+
+**Step 3 — Create the credentials Secret**, as in option 1A:
+
+```bash
+kubectl create secret generic my-db2-credentials \
+  --from-literal=DB2_USER=db2mon \
+  --from-literal=DB2_PASSWORD='<password>'
+```
+
+**Step 4 — Enable it in that chart's values.** Everything nests under the alias, and `otlp.endpoint` can be omitted because it is derived from the release:
+
+```yaml
+db2:
+  enabled: true
+  receivers:
+    - name: default
+      hostname: "db2.example.com"
+      port: 50000
+      database: "PROD"
+      collectionInterval: "30s"
+      credentialsSecret: "my-db2-credentials"
+      tls:
+        insecure: true
+```
+
+**Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
+
+```bash
+helm install my-splunk-otel-collector -f my-values.yaml \
+  splunk-otel-collector-chart/splunk-otel-collector
+```
+
+##### How the endpoint is derived
+
+With `db2.otlp.endpoint` empty, the chart builds the address from the parent release name:
+
+| `db2.otlp.collectorTarget` | Service | Reachability |
+| --- | --- | --- |
+| `agent` (default) | `<release>-splunk-otel-collector-agent` | `internalTrafficPolicy: Local` — only an agent Pod on this Pod's own Node |
+| `gateway` | `<release>-splunk-otel-collector` | cluster-wide |
+
+The agent is the default because the agent DaemonSet is deployed by default upstream while the gateway is opt-in. The tradeoff is that `Local` traffic policy means exports blackhole if this Pod's Node has no healthy agent, so prefer `gateway` wherever it is enabled.
+
+Addresses are emitted as cluster FQDNs (`<service>.<namespace>.svc.cluster.local`) so they do not depend on the Pod's DNS search order. The name reproduces the collector chart's own `fullname` helper, including the rule that the chart-name suffix is dropped when the release name already contains it — release `my-splunk-otel-collector` resolves to `my-splunk-otel-collector-agent`, not `my-splunk-otel-collector-splunk-otel-collector-agent`.
+
+Four cases need an explicit override, because each depends on a parent top-level value that Helm does not expose to a subchart through `global`:
+
+| Parent configuration | Symptom | Fix |
+| --- | --- | --- |
+| `gateway.enabled: true` | still targets the agent | `db2.otlp.collectorTarget: gateway`, or have the parent pass `global.gateway.enabled: true` |
+| `agent.service.enabled: false`, or EKS Fargate | agent Service does not exist, exports silently dropped | `db2.otlp.collectorTarget: gateway` |
+| `namespaceOverride` | Services are in another namespace | `db2.otlp.collectorNamespace` |
+| `fullnameOverride` / `nameOverride` | derived name does not exist | `db2.otlp.endpoint` |
+
+On EKS Fargate the parent cannot run DaemonSets at all: its `distribution-eks-fargate` example renders a gateway `service.yaml` and no `service-agent.yaml`.
+
+---
+
+### Option 2 — systemd (Linux host)
+
+Runs the receiver as a managed service that starts on boot. `packaging/systemd/` contains a hardened unit file.
+
+Needs a JRE 11+ on the host. Install one from your distribution's package manager — the Docker image's custom JRE is built against glibc (Debian) and can be reused on glibc hosts.
+
+**Step 1 — Install a JRE and download the jar.**
+
+```bash
+sudo apt-get install -y openjdk-17-jre-headless     # Debian/Ubuntu
+# sudo dnf install -y java-17-openjdk-headless      # RHEL/Fedora
+```
+
+```bash
+VERSION=0.1.0
+sudo mkdir -p /opt/splunk-otel-db2
+sudo curl -fsSL -o /opt/splunk-otel-db2/splunk-otel-db2.jar \
+  "https://github.com/signalfx/splunk-otel-db2/releases/download/splunk-otel-db2-${VERSION}/splunk-otel-db2-${VERSION}.jar"
+```
+
+**Step 2 — Create the service user.**
+
+```bash
+sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
+```
+
+**Step 3 — Write the config.** Set `otlp.endpoint` to your OTel Collector — on this host, elsewhere, or any OTLP endpoint.
+
+```bash
+sudo mkdir -p /etc/splunk-otel-db2
+sudo tee /etc/splunk-otel-db2/config.yaml > /dev/null <<'EOF'
+receivers:
+  db2:
+    hostname: "db2.example.com"
+    hostport: 50000
+    username: "${env:DB2_USER}"
+    password: "${env:DB2_PASSWORD}"
+    database: "SAMPLE"
+    collection_interval: "30s"
+    tls:
+      insecure: true
+
+exporters:
+  otlp:
+    endpoint: "http://localhost:4317"
+    tls:
+      insecure: true
+EOF
+```
+
+**Step 4 — Store credentials**, readable only by the service user.
+
+```bash
+sudo tee /etc/splunk-otel-db2/env > /dev/null <<'EOF'
+DB2_USER=db2mon
+DB2_PASSWORD=<secret>
+EOF
+sudo chmod 640 /etc/splunk-otel-db2/env
+sudo chown root:splunk-otel-db2 /etc/splunk-otel-db2/env
+```
+
+**Step 5 — Install the unit file and start.**
+
+```bash
+VERSION=0.1.0
+sudo curl -fsSL -o /etc/systemd/system/splunk-otel-db2.service \
+  "https://raw.githubusercontent.com/signalfx/splunk-otel-db2/splunk-otel-db2-${VERSION}/packaging/systemd/splunk-otel-db2.service"
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now splunk-otel-db2
+```
+
+**Step 6 — Verify.**
+
+```bash
+sudo journalctl -u splunk-otel-db2 -f
+```
+
+---
+
+### Option 3 — Jar or Docker (single host)
+
+A foreground process with nothing managing it. Good for trying the receiver out or running it under your own supervisor.
+
+#### Jar
+
+**Step 1 — Download the jar** (needs a JRE 11+ on the host):
+
+```bash
+VERSION=0.1.0
+curl -fsSL -O "https://github.com/signalfx/splunk-otel-db2/releases/download/splunk-otel-db2-${VERSION}/splunk-otel-db2-${VERSION}.jar"
+```
+
+**Step 2 — Write a `config.yaml`.** Copy `testdata/config.yaml` from the repo as a starting point, or use the snippet in [Option 2 step 3](#option-2--systemd-linux-host). See [Configuration](#configuration) for the full schema.
+
+**Step 3 — Run it.**
+
+```bash
+DB2_USER=db2mon DB2_PASSWORD=secret \
+  java -jar splunk-otel-db2-0.1.0.jar config.yaml
+```
+
+#### Docker
+
+Mount a config file and run. The image carries its own JRE, so the host needs no Java.
+
+```bash
+docker run --rm \
+  -e DB2_USER=db2mon \
+  -e DB2_PASSWORD=secret \
+  -v /path/to/config.yaml:/etc/splunk-otel-db2/config.yaml:ro \
+  ghcr.io/signalfx/splunk-otel-db2:0.1.0
+```
+
+#### docker-compose
+
+The repo's compose files are the fastest way to see the receiver working end to end, and can optionally bring up an OTel Collector too. Both require a checkout.
+
+**Option 3A — Scraper only** (you already run an OTel Collector elsewhere):
+
+```bash
+git clone https://github.com/signalfx/splunk-otel-db2.git
+cd splunk-otel-db2
+```
+
+```bash
+export DB2_HOST=db2.example.com
+export DB2_PORT=50000
+export DB2_USER=db2mon
+export DB2_PASSWORD=secret
+export OTLP_ENDPOINT=http://your-collector:4317
+```
+
+```bash
+docker compose up --build -d && docker compose logs -f receiver
+```
+
+**Option 3B — Scraper and OTel Collector**, with the OTel Collector forwarding to Splunk Observability Cloud:
+
+```bash
+export DB2_HOST=db2.example.com
+export DB2_PORT=50000
+export DB2_USER=db2mon
+export DB2_PASSWORD=secret
+export SPLUNK_REALM=us1
+export SPLUNK_TOKEN=<your-ingest-token>
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.collector.yml --profile collector up --build -d
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.collector.yml logs -f receiver otel-collector
+```
+
+> **Finding your realm and token**: in Splunk Observability Cloud go to **Settings → Access Tokens** for the ingest token, and **Settings → General** for the realm (e.g. `us1`, `eu0`).
+
+---
 
 ## Metrics
 
@@ -476,298 +935,6 @@ The plan JSON format:
 {"operators":[{"id":1,"type":"RETURN","cost":198.6},{"id":2,"type":"NLJOIN","cost":198.6}],"streams":[{"id":1,"from":-1,"to":3,"cols":477}]}
 ```
 
-## Required permissions
-
-Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
-
-```bash
-# Create the OS user on the Db2 server (Linux example)
-useradd -m db2mon
-echo 'db2mon:<password>' | chpasswd
-```
-
-```sql
--- Connect to the database as SYSADM or DBADM, then grant:
-
--- Basic connect
-GRANT CONNECT ON DATABASE TO USER db2mon;
-
--- Stored procedure called unconditionally on every connection
-GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
-
--- Core metrics scrapers
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TRANSACTION_LOG TO USER db2mon;
-
--- Top query collection (events.db.server.top_query.enabled: true)
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
-
--- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
--- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
--- Requires explain tables to be created once per schema — run as the monitoring user:
---   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
--- Then grant the procedure and the explain tables:
-GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
--- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
--- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
-
--- Query sampling (events.db.server.query_sample.enabled: true, default path)
-GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
-
--- Db2 10.5+ wait time attribute (db2.wait_time)
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
-
--- Blocking session detection (runs automatically with events.db.server.query_sample.enabled: true)
-GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
--- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
-
--- Snapshot monitor path (use_snapshot_monitor: true)
--- Note: blocking detection is NOT available on this path.
--- IMPORTANT: the EXECUTE grants below are necessary but NOT sufficient. Every SNAP_GET_*
--- function additionally requires the user to hold SYSMON, SYSCTRL, SYSMAINT or SYSADM
--- instance-level authority — see the note after this block.
--- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
--- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
--- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
--- SNAP_GET_DB supplies the SQL activity metrics that have no MON_GET_* equivalent
--- (see "SQL and row activity" under Metrics).
--- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_DB TO USER db2mon;
--- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
---   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
---   db2stop force && db2start
--- This setting takes effect only after the instance is cycled; without the restart
--- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
-```
-
-> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
-
-### Snapshot monitor authority (`use_snapshot_monitor: true`)
-
-The `SNAP_GET_*` functions are gated on **instance-level authority in addition to the `EXECUTE` grant**. DB2 requires one of `SYSMON`, `SYSCTRL`, `SYSMAINT` or `SYSADM`. A least-privilege monitoring user that has only been granted `EXECUTE` will silently receive no snapshot data — the receiver logs a warning and the snapshot-only metrics and dimensions are simply absent.
-
-`SYSMON` is the least-privileged option and is the one to use. It is granted by OS group, not by SQL, so it needs a DBM CFG change and an instance restart:
-
-```bash
-# Run as the instance owner. Replace db2mon_grp with the OS group your monitoring user belongs to.
-db2 UPDATE DBM CFG USING SYSMON_GROUP db2mon_grp
-db2stop force && db2start
-```
-
-Verify the user actually holds it:
-
-```sql
-SELECT AUTHORITY, D_USER, D_GROUP
-FROM TABLE(SYSPROC.AUTH_LIST_AUTHORITIES_FOR_AUTHID(CURRENT USER, 'U'))
-WHERE AUTHORITY = 'SYSMON';
-```
-
-A `Y` in `D_USER` or `D_GROUP` means the authority is held. If both are `N`, the snapshot path will not return data regardless of the `EXECUTE` grants. This applies to the query sample snapshot path (`SNAP_GET_APPL_INFO`, `SNAP_GET_STMT`) as well as the SQL activity metrics (`SNAP_GET_DB`).
-
-## Installation
-
-### systemd (Linux)
-
-The `packaging/systemd/` directory contains a hardened unit file. Set `otlp.endpoint` in `config.yaml` to wherever your OTel Collector is — same host, remote server, or any OTLP-compatible endpoint.
-
-The receiver requires Java 11+. Install a JRE from your distribution's package manager — the Docker image's custom JRE is built against glibc (Debian) and can also be reused on glibc hosts.
-
-```bash
-# 1. Install a JRE (Java 11+) and copy the fat jar
-sudo apt-get install -y openjdk-17-jre-headless   # Debian/Ubuntu
-# sudo dnf install -y java-17-openjdk-headless     # RHEL/Fedora
-sudo mkdir -p /opt/splunk-otel-db2
-sudo cp build/libs/splunk-otel-db2-*.jar /opt/splunk-otel-db2/splunk-otel-db2.jar
-
-# 2. Create the service user
-sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
-
-# 3. Write config — set otlp.endpoint to your backend or local OTel Collector
-sudo mkdir -p /etc/splunk-otel-db2
-sudo tee /etc/splunk-otel-db2/config.yaml > /dev/null <<'EOF'
-receivers:
-  db2:
-    hostname: "db2.example.com"
-    hostport: 50000
-    username: "${env:DB2_USER}"
-    password: "${env:DB2_PASSWORD}"
-    database: "SAMPLE"
-    collection_interval: "30s"
-    tls:
-      insecure: true
-
-exporters:
-  otlp:
-    # Send to an OTel Collector running on this host or elsewhere:
-    endpoint: "http://localhost:4317"
-    tls:
-      insecure: true
-EOF
-
-# 4. Store credentials (readable only by the service user)
-sudo tee /etc/splunk-otel-db2/env > /dev/null <<'EOF'
-DB2_USER=db2mon
-DB2_PASSWORD=<secret>
-EOF
-sudo chmod 640 /etc/splunk-otel-db2/env
-sudo chown root:splunk-otel-db2 /etc/splunk-otel-db2/env
-
-# 5. Install and start the service
-sudo cp packaging/systemd/splunk-otel-db2.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now splunk-otel-db2
-sudo journalctl -u splunk-otel-db2 -f
-```
-
-### Helm (Kubernetes)
-
-The receiver exports via OTLP/gRPC. `otlp.endpoint` can point at an OTel Collector running anywhere — in the same cluster, on another host, or as a sidecar. Use a values file to avoid shell glob issues with array syntax.
-
-**Example `my-values.yaml`:**
-
-```yaml
-receivers:
-  - name: default
-    hostname: "db2.example.com"
-    port: 50000
-    database: "PROD"
-    collectionInterval: "30s"
-    credentialsSecret: "my-db2-credentials"   # pre-existing Secret with DB2_USER / DB2_PASSWORD
-    tls:
-      insecure: true
-    events:
-      dbServerTopQuery:
-        enabled: false
-      dbServerQuerySample:
-        enabled: false
-
-otlp:
-  # OTel Collector in the same cluster:
-  # http://<helm-release-name>-opentelemetry-collector.<namespace>.svc.cluster.local:4317
-  endpoint: "http://my-otelcol-opentelemetry-collector.monitoring.svc.cluster.local:4317"
-  tls:
-    insecure: true
-```
-
-```bash
-helm install my-db2 packaging/helm -f my-values.yaml
-```
-
-**OTel Collector outside the cluster** (external host or IP):
-
-```yaml
-otlp:
-  # External OTel Collector reachable by hostname or IP:
-  endpoint: "http://collector.example.com:4317"
-  tls:
-    insecure: true
-```
-
-**Credentials** — reference a pre-existing Secret (recommended for production):
-
-```yaml
-receivers:
-  - name: default
-    hostname: "db2.example.com"
-    port: 50000
-    database: "PROD"
-    collectionInterval: "30s"
-    credentialsSecret: "my-db2-credentials"   # Secret must have keys DB2_USER and DB2_PASSWORD
-    tls:
-      insecure: true
-```
-
-Or let the chart create one (not recommended for production):
-
-```yaml
-receivers:
-  - name: default
-    hostname: "db2.example.com"
-    port: 50000
-    database: "PROD"
-    collectionInterval: "30s"
-    username: "db2mon"
-    password: "secret"
-    tls:
-      insecure: true
-```
-
-**Pulling from a private GHCR registry:**
-
-```yaml
-imagePullSecrets:
-  - name: ghcr-credentials
-```
-
-### Docker
-
-Mount a config file and run. `otlp.endpoint` in the config points at wherever your OTel Collector is — same host, remote, or a sidecar container.
-
-```bash
-docker run --rm \
-  -e DB2_USER=db2mon \
-  -e DB2_PASSWORD=secret \
-  -v /path/to/config.yaml:/etc/splunk-otel-db2/config.yaml:ro \
-  ghcr.io/signalfx/splunk-otel-db2:latest
-```
-
-The config file controls everything — DB2 connection, OTLP endpoint, collection intervals. See the [Configuration](#configuration) section for the full schema.
-
-### docker-compose
-
-Two deployment modes depending on whether you run the OTel Collector yourself or want it bundled.
-
----
-
-**Option A — Scraper only** (you already have an OTel Collector running elsewhere):
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/signalfx/splunk-otel-db2.git
-cd splunk-otel-db2
-
-# 2. Set required environment variables
-export DB2_HOST=db2.example.com        # your DB2 hostname or IP
-export DB2_PORT=50000                  # default 50000
-export DB2_USER=db2mon
-export DB2_PASSWORD=secret
-export OTLP_ENDPOINT=http://your-collector:4317
-
-# 3. Start the scraper
-docker compose up --build -d
-
-# 4. Check logs
-docker compose logs -f receiver
-```
-
----
-
-**Option B — Scraper + OTel Collector** (collector runs alongside the scraper, forwards to Splunk Observability Cloud):
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/signalfx/splunk-otel-db2.git
-cd splunk-otel-db2
-
-# 2. Set required environment variables
-export DB2_HOST=db2.example.com        # your DB2 hostname or IP
-export DB2_PORT=50000                  # default 50000
-export DB2_USER=db2mon
-export DB2_PASSWORD=secret
-export SPLUNK_REALM=us1                # your Splunk Observability Cloud realm
-export SPLUNK_TOKEN=<your-ingest-token>
-
-# 3. Start both the scraper and the collector
-docker compose -f docker-compose.yml -f docker-compose.collector.yml --profile collector up --build -d
-
-# 4. Check logs
-docker compose -f docker-compose.yml -f docker-compose.collector.yml logs -f receiver otel-collector
-```
-
-> **Finding your realm and token**: in Splunk Observability Cloud go to **Settings → Access Tokens** for the ingest token, and **Settings → General** for the realm (e.g. `us1`, `eu0`).
-
 ## Development
 
 ```bash
@@ -808,6 +975,50 @@ The receiver sets the following OTel resource attributes on all telemetry. Any a
 | `server.port` | configured port (integer) |
 | `db.system.name` | `ibm.db2` |
 | `db.namespace` | configured database name |
+
+## Releases
+
+Every merge to `main` publishes three artifacts that always carry the same version, so a chart, the image it names in `appVersion`, and the jar can never drift apart:
+
+| Artifact | Where | Used by |
+| --- | --- | --- |
+| Helm chart | gh-pages index at `https://signalfx.github.io/splunk-otel-db2` | [option 1](#option-1--helm-kubernetes) |
+| Container image | `ghcr.io/signalfx/splunk-otel-db2` | [option 1](#option-1--helm-kubernetes), [Docker](#docker) |
+| Fat jar | asset on the `splunk-otel-db2-<version>` GitHub release | [options 2](#option-2--systemd-linux-host) and [3](#option-3--jar-or-docker-single-host) |
+
+The chart tarball is attached to that same GitHub release, and the index entry points at it.
+
+**The patch number is derived, not stored.** `version` in [packaging/helm/Chart.yaml](packaging/helm/Chart.yaml) is a *floor* that pins only major and minor. On each main merge, [next-version.sh](.github/scripts/next-version.sh) reads the published `index.yaml`, finds the highest patch already released in that major.minor series, and publishes the next one:
+
+```
+floor 0.1.0, nothing published yet   ->  0.1.0
+floor 0.1.0, 0.1.0 published         ->  0.1.1
+floor 0.1.0, 0.1.7 published         ->  0.1.8
+```
+
+Deriving it keeps CI from committing a version bump back to `main`, which would retrigger the release and loop. Preview what the next merge would publish:
+
+```bash
+make next-version
+```
+
+**To release a minor or major**, edit the floor in `Chart.yaml` — set it to `0.2.0` and the next merge publishes exactly that, then `0.2.1`, `0.2.2`, and so on. A floor *ahead* of what is published is rejected, because chart-releaser refuses to overwrite a release and its own error does not explain why.
+
+The chart's `version` and `appVersion` are always the same value, and CI verifies the image for that `appVersion` exists before releasing the chart — a chart pointing at an image tag that was never pushed fails at install time, not at release time.
+
+Pushing a `v<x>.<y>.<z>` tag overrides the derivation and publishes that exact version — all three artifacts, exactly as a `main` merge does. After tagging a new major or minor, raise the floor in `Chart.yaml` to match, or `main` will carry on producing patches of the old series.
+
+**A release is "done" when the version appears on the index**, and nothing else counts. The index is written last, after the image, the GitHub release and the jar, so a version is only advertised once every artifact is in place. That also makes a failed release safe to retry: the index still lacks the version, so the next run re-derives the same number and finishes the job. The only thing refused is republishing a version the index already lists, because a chart release points at that image and rebuilding it would swap the digest underneath.
+
+### One-time setup
+
+The gh-pages Helm repo needs its branch to exist before the first release; chart-releaser will not create it:
+
+```bash
+git switch --orphan gh-pages && git commit --allow-empty -m "Initialize gh-pages" && git push -u origin gh-pages
+```
+
+Then enable GitHub Pages for the repository, serving from the `gh-pages` branch root.
 
 ## License
 
