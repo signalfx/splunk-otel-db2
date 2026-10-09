@@ -72,7 +72,7 @@ echo "2. standalone without an endpoint is rejected"
 if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" --set otlp.endpoint= 2>&1); then
   fail "render succeeded; a standalone install has no derivable endpoint and must be rejected"
 else
-  printf '%s' "$out" | grep -q 'otlp.endpoint is required' \
+  grep -Fq -- 'otlp.endpoint is required' <<<"$out" \
     && pass "rejected with the actionable message" \
     || fail "rejected, but not for the endpoint; got: $out"
 fi
@@ -114,7 +114,7 @@ if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.collectorTarget=nope' 2>&1); then
   fail "render succeeded with collectorTarget=nope; it must be rejected"
 else
-  printf '%s' "$out" | grep -q 'collectorTarget must be' \
+  grep -Fq -- 'collectorTarget must be' <<<"$out" \
     && pass "rejected with the actionable message" \
     || fail "rejected, but not for collectorTarget; got: $out"
 fi

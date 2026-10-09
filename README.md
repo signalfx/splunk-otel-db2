@@ -1006,7 +1006,9 @@ make next-version
 
 The chart's `version` and `appVersion` are always the same value, and CI verifies the image for that `appVersion` exists before releasing the chart — a chart pointing at an image tag that was never pushed fails at install time, not at release time.
 
-Pushing a `v<x>.<y>.<z>` tag overrides the derivation and publishes that exact version, which is the escape hatch for re-releasing a specific commit.
+Pushing a `v<x>.<y>.<z>` tag overrides the derivation and publishes that exact version — all three artifacts, exactly as a `main` merge does. After tagging a new major or minor, raise the floor in `Chart.yaml` to match, or `main` will carry on producing patches of the old series.
+
+**A release is "done" when the version appears on the index**, and nothing else counts. The index is written last, after the image, the GitHub release and the jar, so a version is only advertised once every artifact is in place. That also makes a failed release safe to retry: the index still lacks the version, so the next run re-derives the same number and finishes the job. The only thing refused is republishing a version the index already lists, because a chart release points at that image and rebuilding it would swap the digest underneath.
 
 ### One-time setup
 

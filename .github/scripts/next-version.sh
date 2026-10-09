@@ -103,7 +103,9 @@ to ${SERIES}.0 and let the patch derive, or bump minor instead"
 fi
 
 # Guard against republishing an existing version, which chart-releaser rejects opaquely.
-if printf '%s\n' "$published" | grep -qx "$version"; then
+# Not a `... | grep -q` pipeline: grep -q exits on first match and SIGPIPEs the producer,
+# which under pipefail reports failure even on a match.
+if grep -Fxq -- "$version" <<<"$published"; then
   die "version $version is already published; nothing to release"
 fi
 

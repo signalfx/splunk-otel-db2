@@ -207,7 +207,7 @@ jobs:
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - name: Require the gh-pages branch
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
           # cr index --push runs `git worktree add --detach <dir> origin/gh-pages` and does
           # not create the branch; a missing ref fails with "invalid reference". Checking
@@ -249,22 +249,41 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Refuse to overwrite a published image tag
+      - name: Refuse to republish a released version
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
+          INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
         run: |
-          # A v*.*.* tag push takes its version verbatim and so bypasses the
-          # already-published check in next-version.sh. Without this guard, re-tagging a
-          # commit would rebuild the image behind an already-released chart: the chart's
-          # appVersion stays the same while the digest changes, and under
-          # imagePullPolicy IfNotPresent different nodes can end up running different
-          # images for one chart version.
-          if docker manifest inspect "ghcr.io/signalfx/splunk-otel-db2:${VERSION}" >/dev/null 2>&1; then
-            echo "::error::ghcr.io/signalfx/splunk-otel-db2:${VERSION} already exists." \
-                 "Refusing to overwrite an image an existing chart release may point at." \
-                 "Publish a new version instead."
-            exit 1
-          fi
+          set -euo pipefail
+          # The chart index is the single source of truth for "this version is released",
+          # the same signal splunk-otel-collector-chart's own release workflow uses. It is
+          # written last, so a version appears there only once every other artifact landed.
+          #
+          # Checking the registry instead would be wrong in both directions: an image can
+          # exist from a release that died before the index was updated, in which case the
+          # retry that would finish it must be allowed; and a v*.*.* tag bypasses the
+          # already-published check in next-version.sh, so only an index check catches a
+          # re-tag of a version that really was released.
+          code=$(curl -sS --max-time 30 -o /tmp/index.yaml -w '%{http_code}' "$INDEX_URL" || echo 000)
+          case "$code" in
+            200)
+              # Not `yq ... | grep -q`: grep -q exits on first match, SIGPIPEs yq, and
+              # under pipefail the pipeline then reports failure even though it matched -
+              # which silently disables this guard. Capture first, match without a pipe.
+              released=$(yq e ".entries[\"splunk-otel-db2\"][].version" /tmp/index.yaml)
+              if grep -Fxq -- "$VERSION" <<<"$released"; then
+                echo "::error::$VERSION is already on the chart index, so a release pointing" \
+                     "at it exists. Rebuilding would swap the image behind that release:" \
+                     "appVersion stays the same while the digest changes, and under" \
+                     "imagePullPolicy IfNotPresent nodes can run different images for one" \
+                     "chart version. Publish a new version instead."
+                exit 1
+              fi
+              echo "$VERSION is not on the index yet; proceeding"
+              ;;
+            404) echo "No index published yet; proceeding" ;;
+            *)   echo "::error::unexpected HTTP $code from $INDEX_URL"; exit 1 ;;
+          esac
 
       - name: Stamp jar version
         env:
@@ -306,7 +325,7 @@ jobs:
       # Chart publishing is main-only. A chart released from a side branch would occupy a
       # version in the index that a later main release would try to reuse.
       - name: Stamp chart version
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
@@ -316,13 +335,13 @@ jobs:
           yq e '{"version": .version, "appVersion": .appVersion}' Chart.yaml
 
       - name: Install chart-releaser
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
           install_only: true
 
-      - name: Release chart to gh-pages
-        if: github.ref == 'refs/heads/main'
+      - name: Package the chart and create the release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -350,30 +369,21 @@ jobs:
             --commit "$GITHUB_SHA" \
             --skip-existing
 
-          # No --charts-repo: cr 1.7.0 does not accept it and points index entries at the
-          # GitHub release assets cr upload just created, which is what we want.
-          cr index \
-            --owner "$CHART_REPO_OWNER" --git-repo "$CHART_REPO_NAME" \
-            --token "$CR_TOKEN" \
-            --package-path .cr-release-packages \
-            --index-path .cr-index/index.yaml \
-            --push
-
       - name: Set up JDK 17
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Gradle
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           cache-read-only: true
 
       - name: Attach the fat jar to the release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -392,8 +402,29 @@ jobs:
           gh release view "splunk-otel-db2-${VERSION}" --json assets \
             --jq '.assets[] | "published asset: \(.name) (\(.size) bytes)"'
 
+      - name: Publish the index
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # This is the commit point and must stay the last publishing action. A version
+          # appears on the index only once the image, the release and the jar are all in
+          # place, which is what makes the index trustworthy as the "is it released" signal
+          # the guard above reads. Writing it earlier would let the index advertise a
+          # version whose jar never uploaded.
+          #
+          # No --charts-repo: cr 1.7.0 does not accept it, and index entries already point
+          # at the GitHub release assets cr upload created.
+          cr index \
+            --owner "$CHART_REPO_OWNER" --git-repo "$CHART_REPO_NAME" \
+            --token "$CR_TOKEN" \
+            --package-path .cr-release-packages \
+            --index-path .cr-index/index.yaml \
+            --push
+
       - name: Verify the version is now on the index
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
           INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
@@ -402,9 +433,10 @@ jobs:
           # a minute to serve a new commit when this was rehearsed, so poll rather than
           # check once.
           for attempt in $(seq 1 10); do
-            if curl -sS --max-time 20 "$INDEX_URL" \
-                 | yq e ".entries[\"splunk-otel-db2\"][].version" - 2>/dev/null \
-                 | grep -qx "$VERSION"; then
+            # Avoid `... | grep -q` under pipefail; see the guard step above.
+            listed=$(curl -sS --max-time 20 "$INDEX_URL" 2>/dev/null \
+                       | yq e ".entries[\"splunk-otel-db2\"][].version" - 2>/dev/null || true)
+            if grep -Fxq -- "$VERSION" <<<"$listed"; then
               echo "index.yaml now lists $VERSION"
               exit 0
             fi
