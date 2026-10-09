@@ -1,6 +1,18 @@
 # splunk-otel-db2
 
-A standalone OpenTelemetry receiver for IBM Db2. Collects metrics and active query samples from a Db2 database and exports them via OTLP gRPC to an OpenTelemetry Collector or Splunk Observability Cloud.
+A standalone OpenTelemetry receiver for IBM Db2. Collects metrics, active query samples, blocking sessions and top queries from a Db2 database and emits them as OTLP over gRPC.
+
+**It works alongside an OTel Collector, not instead of one.** The receiver reads Db2 over JDBC, converts what it finds into OTLP, and exports it — it does not store, aggregate or forward to a backend itself. Something must be listening on the OTLP endpoint you configure: an OpenTelemetry Collector, the Splunk Distribution of the OpenTelemetry Collector, or any OTLP-compatible receiver. That Collector is what enriches the data and forwards it to Splunk Observability Cloud or elsewhere.
+
+```
+                    JDBC                      OTLP/gRPC                        
+  ┌────────┐                ┌──────────────┐              ┌───────────────┐    
+  │  Db2   │ ◀────────────▶ │ splunk-otel- │ ───────────▶ │ OTel Collector│ ──▶ Splunk Observability Cloud
+  │ server │   monitoring   │     db2      │   port 4317  │  (you run it) │     (or any OTLP backend)
+  └────────┘     queries    └──────────────┘              └───────────────┘    
+```
+
+The receiver runs as its own process — a Deployment on Kubernetes, a systemd service, or a bare JVM. It is not a Collector plugin and is not compiled into the Collector binary, so adding it never changes an existing Collector pipeline.
 
 ## Requirements
 
@@ -168,9 +180,104 @@ Heap grows with the number of configured databases: each database gets its own O
 
 There is no hard limit on the number of databases in a single process. Beyond ~20–30 databases, heap pressure becomes the practical ceiling — raise `-Xmx` or split databases across multiple processes as needed.
 
+## Required permissions
+
+Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
+
+```bash
+# Create the OS user on the Db2 server (Linux example)
+useradd -m db2mon
+echo 'db2mon:<password>' | chpasswd
+```
+
+```sql
+-- Connect to the database as SYSADM or DBADM, then grant:
+
+-- Basic connect
+GRANT CONNECT ON DATABASE TO USER db2mon;
+
+-- Stored procedure called unconditionally on every connection
+GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
+
+-- Core metrics scrapers
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TRANSACTION_LOG TO USER db2mon;
+
+-- Top query collection (events.db.server.top_query.enabled: true)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
+
+-- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
+-- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
+-- Requires explain tables to be created once per schema — run as the monitoring user:
+--   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
+-- Then grant the procedure and the explain tables:
+GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
+-- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
+-- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
+
+-- Query sampling (events.db.server.query_sample.enabled: true, default path)
+GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
+
+-- Db2 10.5+ wait time attribute (db2.wait_time)
+GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
+
+-- Blocking session detection (runs automatically with events.db.server.query_sample.enabled: true)
+GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
+-- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
+
+-- Snapshot monitor path (use_snapshot_monitor: true)
+-- Note: blocking detection is NOT available on this path.
+-- IMPORTANT: the EXECUTE grants below are necessary but NOT sufficient. Every SNAP_GET_*
+-- function additionally requires the user to hold SYSMON, SYSCTRL, SYSMAINT or SYSADM
+-- instance-level authority — see the note after this block.
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
+-- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
+-- SNAP_GET_DB supplies the SQL activity metrics that have no MON_GET_* equivalent
+-- (see "SQL and row activity" under Metrics).
+-- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_DB TO USER db2mon;
+-- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
+--   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
+--   db2stop force && db2start
+-- This setting takes effect only after the instance is cycled; without the restart
+-- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
+```
+
+> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
+
+### Snapshot monitor authority (`use_snapshot_monitor: true`)
+
+The `SNAP_GET_*` functions are gated on **instance-level authority in addition to the `EXECUTE` grant**. DB2 requires one of `SYSMON`, `SYSCTRL`, `SYSMAINT` or `SYSADM`. A least-privilege monitoring user that has only been granted `EXECUTE` will silently receive no snapshot data — the receiver logs a warning and the snapshot-only metrics and dimensions are simply absent.
+
+`SYSMON` is the least-privileged option and is the one to use. It is granted by OS group, not by SQL, so it needs a DBM CFG change and an instance restart:
+
+```bash
+# Run as the instance owner. Replace db2mon_grp with the OS group your monitoring user belongs to.
+db2 UPDATE DBM CFG USING SYSMON_GROUP db2mon_grp
+db2stop force && db2start
+```
+
+Verify the user actually holds it:
+
+```sql
+SELECT AUTHORITY, D_USER, D_GROUP
+FROM TABLE(SYSPROC.AUTH_LIST_AUTHORITIES_FOR_AUTHID(CURRENT USER, 'U'))
+WHERE AUTHORITY = 'SYSMON';
+```
+
+A `Y` in `D_USER` or `D_GROUP` means the authority is held. If both are `N`, the snapshot path will not return data regardless of the `EXECUTE` grants. This applies to the query sample snapshot path (`SNAP_GET_APPL_INFO`, `SNAP_GET_STMT`) as well as the SQL activity metrics (`SNAP_GET_DB`).
+
 ## Installation
 
-There are three ways to run the receiver. All of them need a Db2 monitoring user first — see [Required permissions](#required-permissions) — and all of them export over OTLP/gRPC to a Collector you point them at.
+There are three ways to run the receiver. Two things are true of all of them:
+
+- **A Db2 monitoring user must exist first** — see [Required permissions](#required-permissions) above.
+- **An OTel Collector must be reachable.** The receiver only emits OTLP over gRPC; it needs something listening on the `otlp.endpoint` you configure. If nothing is, the receiver starts and scrapes Db2 normally but every export fails, so check its logs for export errors before assuming Db2 is the problem.
+
+If you do not already run an OTel Collector, [option 1B](#option-1b--scraper-and-otel-collector-together) deploys one alongside the receiver on Kubernetes, and [option 3B](#docker-compose) does the same with docker-compose.
 
 | | Method | Use it when | What you get |
 | --- | --- | --- | --- |
@@ -188,12 +295,12 @@ Pick one of two shapes depending on whether you already run an OTel Collector in
 
 | | Shape | Deploys | Choose when |
 | --- | --- | --- | --- |
-| **1A** | Scraper only | Db2 receiver | You already have a Collector running |
-| **1B** | Scraper **and** Collector | Db2 receiver + full `splunk-otel-collector` | You want one release to deploy everything |
+| **1A** | Scraper only | Db2 receiver | You already have an OTel Collector running |
+| **1B** | Scraper **and** OTel Collector | Db2 receiver + full `splunk-otel-collector` | You want one release to deploy everything |
 
 #### Option 1A — Scraper only
 
-The receiver runs on its own and exports to a Collector that already exists, anywhere — in the cluster, on another host, or any OTLP endpoint.
+The receiver runs on its own and exports to an OTel Collector that already exists, anywhere — in the cluster, on another host, or any OTLP endpoint.
 
 **Step 1 — Create the credentials Secret.** The chart reads `DB2_USER` and `DB2_PASSWORD` from a Secret you own:
 
@@ -217,7 +324,7 @@ receivers:
       insecure: true
 
 otlp:
-  # Required here. In-cluster Collector:
+  # Required here. In-cluster OTel Collector:
   endpoint: "http://my-otelcol-opentelemetry-collector.monitoring.svc.cluster.local:4317"
   # ...or one outside the cluster:
   # endpoint: "http://collector.example.com:4317"
@@ -277,7 +384,7 @@ imagePullSecrets:
 ```
 </details>
 
-#### Option 1B — Scraper and Collector together
+#### Option 1B — Scraper and OTel Collector together
 
 Install this chart as a dependency of [splunk-otel-collector-chart](https://github.com/signalfx/splunk-otel-collector-chart), so a single release deploys the Collector and the Db2 receiver. The receiver still runs as its own Deployment and exports *into* the Collector — it is not a Collector receiver.
 
@@ -383,7 +490,7 @@ sudo curl -fsSL -o /opt/splunk-otel-db2/splunk-otel-db2.jar \
 sudo useradd -r -s /sbin/nologin -M splunk-otel-db2
 ```
 
-**Step 3 — Write the config.** Set `otlp.endpoint` to your Collector — on this host, elsewhere, or any OTLP endpoint.
+**Step 3 — Write the config.** Set `otlp.endpoint` to your OTel Collector — on this host, elsewhere, or any OTLP endpoint.
 
 ```bash
 sudo mkdir -p /etc/splunk-otel-db2
@@ -475,9 +582,9 @@ docker run --rm \
 
 #### docker-compose
 
-The repo's compose files are the fastest way to see the receiver working end to end, and can optionally bring up a Collector too. Both require a checkout.
+The repo's compose files are the fastest way to see the receiver working end to end, and can optionally bring up an OTel Collector too. Both require a checkout.
 
-**Option 3A — Scraper only** (you already run a Collector elsewhere):
+**Option 3A — Scraper only** (you already run an OTel Collector elsewhere):
 
 ```bash
 git clone https://github.com/signalfx/splunk-otel-db2.git
@@ -496,7 +603,7 @@ export OTLP_ENDPOINT=http://your-collector:4317
 docker compose up --build -d && docker compose logs -f receiver
 ```
 
-**Option 3B — Scraper and Collector**, with the Collector forwarding to Splunk Observability Cloud:
+**Option 3B — Scraper and OTel Collector**, with the OTel Collector forwarding to Splunk Observability Cloud:
 
 ```bash
 export DB2_HOST=db2.example.com
@@ -827,96 +934,6 @@ The plan JSON format:
 ```json
 {"operators":[{"id":1,"type":"RETURN","cost":198.6},{"id":2,"type":"NLJOIN","cost":198.6}],"streams":[{"id":1,"from":-1,"to":3,"cols":477}]}
 ```
-
-## Required permissions
-
-Db2 LUW authenticates users through the operating system (or an external LDAP/PAM provider) — there is no `CREATE USER` SQL command. Create the OS user first, then grant database authorities:
-
-```bash
-# Create the OS user on the Db2 server (Linux example)
-useradd -m db2mon
-echo 'db2mon:<password>' | chpasswd
-```
-
-```sql
--- Connect to the database as SYSADM or DBADM, then grant:
-
--- Basic connect
-GRANT CONNECT ON DATABASE TO USER db2mon;
-
--- Stored procedure called unconditionally on every connection
-GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
-
--- Core metrics scrapers
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_BUFFERPOOL TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TABLESPACE TO USER db2mon;
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_TRANSACTION_LOG TO USER db2mon;
-
--- Top query collection (events.db.server.top_query.enabled: true)
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_PKG_CACHE_STMT TO USER db2mon;
-
--- Explain plan enrichment (top_query_collection.max_explain_each_interval > 0)
--- EXPLAIN_FROM_SECTION reads the compiled plan from the package cache (no query re-execution).
--- Requires explain tables to be created once per schema — run as the monitoring user:
---   CALL SYSPROC.SYSINSTALLOBJECTS('EXPLAIN', 'C', NULL, CURRENT SCHEMA)
--- Then grant the procedure and the explain tables:
-GRANT EXECUTE ON PROCEDURE SYSPROC.EXPLAIN_FROM_SECTION TO USER db2mon;
--- The monitoring user must also have INSERT/SELECT/DELETE on its own explain tables.
--- These are automatically granted when SYSINSTALLOBJECTS is run as that user.
-
--- Query sampling (events.db.server.query_sample.enabled: true, default path)
-GRANT SELECT ON TABLE SYSIBMADM.MON_CURRENT_SQL TO USER db2mon;
-
--- Db2 10.5+ wait time attribute (db2.wait_time)
-GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_ACTIVITY TO USER db2mon;
-
--- Blocking session detection (runs automatically with events.db.server.query_sample.enabled: true)
-GRANT SELECT ON TABLE SYSIBMADM.MON_LOCKWAITS TO USER db2mon;
--- MON_CURRENT_SQL, MON_GET_CONNECTION, and MON_GET_PKG_CACHE_STMT are already granted above.
-
--- Snapshot monitor path (use_snapshot_monitor: true)
--- Note: blocking detection is NOT available on this path.
--- IMPORTANT: the EXECUTE grants below are necessary but NOT sufficient. Every SNAP_GET_*
--- function additionally requires the user to hold SYSMON, SYSCTRL, SYSMAINT or SYSADM
--- instance-level authority — see the note after this block.
--- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_APPL_INFO TO USER db2mon;
--- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_STMT TO USER db2mon;
--- GRANT SELECT ON TABLE SYSCAT.STATEMENTS TO USER db2mon;
--- SNAP_GET_DB supplies the SQL activity metrics that have no MON_GET_* equivalent
--- (see "SQL and row activity" under Metrics).
--- GRANT EXECUTE ON FUNCTION SYSPROC.SNAP_GET_DB TO USER db2mon;
--- Also requires DFT_MON_STMT ON. Run as SYSADM, then restart the instance:
---   db2 UPDATE DBM CFG USING DFT_MON_STMT ON
---   db2stop force && db2start
--- This setting takes effect only after the instance is cycled; without the restart
--- new connections inherit the old default and SNAP_GET_STMT returns no statement text.
-```
-
-> **Note**: `SYSIBMADM.MON_CURRENT_SQL` requires `DATAACCESS` or the individual `SELECT` grant shown above. Check with your DBA if queries fail with `SQLCODE=-551`.
-
-### Snapshot monitor authority (`use_snapshot_monitor: true`)
-
-The `SNAP_GET_*` functions are gated on **instance-level authority in addition to the `EXECUTE` grant**. DB2 requires one of `SYSMON`, `SYSCTRL`, `SYSMAINT` or `SYSADM`. A least-privilege monitoring user that has only been granted `EXECUTE` will silently receive no snapshot data — the receiver logs a warning and the snapshot-only metrics and dimensions are simply absent.
-
-`SYSMON` is the least-privileged option and is the one to use. It is granted by OS group, not by SQL, so it needs a DBM CFG change and an instance restart:
-
-```bash
-# Run as the instance owner. Replace db2mon_grp with the OS group your monitoring user belongs to.
-db2 UPDATE DBM CFG USING SYSMON_GROUP db2mon_grp
-db2stop force && db2start
-```
-
-Verify the user actually holds it:
-
-```sql
-SELECT AUTHORITY, D_USER, D_GROUP
-FROM TABLE(SYSPROC.AUTH_LIST_AUTHORITIES_FOR_AUTHID(CURRENT USER, 'U'))
-WHERE AUTHORITY = 'SYSMON';
-```
-
-A `Y` in `D_USER` or `D_GROUP` means the authority is held. If both are `N`, the snapshot path will not return data regardless of the `EXECUTE` grants. This applies to the query sample snapshot path (`SNAP_GET_APPL_INFO`, `SNAP_GET_STMT`) as well as the SQL activity metrics (`SNAP_GET_DB`).
 
 ## Development
 
