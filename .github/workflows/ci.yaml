@@ -359,6 +359,39 @@ jobs:
             --index-path .cr-index/index.yaml \
             --push
 
+      - name: Set up JDK 17
+        if: github.ref == 'refs/heads/main'
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        if: github.ref == 'refs/heads/main'
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: true
+
+      - name: Attach the fat jar to the release
+        if: github.ref == 'refs/heads/main'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The systemd install needs the jar from somewhere. It is published only here, as
+          # an asset on the release cr upload just created, so its version always matches
+          # the chart and image from this same run. build.gradle was stamped earlier, so
+          # shadowJar emits splunk-otel-db2-<version>.jar.
+          ./gradlew shadowJar --no-daemon -q
+          jar="build/libs/splunk-otel-db2-${VERSION}.jar"
+          test -f "$jar"
+          # --clobber so a retry after a partial release can re-upload. The version is
+          # guaranteed fresh by the image-tag guard, so this cannot overwrite a prior release.
+          gh release upload "splunk-otel-db2-${VERSION}" "$jar" --clobber
+          gh release view "splunk-otel-db2-${VERSION}" --json assets \
+            --jq '.assets[] | "published asset: \(.name) (\(.size) bytes)"'
+
       - name: Verify the version is now on the index
         if: github.ref == 'refs/heads/main'
         env:
