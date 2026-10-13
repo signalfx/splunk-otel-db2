@@ -1018,18 +1018,7 @@ The gh-pages Helm repo needs its branch to exist before the first release; chart
 git switch --orphan gh-pages && git commit --allow-empty -m "Initialize gh-pages" && git push -u origin gh-pages
 ```
 
-**Publishing needs only that branch.** The release reads and writes `index.yaml` on `gh-pages` over git, with the credentials CI already has, so it works regardless of repository visibility.
-
-GitHub Pages and public visibility are what **consumers** need, and they are separate concerns:
-
-| Requirement | Needed for | Needed to publish? |
-| --- | --- | --- |
-| `gh-pages` branch | the index itself | **yes** |
-| Pages enabled, serving `gh-pages` root | `helm repo add`, `helm dep build` | no |
-| Repository public | those commands working anonymously | no |
-| GHCR package public | `helm install` pulling the image | no |
-
-On a private or internal repository the release still completes, but `https://<owner>.github.io/<repo>/index.yaml` redirects to an authenticated host, so nothing outside CI can install the chart. Both visibility flips are repository-admin actions.
+Then enable GitHub Pages for the repository, serving from the `gh-pages` branch root.
 
 ## License
 
