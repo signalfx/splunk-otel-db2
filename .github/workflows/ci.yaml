@@ -222,8 +222,25 @@ jobs:
           fi
           echo "origin/gh-pages present at $(git rev-parse --short origin/gh-pages)"
 
+      - name: Read the published chart index
+        run: |
+          set -euo pipefail
+          # Read index.yaml off the gh-pages branch rather than over HTTP. GitHub Pages is
+          # only a public mirror of this file, so fetching it anonymously would make the
+          # release depend on the repository being public — unrelated to CI's ability to
+          # read its own branch, which the gh-pages check above already proved. An empty
+          # file is how "nothing published yet" is represented downstream.
+          if git show origin/gh-pages:index.yaml > /tmp/chart-index.yaml 2>/dev/null; then
+            echo "read index.yaml from origin/gh-pages ($(wc -c < /tmp/chart-index.yaml) bytes)"
+          else
+            : > /tmp/chart-index.yaml
+            echo "origin/gh-pages has no index.yaml yet; first release"
+          fi
+
       - name: Resolve version
         id: resolve
+        env:
+          CHART_INDEX_FILE: /tmp/chart-index.yaml
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             # An explicit tag is a deliberate override; honour it verbatim rather than
@@ -252,7 +269,6 @@ jobs:
       - name: Refuse to republish a released version
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
-          INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
         run: |
           set -euo pipefail
           # The chart index is the single source of truth for "this version is released",
@@ -264,13 +280,13 @@ jobs:
           # retry that would finish it must be allowed; and a v*.*.* tag bypasses the
           # already-published check in next-version.sh, so only an index check catches a
           # re-tag of a version that really was released.
-          code=$(curl -sS --max-time 30 -o /tmp/index.yaml -w '%{http_code}' "$INDEX_URL" || echo 000)
-          case "$code" in
-            200)
+          #
+          # Uses the copy already read off gh-pages, so this does not depend on Pages.
+          if [ -s /tmp/chart-index.yaml ]; then
               # Not `yq ... | grep -q`: grep -q exits on first match, SIGPIPEs yq, and
               # under pipefail the pipeline then reports failure even though it matched -
               # which silently disables this guard. Capture first, match without a pipe.
-              released=$(yq e ".entries[\"splunk-otel-db2\"][].version" /tmp/index.yaml)
+              released=$(yq e ".entries[\"splunk-otel-db2\"][].version" /tmp/chart-index.yaml)
               if grep -Fxq -- "$VERSION" <<<"$released"; then
                 echo "::error::$VERSION is already on the chart index, so a release pointing" \
                      "at it exists. Rebuilding would swap the image behind that release:" \
@@ -280,10 +296,9 @@ jobs:
                 exit 1
               fi
               echo "$VERSION is not on the index yet; proceeding"
-              ;;
-            404) echo "No index published yet; proceeding" ;;
-            *)   echo "::error::unexpected HTTP $code from $INDEX_URL"; exit 1 ;;
-          esac
+          else
+            echo "No index published yet; proceeding"
+          fi
 
       - name: Stamp jar version
         env:
@@ -427,21 +442,20 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
-          INDEX_URL: https://${{ env.CHART_REPO_OWNER }}.github.io/${{ env.CHART_REPO_NAME }}/index.yaml
         run: |
-          # Guards against a publish path that exits 0 without publishing. Pages took about
-          # a minute to serve a new commit when this was rehearsed, so poll rather than
-          # check once.
-          for attempt in $(seq 1 10); do
-            # Avoid `... | grep -q` under pipefail; see the guard step above.
-            listed=$(curl -sS --max-time 20 "$INDEX_URL" 2>/dev/null \
-                       | yq e ".entries[\"splunk-otel-db2\"][].version" - 2>/dev/null || true)
-            if grep -Fxq -- "$VERSION" <<<"$listed"; then
-              echo "index.yaml now lists $VERSION"
-              exit 0
-            fi
-            echo "attempt $attempt: $VERSION not on the index yet; retrying in 15s"
-            sleep 15
-          done
-          echo "::error::$VERSION was never published to the index"
-          exit 1
+          set -euo pipefail
+          # Guards against a publish path that exits 0 without publishing. Checks the branch
+          # cr just pushed to, not Pages: the branch is the artifact, Pages is a mirror of
+          # it that only serves publicly and lags by about a minute. Verifying the mirror
+          # would make this step fail on a private repository even though the release
+          # completed, and would conflate a Pages delay with a publish failure.
+          git fetch --quiet origin gh-pages
+          listed=$(git show origin/gh-pages:index.yaml \
+                     | yq e ".entries[\"splunk-otel-db2\"][].version" -)
+          # Avoid `... | grep -q` under pipefail; see the guard step above.
+          if grep -Fxq -- "$VERSION" <<<"$listed"; then
+            echo "index.yaml on gh-pages now lists $VERSION"
+          else
+            echo "::error::$VERSION was never published to the index on gh-pages"
+            exit 1
+          fi

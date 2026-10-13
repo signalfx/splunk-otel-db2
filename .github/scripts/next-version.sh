@@ -23,6 +23,12 @@ readonly CHART_NAME="${CHART_NAME:-splunk-otel-db2}"
 readonly CHART_REPO_OWNER="${CHART_REPO_OWNER:-signalfx}"
 readonly CHART_REPO_NAME="${CHART_REPO_NAME:-splunk-otel-db2}"
 readonly INDEX_URL="${INDEX_URL:-https://${CHART_REPO_OWNER}.github.io/${CHART_REPO_NAME}/index.yaml}"
+# Preferred source: a copy of index.yaml already on disk, which CI reads straight off the
+# gh-pages branch. GitHub Pages is only a public mirror of that file, so fetching it over
+# HTTP would make deriving a version depend on the repository being public - which has
+# nothing to do with CI's ability to read its own branch. An empty file means nothing has
+# been published yet. INDEX_URL stays as the fallback for running this outside CI.
+readonly CHART_INDEX_FILE="${CHART_INDEX_FILE:-}"
 
 die() {
   echo "::error::$*" >&2
@@ -43,18 +49,35 @@ fi
 readonly SERIES="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
 readonly FLOOR_PATCH="${BASH_REMATCH[3]}"
 
-# A missing index is the expected state before the first release, so it must not be fatal.
-# Distinguish that from a transport failure: publishing 0.1.0 over a transient 500 would
-# collide with whatever is already released.
 index=$(mktemp)
 trap 'rm -f "$index"' EXIT
-curl_out=$(curl -sS --max-time 30 -o "$index" -w '%{http_code} %{redirect_url}' "$INDEX_URL" 2>/dev/null)
-curl_status=$?
-http_code=${curl_out%% *}
-redirect=${curl_out#* }
 
-if [ "$curl_status" -ne 0 ]; then
-  die "could not reach $INDEX_URL (curl exit $curl_status); refusing to guess a version"
+if [ -n "$CHART_INDEX_FILE" ]; then
+  [ -f "$CHART_INDEX_FILE" ] || die "CHART_INDEX_FILE is set but not a file: $CHART_INDEX_FILE"
+  cp "$CHART_INDEX_FILE" "$index"
+  if [ -s "$index" ]; then
+    http_code=200
+    source="$CHART_INDEX_FILE"
+    echo "Reading the index from $source" >&2
+  else
+    # An empty file is how CI represents "the gh-pages branch has no index.yaml yet".
+    http_code=404
+    source="$CHART_INDEX_FILE"
+  fi
+  redirect=
+else
+  # A missing index is the expected state before the first release, so it must not be fatal.
+  # Distinguish that from a transport failure: publishing 0.1.0 over a transient 500 would
+  # collide with whatever is already released.
+  source="$INDEX_URL"
+  curl_out=$(curl -sS --max-time 30 -o "$index" -w '%{http_code} %{redirect_url}' "$INDEX_URL" 2>/dev/null)
+  curl_status=$?
+  http_code=${curl_out%% *}
+  redirect=${curl_out#* }
+
+  if [ "$curl_status" -ne 0 ]; then
+    die "could not reach $INDEX_URL (curl exit $curl_status); refusing to guess a version"
+  fi
 fi
 
 case "$http_code" in
@@ -62,12 +85,12 @@ case "$http_code" in
     # A parse failure must be fatal. Treating malformed YAML as "nothing published" would
     # select the floor and overwrite a release that already exists.
     if ! parsed=$(yq e ".entries[\"${CHART_NAME}\"][].version // \"\"" "$index" 2>&1); then
-      die "could not parse $INDEX_URL as a Helm repository index: $parsed"
+      die "could not parse $source as a Helm repository index: $parsed"
     fi
     published=$(printf '%s\n' "$parsed" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
     ;;
   404)
-    echo "No index at $INDEX_URL yet; treating $floor as the first release" >&2
+    echo "No index at $source yet; treating $floor as the first release" >&2
     published=""
     ;;
   30[1278])
