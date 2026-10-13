@@ -156,12 +156,12 @@ class Db2MultiReceiverIntegrationTest {
 
         Db2ReceiverConfig config1 = buildConfig();
         config1.getEvents().getDbServerQuerySample().setEnabled(true);
-        config1.getQuerySampleCollection().setCollectionInterval("1s");
+        config1.getQuerySampleCollection().setCollectionInterval("5s");
         config1.getEvents().getDbServerTopQuery().setEnabled(false);
 
         Db2ReceiverConfig config2 = buildConfig();
         config2.getEvents().getDbServerQuerySample().setEnabled(true);
-        config2.getQuerySampleCollection().setCollectionInterval("1s");
+        config2.getQuerySampleCollection().setCollectionInterval("5s");
         config2.getEvents().getDbServerTopQuery().setEnabled(false);
 
         java.util.Properties props = new java.util.Properties();

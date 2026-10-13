@@ -84,6 +84,7 @@ public final class QuerySampleEvent {
     private String  lockSchema;
     private String  blockingStartTime;
     private Double  waitDurationSec;
+    private boolean blocked;
     private SpanContext spanContext;
 
     private QuerySampleEvent(String dbNamespace, String queryText,
@@ -138,6 +139,16 @@ public final class QuerySampleEvent {
     }
 
     /**
+     * Marks the session as lock-blocked independently of the wait duration.
+     *
+     * <p>Severity used to be derived from {@code waitDurationSec != null}, which conflated two
+     * different facts: that a lock wait exists, and that its duration is known. A matched
+     * MON_LOCKWAITS row with a NULL elapsed time is still a confirmed block, and reporting it at
+     * INFO while carrying blocking attributes understates a real problem.
+     */
+    public QuerySampleEvent blocked(boolean v) { this.blocked = v; return this; }
+
+    /**
      * Links this event to the trace the sampled application was running under, as read from the
      * session's CLIENT_ACCTNG traceparent. Null when the application did not propagate one.
      */
@@ -175,9 +186,10 @@ public final class QuerySampleEvent {
         if (waitDurationSec   != null) b.put(DB2_WAIT_DURATION,      waitDurationSec);
 
         // Blocked sessions are escalated to WARN so they stand out in OTel backends.
-        // waitDurationSec is set whenever a MON_LOCKWAITS row matched — including
-        // global lock waits where blockerHandle may be null.
-        boolean isBlocked = waitDurationSec != null;
+        // Driven by the explicit blocked flag, not by the presence of a duration: a matched
+        // MON_LOCKWAITS row with a NULL elapsed time is still a confirmed block. waitDurationSec
+        // is kept as a fallback for callers that only set the duration.
+        boolean isBlocked = blocked || waitDurationSec != null;
         Severity severity = isBlocked ? Severity.WARN : Severity.INFO;
 
         io.opentelemetry.api.logs.LogRecordBuilder builder = logger.logRecordBuilder()

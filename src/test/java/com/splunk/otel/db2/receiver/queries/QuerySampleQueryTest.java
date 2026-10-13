@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.mockito.stubbing.OngoingStubbing;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -16,6 +17,7 @@ import java.sql.Statement;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -571,6 +573,104 @@ class QuerySampleQueryTest {
         String sql = sqlCap.getValue();
         assertThat(sql).containsIgnoringCase("BLOCKER_SQL.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE");
         assertThat(sql).doesNotContain("BLOCKER_SQL.COORD_MEMBER");
+        // Matching on the handle alone means the holder can have several MON_CURRENT_SQL rows, so
+        // the join must be deduplicated or it multiplies the sampled session.
+        assertThat(sql).contains("BLOCKER_SQL.RN = 1");
+    }
+
+    // Pins the invariant "at most one row per sampled session". On 11.5.9.0 MON_LOCKWAITS was
+    // measured to return a single row per waiting request even with three S-lock holders, so this
+    // guards the other paths the receiver supports (9.7, snapshot, pureScale/DPF subagents) rather
+    // than fixing observed duplication.
+    @Test
+    void lockWaitsIsCollapsedToOneHolderPerRequestor() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+
+        // Application scope, not member scope: MON_CURRENT_SQL aggregates across members and reports
+        // only COORD_MEMBER, so partitioning or joining by member loses the lock wait of any
+        // pureScale/DPF activity waiting on a non-coordinator member.
+        assertThat(sql).contains("PARTITION BY REQ_APPLICATION_HANDLE ");
+        assertThat(sql).doesNotContain("LW.REQ_MEMBER = S.COORD_MEMBER");
+        assertThat(sql).contains("LW.RN = 1");
+        // Longest wait wins, with stable tie-breaks so the choice does not flap between collections
+        // when members or holders have waited equally long.
+        assertThat(sql).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC");
+        assertThat(sql).contains("HLD_APPLICATION_HANDLE) AS RN");
+    }
+
+    @Test
+    void db2_10_5PathAlsoCollapsesLockWaits() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).contains("LW.RN = 1");
+        assertThat(sqlCap.getValue()).contains("BLOCKER_SQL.RN = 1");
+    }
+
+    // MON_GET_ACTIVITY(NULL, -2) returns a row per member, so a distributed activity would multiply
+    // the outer row just as the lock-wait join did. It must be aggregated, not reduced to one
+    // member's row: db2.wait_time is documented as cumulative, so picking the largest member would
+    // under-report a distributed wait (4s + 6s must read 10s, not 6s).
+    @Test
+    void activityJoinIsAggregatedPerActivityAndSumsWaitTime() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue();
+
+        assertThat(sql).contains("SUM(LOCK_WAIT_TIME) AS LOCK_WAIT_TIME");
+        assertThat(sql).contains("MIN(EXECUTABLE_ID) AS EXECUTABLE_ID");
+        assertThat(sql).contains("GROUP BY APPLICATION_HANDLE, UOW_ID, ACTIVITY_ID");
+        // The un-collapsed form must be gone, and so must the max-pick that under-reported.
+        assertThat(sql).doesNotContain("TABLE(MON_GET_ACTIVITY(NULL, -2)) AS A");
+        assertThat(sql).doesNotContain("A.RN = 1");
+    }
+
+    // Db2 sorts NULLs as high, so a plain DESC window puts an unknown value first -- verified
+    // against 11.5.9.0, where ORDER BY V DESC selected the NULL row over a real maximum. Every
+    // descending window that picks a "longest" row must therefore say NULLS LAST, or an unknown
+    // wait beats a real one and an unknown elapsed time beats the longest-running blocker.
+    @Test
+    void descendingWindowsPutNullsLast() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query105().collect();
+        ArgumentCaptor<String> cap105 = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(cap105.capture());
+        String sql105 = cap105.getValue();
+
+        assertThat(sql105).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST");
+        assertThat(sql105).contains("ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST");
+
+        // No descending ordering may be left without it.
+        assertThat(countOccurrences(sql105, "DESC NULLS LAST"))
+            .isEqualTo(countOccurrences(sql105, " DESC"));
+
+        reset(stmt, rs);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+        ArgumentCaptor<String> cap97 = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(cap97.capture());
+        String sql97 = cap97.getValue();
+
+        assertThat(sql97).contains("ORDER BY LOCK_WAIT_ELAPSED_TIME DESC NULLS LAST");
+        assertThat(sql97).contains("ORDER BY ELAPSED_TIME_SEC DESC NULLS LAST");
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int n = 0, i = 0;
+        while ((i = haystack.indexOf(needle, i)) >= 0) { n++; i += needle.length(); }
+        return n;
     }
 
     @Test
@@ -661,6 +761,20 @@ class QuerySampleQueryTest {
         assertThat(QuerySampleQuery.toRfc3339("2024-01-01-00.00.00.000000"))
             .isEqualTo("2024-01-01T00:00:00.000000Z");
         assertThat(QuerySampleQuery.toRfc3339(null)).isNull();
+    }
+
+    // Input too short to carry a date and time used to be returned unchanged, producing a value
+    // that looked like a timestamp but had no trailing Z. Downstream needs that Z to build the
+    // blocking-event key, so it broke event merging silently instead of failing. Omit it instead.
+    @Test
+    void toRfc3339OmitsValuesItCannotConvert() {
+        assertThat(QuerySampleQuery.toRfc3339("2024-01-15")).isNull();
+        assertThat(QuerySampleQuery.toRfc3339("")).isNull();
+        assertThat(QuerySampleQuery.toRfc3339("   ")).isNull();
+        assertThat(QuerySampleQuery.toRfc3339("garbage")).isNull();
+        // Exactly 19 chars is the shortest convertible form and must still work.
+        assertThat(QuerySampleQuery.toRfc3339("2024-01-15-12.30.45"))
+            .isEqualTo("2024-01-15T12:30:45Z");
     }
 
     @Test
@@ -844,6 +958,186 @@ class QuerySampleQueryTest {
         verify(logBuilder).setContext(cap.capture());
         assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
             .getSpanContext().getTraceId()).isEqualTo(TRACE_ID);
+    }
+
+    // getLong turns SQL NULL into 0, which cleared the >= 0 guard and produced a zero-second
+    // blocking event escalated to WARN, synthesized entirely from missing data.
+    @Test
+    void nullBlockingWaitDoesNotFabricateABlockingEvent() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(0L);
+        when(rs.wasNull()).thenReturn(true);   // the column was SQL NULL
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_DURATION)).isNull();
+        // The duration is absent, but IS_BLOCKED == 1 still proves a lock wait, so the record must
+        // stay WARN rather than quietly understating a real block.
+        verify(logBuilder).setSeverity(Severity.WARN);
+    }
+
+    /** Stubs n blocked rows that all name the same idle blocker, forcing the lookup path. */
+    private void stubBlockedRowsWithIdleBlocker(int rows, long blockerHandle) throws Exception {
+        Boolean[] more = new Boolean[rows];
+        java.util.Arrays.fill(more, true);
+        more[rows - 1] = false;
+        when(rs.next()).thenReturn(true, more);
+
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(3L);
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(blockerHandle);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKER_SQL")).thenReturn(null);
+        when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T");
+        // The pkg-cache lookup returns nothing; what matters is how often it is attempted.
+        when(prs.next()).thenReturn(false);
+    }
+
+    // One holder commonly blocks many requestors. Without memoization the same package-cache scan
+    // runs once per blocked row, on the sampling connection, while the outer result set is open.
+    @Test
+    void idleBlockerLookupIsMemoizedAcrossRowsWithTheSameHolder() throws Exception {
+        stubBlockedRowsWithIdleBlocker(5, 999L);
+
+        query(false).collect();
+
+        // Five blocked rows naming one holder must cost exactly one lookup.
+        verify(conn, times(1)).prepareStatement(anyString());
+    }
+
+    @Test
+    void idleBlockerLookupsAreCappedPerCollection() throws Exception {
+        int rows = QuerySampleQuery.MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL + 5;
+        Boolean[] more = new Boolean[rows];
+        java.util.Arrays.fill(more, true);
+        more[rows - 1] = false;
+        when(rs.next()).thenReturn(true, more);
+
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(3L);
+        when(rs.getInt("BLOCKER_IS_IDLE")).thenReturn(1);
+        when(rs.getString("BLOCKER_SQL")).thenReturn(null);
+        when(prs.next()).thenReturn(false);
+        // A distinct holder per row defeats the cache, so only the budget limits the lookups.
+        OngoingStubbing<Object> stub = when(rs.getObject("BLOCKER_HANDLE"));
+        for (long h = 1; h <= rows; h++) stub = stub.thenReturn(h);
+
+        query(false).collect();
+
+        verify(conn, times(QuerySampleQuery.MAX_IDLE_BLOCKER_LOOKUPS_PER_INTERVAL))
+            .prepareStatement(anyString());
+    }
+
+    // The budget must not leak across collections, or one busy interval starves every later one.
+    @Test
+    void idleBlockerBudgetResetsEachCollection() throws Exception {
+        QuerySampleQuery q = query(false);
+
+        stubBlockedRowsWithIdleBlocker(2, 777L);
+        q.collect();
+        verify(conn, times(1)).prepareStatement(anyString());
+
+        // Second collection, same holder: the cache was cleared, so it looks up again.
+        stubBlockedRowsWithIdleBlocker(2, 777L);
+        q.collect();
+        verify(conn, times(2)).prepareStatement(anyString());
+    }
+
+    // NULL would arrive as 0 -- a real member number -- instead of the -2 all-members sentinel,
+    // sending the lookup to the wrong member.
+    @Test
+    void nullBlockerMemberBecomesTheAllMembersSentinel() throws Exception {
+        stubBlockedRowsWithIdleBlocker(1, 555L);
+        when(rs.getLong("BLOCKER_MEMBER")).thenReturn(0L);
+        when(rs.wasNull()).thenReturn(false, true);   // wait-sec present, member NULL
+
+        query(false).collect();
+
+        // IDLE_BLOCKER_SQL binds the member twice (MON_GET_CONNECTION and MON_GET_PKG_CACHE_STMT).
+        verify(pstmt, times(2)).setInt(anyInt(), eq(-2));
+    }
+
+    @Test
+    void realZeroBlockingWaitIsStillReported() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "LOCKWAIT DML", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getInt("IS_BLOCKED")).thenReturn(1);
+        when(rs.getLong("BLOCKING_WAIT_SEC")).thenReturn(0L);
+        when(rs.wasNull()).thenReturn(false);  // genuinely zero, not NULL
+        when(rs.getObject("BLOCKER_HANDLE")).thenReturn(null);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_WAIT_DURATION)).isEqualTo(0.0);
+        verify(logBuilder).setSeverity(Severity.WARN);
+    }
+
+    // The plan hash is only meaningful if something populates db2.query_plan. With plan collection
+    // off -- the default -- a hash the UI can never resolve is worse than no hash.
+    @Test
+    void planHashIsSuppressedWhenPlanCollectionIsDisabled() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getBytes("EXEC_ID_BYTES")).thenReturn(new byte[]{1, 2, 3, 4});
+
+        new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, false,
+            QuerySampleQuery.DB2_VERSION_10_5, 30, false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_PLAN_HASH)).isNull();
+    }
+
+    @Test
+    void planHashIsEmittedWhenPlanCollectionIsEnabled() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", "EXECUTING SELECT", "2024-01-01-12.00.00.000000",
+                5L, "db2inst1", "host", "1", 0L, 0L);
+        when(rs.getBytes("EXEC_ID_BYTES")).thenReturn(new byte[]{1, 2, 3, 4});
+
+        new QuerySampleQuery(() -> conn, "TESTDB", otelLogger, 100, false,
+            QuerySampleQuery.DB2_VERSION_10_5, 30, true).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_PLAN_HASH)).isEqualTo("01020304");
+    }
+
+    // A floor on the sampling interval, mirroring top-query's 60s rule: below this the monitor
+    // queries dominate the instance they are measuring.
+    @Test
+    void querySampleIntervalBelowTheFloorIsRejected() {
+        com.splunk.otel.db2.config.Db2ReceiverConfig.QuerySampleCollectionConfig cfg =
+            new com.splunk.otel.db2.config.Db2ReceiverConfig.QuerySampleCollectionConfig();
+
+        cfg.setCollectionInterval("1s");
+        assertThatThrownBy(cfg::getCollectionIntervalDuration)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("must be at least 5s");
+
+        cfg.setCollectionInterval("5s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(5L);
+
+        cfg.setCollectionInterval("30s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(30L);
     }
 
     @Test

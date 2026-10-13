@@ -424,7 +424,11 @@ class TopQueryQueryTest {
         assertThat(sql).contains("MON_GET_CONNECTION");
         assertThat(sql).contains("SNAP_GET_APPL_INFO");
         assertThat(sql).contains("SNAP_GET_STMT");
-        assertThat(sql).contains("SYSDUMMY1");
+        // Deliberately no SYSDUMMY1 filter: SELECT ... FROM SYSIBM.SYSDUMMY1 is ordinary Db2
+        // application code, so excluding it dropped real customer top queries. The receiver's only
+        // SYSDUMMY1 statement is the snapshot query sample, already covered by the
+        // SNAP_GET_APPL_INFO and SNAP_GET_STMT filters above.
+        assertThat(sql).doesNotContain("SYSDUMMY1");
         // The metric collectors' own table functions must be excluded too, or the receiver's
         // monitoring SQL is ranked as a user top query and consumes explain-plan budget.
         assertThat(sql).contains("MON_GET_TRANSACTION_LOG");
@@ -1265,13 +1269,6 @@ class TopQueryQueryTest {
         assertThat(TopQueryQuery.hexToBytes("0off")).isNull(); // non-hex character
     }
 
-    @Test
-    void sha256HexIsDeterministicAndCorrectLength() {
-        String h = TopQueryQuery.sha256Hex("hello");
-        assertThat(h).hasSize(64).matches("[0-9a-f]+");
-        assertThat(TopQueryQuery.sha256Hex("hello")).isEqualTo(h);
-        assertThat(TopQueryQuery.sha256Hex("other")).isNotEqualTo(h);
-    }
 
     // --- Config validation tests ---
 
@@ -2240,5 +2237,51 @@ class TopQueryQueryTest {
         assertThat(plan).isNotNull();
         // Double-quoted literal "P-9001" must be redacted even without a QLANG row
         assertThat(plan).doesNotContain("P-9001");
+    }
+
+    // The plan cache key must equal the emitted db2.query_plan.hash, which is the bare
+    // EXECUTABLE_ID with no member prefix. That hash is the plan's object-storage key downstream,
+    // so if the two ever diverge the agent and the pipeline disagree about what identifies a plan.
+    //
+    // Cross-member sharing is deliberately not asserted here: the delta baseline is still keyed by
+    // member, so a new member's first cycle seeds its baseline and emits nothing, which would make
+    // any such assertion pass for the wrong reason.
+    @Test
+    void emittedPlanHashIsBareExecutableIdMatchingTheCacheKey() throws Exception {
+        stubPlanPs(null);
+        TopQueryQuery q = queryWithPlan();
+
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 5L, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 6L, 1500L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        String hash = cap.getValue().get(TopQueryEvent.DB2_PLAN_HASH);
+        // stubRow derives EXECUTABLE_ID bytes from the execId, so the hash is hex("exec1").
+        assertThat(hash).isEqualTo("6578656331");
+        // The point of the assertion: a bare id, with no "member:" prefix.
+        assertThat(hash).doesNotContain(":");
+
+        // Third cycle, same section: served from the cache, so no further EXPLAIN.
+        reset(stmt, rs, otelLogger, logBuilder);
+        when(conn.createStatement()).thenReturn(stmt);
+        when(stmt.executeQuery(anyString())).thenReturn(rs);
+        when(otelLogger.logRecordBuilder()).thenReturn(logBuilder);
+        when(rs.getBytes("EXECUTABLE_ID")).thenReturn(new byte[]{0x01, 0x02});
+        when(rs.next()).thenReturn(true, false);
+        stubRow("SELECT 1 FROM T", 0L, "exec1", 7L, 2000L, 0L, 0L, 0L, 0L, 0L, 0L, "D");
+        q.collect();
+        verify(conn, times(1)).prepareCall(anyString());
     }
 }

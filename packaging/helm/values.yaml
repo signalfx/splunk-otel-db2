@@ -73,6 +73,7 @@ receivers:
       dbServerQuerySample:
         enabled: false
     topQueryCollection:
+      # Minimum 60s; lower values are rejected at startup.
       collectionInterval: "60s"
       topQueryCount: 250
       maxQuerySampleCount: 1000
@@ -81,6 +82,8 @@ receivers:
       queryPlanCacheTtl: "1h"
       explainSchema: ""
     querySampleCollection:
+      # Minimum 5s; lower values are rejected at startup. Upgrading from a release that
+      # allowed 1-4s requires raising this first or the receiver will not start.
       collectionInterval: "10s"
       maxRowsPerQuery: 100
 
