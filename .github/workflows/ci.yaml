@@ -228,19 +228,37 @@ jobs:
           # Read index.yaml off the gh-pages branch rather than over HTTP. GitHub Pages is
           # only a public mirror of this file, so fetching it anonymously would make the
           # release depend on the repository being public — unrelated to CI's ability to
-          # read its own branch, which the gh-pages check above already proved. An empty
-          # file is how "nothing published yet" is represented downstream.
-          if git show origin/gh-pages:index.yaml > /tmp/chart-index.yaml 2>/dev/null; then
-            echo "read index.yaml from origin/gh-pages ($(wc -c < /tmp/chart-index.yaml) bytes)"
+          # read its own branch.
+          #
+          # Absence is established positively, with cat-file, and reported downstream as
+          # CHART_INDEX_ABSENT. Deriving it from a failed read would make any git error
+          # look like a first release: the floor version would be selected and the guard
+          # would wave it through, overwriting the image an existing release points at.
+          rm -f /tmp/chart-index.yaml
+          if git cat-file -e origin/gh-pages:index.yaml 2>/dev/null; then
+            # The path exists, so every failure from here is a real failure.
+            git show origin/gh-pages:index.yaml > /tmp/chart-index.yaml
+            [ -s /tmp/chart-index.yaml ] \
+              || { echo "::error::index.yaml exists on origin/gh-pages but is empty, which" \
+                        "is not a valid Helm repository index. Refusing to treat it as an" \
+                        "absent index, which would re-use an already published version."; exit 1; }
+            # Reject a readable but malformed index for the same reason.
+            yq e '.entries' /tmp/chart-index.yaml >/dev/null \
+              || { echo "::error::index.yaml on origin/gh-pages is not parseable as a Helm" \
+                        "repository index."; exit 1; }
+            echo "CHART_INDEX_FILE=/tmp/chart-index.yaml" >> "$GITHUB_ENV"
+            echo "index present: $(wc -c < /tmp/chart-index.yaml) bytes"
           else
-            : > /tmp/chart-index.yaml
-            echo "origin/gh-pages has no index.yaml yet; first release"
+            # Distinguish "no such path on an existing ref" from "ref unreadable".
+            git rev-parse --verify --quiet origin/gh-pages >/dev/null \
+              || { echo "::error::origin/gh-pages is not readable, so whether an index" \
+                        "exists cannot be determined."; exit 1; }
+            echo "CHART_INDEX_ABSENT=1" >> "$GITHUB_ENV"
+            echo "origin/gh-pages has no index.yaml; this is the first release"
           fi
 
       - name: Resolve version
         id: resolve
-        env:
-          CHART_INDEX_FILE: /tmp/chart-index.yaml
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             # An explicit tag is a deliberate override; honour it verbatim rather than
@@ -282,11 +300,19 @@ jobs:
           # re-tag of a version that really was released.
           #
           # Uses the copy already read off gh-pages, so this does not depend on Pages.
-          if [ -s /tmp/chart-index.yaml ]; then
+          # Presence comes from the read step's explicit signal rather than from the file's
+          # size, so an unreadable index can never be mistaken for an unpublished one.
+          if [ "${CHART_INDEX_ABSENT:-}" = "1" ]; then
+            echo "No index published yet; proceeding"
+          else
+            [ -s "${CHART_INDEX_FILE:-}" ] \
+              || { echo "::error::expected a chart index at \"${CHART_INDEX_FILE:-}\" but it" \
+                        "is missing or empty, and absence was not reported. Refusing to" \
+                        "guess whether $VERSION is already released."; exit 1; }
               # Not `yq ... | grep -q`: grep -q exits on first match, SIGPIPEs yq, and
               # under pipefail the pipeline then reports failure even though it matched -
               # which silently disables this guard. Capture first, match without a pipe.
-              released=$(yq e ".entries[\"splunk-otel-db2\"][].version" /tmp/chart-index.yaml)
+              released=$(yq e ".entries[\"splunk-otel-db2\"][].version" "$CHART_INDEX_FILE")
               if grep -Fxq -- "$VERSION" <<<"$released"; then
                 echo "::error::$VERSION is already on the chart index, so a release pointing" \
                      "at it exists. Rebuilding would swap the image behind that release:" \
@@ -295,9 +321,7 @@ jobs:
                      "chart version. Publish a new version instead."
                 exit 1
               fi
-              echo "$VERSION is not on the index yet; proceeding"
-          else
-            echo "No index published yet; proceeding"
+            echo "$VERSION is not on the index yet; proceeding"
           fi
 
       - name: Stamp jar version

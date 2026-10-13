@@ -29,6 +29,9 @@ readonly INDEX_URL="${INDEX_URL:-https://${CHART_REPO_OWNER}.github.io/${CHART_R
 # nothing to do with CI's ability to read its own branch. An empty file means nothing has
 # been published yet. INDEX_URL stays as the fallback for running this outside CI.
 readonly CHART_INDEX_FILE="${CHART_INDEX_FILE:-}"
+# Set to 1 by a caller that has positively determined no index is published. Kept separate
+# from CHART_INDEX_FILE so "absent" can never be inferred from a failed or empty read.
+readonly CHART_INDEX_ABSENT="${CHART_INDEX_ABSENT:-}"
 
 die() {
   echo "::error::$*" >&2
@@ -49,21 +52,27 @@ fi
 readonly SERIES="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
 readonly FLOOR_PATCH="${BASH_REMATCH[3]}"
 
-index=$(mktemp)
+index=$(mktemp) || die "could not create a temporary file"
 trap 'rm -f "$index"' EXIT
 
-if [ -n "$CHART_INDEX_FILE" ]; then
+if [ "${CHART_INDEX_ABSENT:-}" = "1" ]; then
+  # "No index has been published" must be stated explicitly. Inferring it from an empty or
+  # unreadable file would turn any read failure into a first release, which selects the
+  # floor version and would overwrite the image an existing release points at.
+  [ -z "$CHART_INDEX_FILE" ] || die "set either CHART_INDEX_ABSENT=1 or CHART_INDEX_FILE, not both"
+  http_code=404
+  source="(caller reported no published index)"
+  redirect=
+elif [ -n "$CHART_INDEX_FILE" ]; then
   [ -f "$CHART_INDEX_FILE" ] || die "CHART_INDEX_FILE is set but not a file: $CHART_INDEX_FILE"
-  cp "$CHART_INDEX_FILE" "$index"
-  if [ -s "$index" ]; then
-    http_code=200
-    source="$CHART_INDEX_FILE"
-    echo "Reading the index from $source" >&2
-  else
-    # An empty file is how CI represents "the gh-pages branch has no index.yaml yet".
-    http_code=404
-    source="$CHART_INDEX_FILE"
-  fi
+  # A present but empty index is corruption, not an absent one. Guessing "first release"
+  # here is exactly how a read failure turns into an overwritten release.
+  [ -s "$CHART_INDEX_FILE" ] || die "$CHART_INDEX_FILE is empty. An empty file is not a
+valid Helm repository index; set CHART_INDEX_ABSENT=1 if nothing has been published yet."
+  cp "$CHART_INDEX_FILE" "$index" || die "could not read $CHART_INDEX_FILE"
+  http_code=200
+  source="$CHART_INDEX_FILE"
+  echo "Reading the index from $source" >&2
   redirect=
 else
   # A missing index is the expected state before the first release, so it must not be fatal.
