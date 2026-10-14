@@ -462,6 +462,40 @@ jobs:
             --index-path .cr-index/index.yaml \
             --push
 
+      - name: Publish the landing page
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Rendered per release so the commands it shows are always the newest published
+          # ones. Runs after the index push and commits only index.html, because Helm reads
+          # index.yaml from this same branch and losing it would break every consumer.
+          git fetch --quiet origin gh-pages
+          work=$(mktemp -d)
+          git worktree add --quiet --detach "$work" origin/gh-pages
+          sed "s/__VERSION__/${VERSION}/g" .github/pages/index.html.tmpl > "$work/index.html"
+          grep -q "__VERSION__" "$work/index.html" \
+            && { echo "::error::unsubstituted __VERSION__ left in the rendered page"; exit 1; } || true
+
+          cd "$work"
+          # Refuse to publish a tree without the chart index. Nothing here should remove it,
+          # so if it is missing something is wrong and pushing would break `helm repo add`.
+          test -s index.yaml \
+            || { echo "::error::index.yaml missing from the gh-pages worktree; refusing to" \
+                      "push a tree that would break chart resolution."; exit 1; }
+
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "landing page already up to date"
+          else
+            git commit --quiet -m "Update landing page for ${VERSION}"
+            git push --quiet origin HEAD:refs/heads/gh-pages
+            echo "published landing page for ${VERSION}"
+          fi
+          cd - >/dev/null
+          git worktree remove --force "$work"
+
       - name: Verify the version is now on the index
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
