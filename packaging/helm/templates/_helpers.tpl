@@ -148,6 +148,11 @@ inherits nothing from the default entry. Anything genuinely optional is therefor
 */}}
 {{- define "splunk-otel-db2.validateReceivers" -}}
 {{- $prefix := .Chart.IsRoot | ternary "receivers" "db2.receivers" -}}
+{{- if not (kindIs "slice" .Values.receivers) -}}
+{{- if .Values.receivers -}}
+{{- fail (printf "%s must be a list of receiver entries, got %s. A single entry still needs to be a one-item list." $prefix (kindOf .Values.receivers)) -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.receivers -}}
 {{- fail (printf "%s is empty. Enabling this chart is not enough on its own: at least one receiver must be configured, each with name, hostname, database and either credentialsSecret or username/password. See https://github.com/signalfx/splunk-otel-db2#installation" $prefix) -}}
 {{- end -}}

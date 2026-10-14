@@ -426,12 +426,15 @@ db2:
       credentialsSecret: "my-db2-credentials"
 ```
 
-`db2.enabled: true` on its own is not enough — at least one receiver must be configured, and
-the chart fails with `db2.receivers is empty` rather than installing something that cannot
-connect. Note that Helm replaces a list wholesale rather than merging its elements, so an
-entry you write here inherits nothing from the chart's commented example: every field you
-need must be present in your own entry. Only `name`, `hostname`, `database` and credentials
-are required; the rest default.
+`db2.enabled: true` on its own is not enough. The chart ships a placeholder receiver with no
+credentials, so enabling it without configuring one fails with
+`db2.receivers[0] needs credentials: set credentialsSecret to ...` rather than installing a
+receiver that cannot connect.
+
+Note that Helm replaces a list wholesale rather than merging its elements: an entry you write
+here inherits nothing from the shipped one. Only `name`, `hostname`, `database` and
+credentials are required — `port`, `collectionInterval` and `tls.insecure` default, so a
+minimal entry is enough.
 
 **Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
 

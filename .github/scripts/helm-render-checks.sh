@@ -183,13 +183,37 @@ else
   fail "a minimal receiver entry must render, got: $out"
 fi
 
-echo "10. enabling the chart without receivers fails, naming the values path"
+echo "10. enabling the chart without configuring credentials fails, naming the values path"
+# The shipped entry is a placeholder to edit, so enabling alone leaves credentials unset.
+# That must fail - a receiver with no credentials cannot connect - and the message has to
+# name what the reader has to set, in the path they would search for.
 if out=$(helm template "$RELEASE" "$PARENT" 2>&1); then
-  fail "rendering with no receivers succeeded; it must be rejected"
+  fail "rendering with unset credentials succeeded; it must be rejected"
+else
+  grep -Fq -- 'db2.receivers[0] needs credentials' <<<"$out" \
+    && pass "rejected, naming db2.receivers[0] and what to set" \
+    || fail "rejected, but without naming db2.receivers; got: $out"
+fi
+
+echo "10b. an explicitly empty receivers list fails too"
+# via a values file: `--set x=[]` assigns the literal string "[]", not an empty list.
+empty="$workdir/empty.yaml"
+printf 'splunk-otel-db2:\n  receivers: []\n' >"$empty"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$empty" 2>&1); then
+  fail "an empty receivers list rendered; it must be rejected"
 else
   grep -Fq -- 'db2.receivers is empty' <<<"$out" \
-    && pass "rejected, and names db2.receivers rather than an internal field" \
-    || fail "rejected, but without naming db2.receivers; got: $out"
+    && pass "rejected with the emptiness message" \
+    || fail "rejected, but not for emptiness; got: $out"
+fi
+
+echo "10c. a non-list receivers value is rejected clearly"
+if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers=oops' 2>&1); then
+  fail "a string receivers value rendered; it must be rejected"
+else
+  grep -Fq -- 'must be a list of receiver entries' <<<"$out" \
+    && pass "rejected without leaking a template internal error" \
+    || fail "rejected, but with an unhelpful error; got: $out"
 fi
 
 echo "11. a receiver missing a required field names that field"
