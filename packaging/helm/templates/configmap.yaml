@@ -1,3 +1,4 @@
+{{- include "splunk-otel-db2.validateReceivers" . }}
 {{- include "splunk-otel-db2.validateReceiverNames" . }}
 apiVersion: v1
 kind: ConfigMap
@@ -11,13 +12,15 @@ data:
     {{- range .Values.receivers }}
       db2/{{ .name }}:
         hostname: {{ .hostname | quote }}
-        hostport: {{ .port }}
+        hostport: {{ dig "port" 50000 . }}
         username: "${env:DB2_USER_{{ .name | upper | replace "-" "_" }}}"
         password: "${env:DB2_PASSWORD_{{ .name | upper | replace "-" "_" }}}"
         database: {{ .database | quote }}
-        collection_interval: {{ .collectionInterval | quote }}
+        collection_interval: {{ dig "collectionInterval" "30s" . | quote }}
         tls:
-          insecure: {{ .tls.insecure }}
+          # Defaults to TLS: Db2 credentials travel over this connection, and a missing
+          # `tls` block previously dereferenced nil and aborted the parent chart's render.
+          insecure: {{ dig "tls" "insecure" false . }}
         events:
           db.server.top_query:
             enabled: {{ dig "events" "dbServerTopQuery" "enabled" false . }}

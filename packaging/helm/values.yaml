@@ -53,39 +53,46 @@ resources:
 # `credentialsSecret` is the name of a pre-existing Kubernetes Secret with
 # keys DB2_USER and DB2_PASSWORD. If omitted, the chart creates the Secret
 # from `username` / `password` (not recommended for production).
-receivers:
-  - name: default
-    hostname: "localhost"
-    port: 50000
-    database: "SAMPLE"
-    collectionInterval: "30s"
-    # Reference a pre-existing Secret containing DB2_USER and DB2_PASSWORD.
-    # If set, `username` and `password` below are ignored.
-    credentialsSecret: ""
-    # Used only when credentialsSecret is empty — creates a Secret from these values.
-    username: ""
-    password: ""
-    tls:
-      insecure: true
-    events:
-      dbServerTopQuery:
-        enabled: false
-      dbServerQuerySample:
-        enabled: false
-    topQueryCollection:
-      # Minimum 60s; lower values are rejected at startup.
-      collectionInterval: "60s"
-      topQueryCount: 250
-      maxQuerySampleCount: 1000
-      maxExplainEachInterval: 0
-      queryPlanCacheSize: 1000
-      queryPlanCacheTtl: "1h"
-      explainSchema: ""
-    querySampleCollection:
-      # Minimum 5s; lower values are rejected at startup. Upgrading from a release that
-      # allowed 1-4s requires raising this first or the receiver will not start.
-      collectionInterval: "10s"
-      maxRowsPerQuery: 100
+# At least one entry is required. Helm replaces a list wholesale rather than merging its
+# elements, so an entry you supply here does not inherit anything from a default entry —
+# every field you need must be present in your own entry. Only `name`, `hostname`,
+# `database` and credentials are mandatory; the rest default as noted below.
+#
+# `name` must be lowercase DNS-compatible: lowercase letters, digits, and interior hyphens,
+# starting with a letter (e.g. "prod-eu", "default"). Uppercase and underscores are rejected
+# because each name is uppercased into env-var keys (DB2_USER_<NAME>, DB2_PASSWORD_<NAME>),
+# so "foo-bar" and "foo_bar" would silently share credentials.
+#
+# `credentialsSecret` names a pre-existing Secret holding DB2_USER and DB2_PASSWORD, and is
+# the recommended form. Omit it to have the chart create a Secret from `username` and
+# `password`, which then appear in the release manifest.
+receivers: []
+  # - name: default
+  #   hostname: db2.example.com          # required
+  #   database: PROD                     # required
+  #   credentialsSecret: my-db2-creds     # required, unless username/password are set
+  #   port: 50000                        # default 50000
+  #   collectionInterval: "30s"          # default 30s
+  #   tls:
+  #     # Db2 credentials travel over this connection. It defaults to TLS, so set this to
+  #     # true only for a trusted network or a server without TLS configured.
+  #     insecure: false                  # default false
+  #   events:
+  #     dbServerTopQuery:
+  #       enabled: false                 # default false
+  #     dbServerQuerySample:
+  #       enabled: false                 # default false
+  #   topQueryCollection:
+  #     collectionInterval: "60s"        # default 60s, minimum 60s
+  #     topQueryCount: 250
+  #     maxQuerySampleCount: 1000
+  #     maxExplainEachInterval: 0        # 0 disables plan collection
+  #     queryPlanCacheSize: 1000
+  #     queryPlanCacheTtl: "1h"
+  #     explainSchema: ""
+  #   querySampleCollection:
+  #     collectionInterval: "10s"        # default 10s, minimum 5s
+  #     maxRowsPerQuery: 100
 
 # ── OTLP exporter ────────────────────────────────────────────────────────────
 otlp:

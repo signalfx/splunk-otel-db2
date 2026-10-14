@@ -156,7 +156,55 @@ else
   fail "render with collectorNamespace failed: $out"
 fi
 
-echo "9. an explicit endpoint still wins as a subchart"
+echo "9. a receiver entry with only the required fields renders, and defaults the rest"
+# Helm replaces a list wholesale, so a user entry inherits nothing from the default entry.
+# Every field not listed here must therefore default, or enabling the chart aborts the
+# parent chart's entire render — which is how four reviewers hit this.
+minimal="$workdir/minimal.yaml"
+cat >"$minimal" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: my-db2-creds
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$minimal" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got_tls=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].tls.insecure' -)
+  got_port=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].hostport' -)
+  got_int=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].collection_interval' -)
+  [ "$got_tls" = "false" ] \
+    && pass "tls.insecure defaults to false — credentials are not sent in cleartext" \
+    || fail "tls.insecure should default to false, got '$got_tls'"
+  [ "$got_port" = "50000" ] && pass "port defaults to 50000" || fail "port default, got '$got_port'"
+  [ "$got_int" = "30s" ] && pass "collectionInterval defaults to 30s" || fail "interval default, got '$got_int'"
+else
+  fail "a minimal receiver entry must render, got: $out"
+fi
+
+echo "10. enabling the chart without receivers fails, naming the values path"
+if out=$(helm template "$RELEASE" "$PARENT" 2>&1); then
+  fail "rendering with no receivers succeeded; it must be rejected"
+else
+  grep -Fq -- 'db2.receivers is empty' <<<"$out" \
+    && pass "rejected, and names db2.receivers rather than an internal field" \
+    || fail "rejected, but without naming db2.receivers; got: $out"
+fi
+
+echo "11. a receiver missing a required field names that field"
+if out=$(helm template "$RELEASE" "$PARENT" \
+           --set 'splunk-otel-db2.receivers[0].name=default' \
+           --set 'splunk-otel-db2.receivers[0].database=PROD' \
+           --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' 2>&1); then
+  fail "rendering without hostname succeeded; it must be rejected"
+else
+  grep -Fq -- 'db2.receivers[0].hostname is required' <<<"$out" \
+    && pass "names the exact missing field" \
+    || fail "rejected, but without naming the field; got: $out"
+fi
+
+echo "12. an explicit endpoint still wins as a subchart"
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.endpoint=http://explicit:4317' 2>&1); then
   got=$(printf '%s' "$out" | endpoint_of)

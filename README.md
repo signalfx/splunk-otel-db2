@@ -68,7 +68,8 @@ receivers:
     use_snapshot_monitor: false        # set true for the SNAP_GET_STMT query sample path,
                                        # and to add SNAP_GET_DB SQL activity metrics
     tls:
-      insecure: true                   # set false to enable TLS
+      insecure: false                  # default false. Setting true disables TLS on
+                                       # the Db2 connection, which carries these credentials
 
 exporters:
   otlp:
@@ -315,13 +316,11 @@ kubectl create secret generic my-db2-credentials \
 ```yaml
 receivers:
   - name: default
+    # name, hostname, database and credentials are required. Everything else defaults,
+    # including `tls.insecure: false` — the Db2 connection carries these credentials.
     hostname: "db2.example.com"
-    port: 50000
     database: "PROD"
-    collectionInterval: "30s"
     credentialsSecret: "my-db2-credentials"
-    tls:
-      insecure: true
 
 otlp:
   # Required here. In-cluster OTel Collector:
@@ -423,13 +422,16 @@ db2:
   receivers:
     - name: default
       hostname: "db2.example.com"
-      port: 50000
       database: "PROD"
-      collectionInterval: "30s"
       credentialsSecret: "my-db2-credentials"
-      tls:
-        insecure: true
 ```
+
+`db2.enabled: true` on its own is not enough — at least one receiver must be configured, and
+the chart fails with `db2.receivers is empty` rather than installing something that cannot
+connect. Note that Helm replaces a list wholesale rather than merging its elements, so an
+entry you write here inherits nothing from the chart's commented example: every field you
+need must be present in your own entry. Only `name`, `hostname`, `database` and credentials
+are required; the rest default.
 
 **Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
 
