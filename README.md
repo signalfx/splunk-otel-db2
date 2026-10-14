@@ -316,11 +316,12 @@ kubectl create secret generic my-db2-credentials \
 ```yaml
 receivers:
   - name: default
-    # name, hostname, database and credentials are required. Everything else defaults,
-    # including `tls.insecure: false` — the Db2 connection carries these credentials.
+    # name, hostname, database and credentials are always required; port is required too
+    # whenever TLS is on, which it is by default.
     hostname: "db2.example.com"
     database: "PROD"
     credentialsSecret: "my-db2-credentials"
+    port: 50001                  # your ssl_svcename port, not the cleartext svcename one
 
 otlp:
   # Required here. In-cluster OTel Collector:
@@ -424,12 +425,20 @@ db2:
       hostname: "db2.example.com"
       database: "PROD"
       credentialsSecret: "my-db2-credentials"
+      port: 50001                # your ssl_svcename port
 ```
 
 `db2.enabled: true` on its own is not enough. The chart ships a placeholder receiver with no
 credentials, so enabling it without configuring one fails with
 `db2.receivers[0] needs credentials: set credentialsSecret to ...` rather than installing a
 receiver that cannot connect.
+
+**TLS is on by default**, and the certificate must be trusted by the JVM *and* issued for the
+hostname you configure — hostname validation is enforced, which `sslConnection` alone does not
+do. Supplying a private CA or truststore is not supported yet, so an internal or self-signed
+Db2 certificate currently needs `tls.insecure: true`. That also means `port` is required
+whenever TLS is on: Db2 requires `ssl_svcename` to listen on a different port from
+`svcename`, so the cleartext default of 50000 cannot be reused.
 
 Note that Helm replaces a list wholesale rather than merging its elements: an entry you write
 here inherits nothing from the shipped one. Only `name`, `hostname`, `database` and

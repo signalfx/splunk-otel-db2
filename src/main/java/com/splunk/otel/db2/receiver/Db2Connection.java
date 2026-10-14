@@ -68,14 +68,12 @@ public class Db2Connection {
         return connection;
     }
 
-    private void connect() throws SQLException {
-        if (connection != null) {
-            try { connection.close(); } catch (SQLException ignored) {}
-            connection = null;
-        }
-        String url = String.format("jdbc:db2://%s:%d/%s",
-            config.getHost(), config.getPort(), config.getDatabase());
-        log.info("{}Connecting to DB2 at {} (tls.insecure={})", label, url, config.getTls().isInsecure());
+    /**
+     * Builds the JDBC properties for a connection. Package-private so the TLS settings can be
+     * asserted without a live server: {@code connect()} hands these straight to
+     * {@link DriverManager}, so there is otherwise no seam to inspect them.
+     */
+    static Properties buildConnectionProperties(Db2ReceiverConfig config) {
         Properties props = new Properties();
         props.setProperty("user",              config.getUsername());
         props.setProperty("password",          config.getPassword());
@@ -84,8 +82,24 @@ public class Db2Connection {
         props.setProperty("blockingReadConnectionTimeout", String.valueOf(config.getConnectTimeoutSeconds()));
         if (!config.getTls().isInsecure()) {
             props.setProperty("sslConnection", "true");
+            // sslConnection alone encrypts but does not check that the certificate was issued
+            // for the host being connected to: propertyDefault_sslClientHostnameValidation in
+            // jcc 11.5.9.0 is "OFF", and IBM only changed that default in driver 4.34. Without
+            // this, a certificate the JVM trusts but issued for another host is accepted.
+            props.setProperty("sslClientHostnameValidation", "BASIC");
         }
-        connection = DriverManager.getConnection(url, props);
+        return props;
+    }
+
+    private void connect() throws SQLException {
+        if (connection != null) {
+            try { connection.close(); } catch (SQLException ignored) {}
+            connection = null;
+        }
+        String url = String.format("jdbc:db2://%s:%d/%s",
+            config.getHost(), config.getPort(), config.getDatabase());
+        log.info("{}Connecting to DB2 at {} (tls.insecure={})", label, url, config.getTls().isInsecure());
+        connection = DriverManager.getConnection(url, buildConnectionProperties(config));
         // clientProgramName in the Properties sets CLIENT_APPLNAME for self-filtering.
         // WLM_SET_CLIENT_INFO redundantly sets CLIENT_APPLNAME via the procedure (3rd param),
         // complementing the property and enabling WLM workload matching on installs that use it.

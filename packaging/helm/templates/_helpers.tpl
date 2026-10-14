@@ -157,10 +157,20 @@ inherits nothing from the default entry. Anything genuinely optional is therefor
 {{- fail (printf "%s is empty. Enabling this chart is not enough on its own: at least one receiver must be configured, each with name, hostname, database and either credentialsSecret or username/password. See https://github.com/signalfx/splunk-otel-db2#installation" $prefix) -}}
 {{- end -}}
 {{- range $i, $r := .Values.receivers -}}
+{{- /* Check the element's kind before `get`, which otherwise reports
+       "expected map[string]interface {}; got string" with no indication of where. */ -}}
+{{- if not (kindIs "map" $r) -}}
+{{- fail (printf "%s[%d] must be a map of receiver settings, got %s" $prefix $i (kindOf $r)) -}}
+{{- end -}}
 {{- range $field := list "name" "hostname" "database" -}}
 {{- if not (get $r $field) -}}
 {{- fail (printf "%s[%d].%s is required" $prefix $i $field) -}}
 {{- end -}}
+{{- end -}}
+{{- /* `tls:` with no value parses as null, so normalise before reading through it. */ -}}
+{{- $tls := $r.tls | default dict -}}
+{{- if and (not (dig "insecure" false $tls)) (not (hasKey $r "port")) -}}
+{{- fail (printf "%s[%d].port is required when TLS is enabled. Db2 requires ssl_svcename to listen on a different port from svcename, so the cleartext default (50000) would send a TLS handshake to the cleartext listener. Set the port your ssl_svcename uses, or set tls.insecure: true to connect without TLS." $prefix $i) -}}
 {{- end -}}
 {{- if and (not $r.credentialsSecret) (not $r.username) -}}
 {{- fail (printf "%s[%d] needs credentials: set credentialsSecret to a pre-existing Secret holding DB2_USER and DB2_PASSWORD, or set username and password" $prefix $i) -}}

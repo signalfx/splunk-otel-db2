@@ -168,6 +168,7 @@ splunk-otel-db2:
       hostname: db2.example.com
       database: PROD
       credentialsSecret: my-db2-creds
+      port: 50001
 EOF
 if out=$(helm template "$RELEASE" "$PARENT" -f "$minimal" 2>&1); then
   cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
@@ -177,7 +178,7 @@ if out=$(helm template "$RELEASE" "$PARENT" -f "$minimal" 2>&1); then
   [ "$got_tls" = "false" ] \
     && pass "tls.insecure defaults to false — credentials are not sent in cleartext" \
     || fail "tls.insecure should default to false, got '$got_tls'"
-  [ "$got_port" = "50000" ] && pass "port defaults to 50000" || fail "port default, got '$got_port'"
+  [ "$got_port" = "50001" ] && pass "the explicit TLS port is used" || fail "port, got '$got_port'"
   [ "$got_int" = "30s" ] && pass "collectionInterval defaults to 30s" || fail "interval default, got '$got_int'"
 else
   fail "a minimal receiver entry must render, got: $out"
@@ -214,6 +215,79 @@ else
   grep -Fq -- 'must be a list of receiver entries' <<<"$out" \
     && pass "rejected without leaking a template internal error" \
     || fail "rejected, but with an unhelpful error; got: $out"
+fi
+
+echo "10d. a non-map element inside the list is rejected clearly"
+if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers[0]=oops' 2>&1); then
+  fail "a string list element rendered; it must be rejected"
+else
+  grep -Fq -- 'must be a map of receiver settings' <<<"$out" \
+    && pass "rejected without leaking a template internal error" \
+    || fail "rejected, but with an unhelpful error; got: $out"
+fi
+
+echo "10e. TLS on without an explicit port is rejected, naming ssl_svcename"
+# TLS defaults on, but the port default (50000) is Db2's cleartext listener: ssl_svcename must
+# differ from svcename, so guessing the port would send a TLS handshake to the wrong one.
+tlsnoport="$workdir/tls-noport.yaml"
+cat >"$tlsnoport" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$tlsnoport" 2>&1); then
+  fail "TLS with a guessed port rendered; the port must be required"
+else
+  grep -Fq -- 'ssl_svcename' <<<"$out" \
+    && pass "rejected, explaining why the cleartext default cannot be reused" \
+    || fail "rejected, but without explaining the port; got: $out"
+fi
+
+echo "10f. an explicitly null tls block does not crash, and means TLS on"
+nulltls="$workdir/null-tls.yaml"
+cat >"$nulltls" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      port: 50001
+      tls:
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$nulltls" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].tls.insecure' -)
+  [ "$got" = "false" ] \
+    && pass "null tls renders as insecure: false rather than erroring" \
+    || fail "expected insecure false from a null tls block, got '$got'"
+else
+  fail "a null tls block must not crash rendering, got: $out"
+fi
+
+echo "10g. insecure: true keeps the cleartext port default"
+insec="$workdir/insecure.yaml"
+cat >"$insec" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      tls:
+        insecure: true
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$insec" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].hostport' -)
+  [ "$got" = "50000" ] \
+    && pass "cleartext path still defaults the port to 50000" \
+    || fail "expected the 50000 default on the cleartext path, got '$got'"
+else
+  fail "the cleartext path must not require a port, got: $out"
 fi
 
 echo "11. a receiver missing a required field names that field"

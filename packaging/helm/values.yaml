@@ -65,6 +65,8 @@ resources:
 receivers:
   - name: default
     hostname: "localhost"
+    # Required whenever TLS is on. Db2 requires ssl_svcename to listen on a different port
+    # from svcename, so the cleartext default below is only valid with tls.insecure: true.
     port: 50000
     database: "SAMPLE"
     collectionInterval: "30s"
@@ -77,8 +79,10 @@ receivers:
     username: ""
     password: ""
     tls:
-      # Db2 credentials travel over this connection. Set true only for a trusted network
-      # or a server without TLS configured.
+      # Db2 credentials travel over this connection, so TLS is the default. The certificate
+      # must be trusted by the JVM and issued for the hostname above — hostname validation is
+      # enforced. Supplying a private CA is not supported yet, so a self-signed or
+      # internal-CA certificate currently needs insecure: true.
       insecure: false
     events:
       dbServerTopQuery:
