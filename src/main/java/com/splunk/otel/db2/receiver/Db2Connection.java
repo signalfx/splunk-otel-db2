@@ -86,7 +86,12 @@ public class Db2Connection {
             // for the host being connected to: propertyDefault_sslClientHostnameValidation in
             // jcc 11.5.9.0 is "OFF", and IBM only changed that default in driver 4.34. Without
             // this, a certificate the JVM trusts but issued for another host is accepted.
-            props.setProperty("sslClientHostnameValidation", "BASIC");
+            //
+            // OFF is offered because enforcing it breaks connections by IP or by an alias the
+            // certificate does not list. Those installs stay encrypted, rather than having to
+            // fall back to tls.insecure, which drops TLS altogether.
+            props.setProperty("sslClientHostnameValidation",
+                config.getTls().isVerifyHostname() ? "BASIC" : "OFF");
         }
         return props;
     }

@@ -435,15 +435,18 @@ receiver that cannot connect.
 
 **TLS is on by default**, and the certificate must be trusted by the JVM *and* issued for the
 hostname you configure — hostname validation is enforced, which `sslConnection` alone does not
-do. Supplying a private CA or truststore is not supported yet, so an internal or self-signed
+do. If you connect by IP or by an alias the certificate does not list, set
+`tls.verifyHostname: false`: that keeps the connection encrypted, unlike `tls.insecure`, which
+drops TLS entirely. Supplying a private CA or truststore is not supported yet
+([#21](https://github.com/signalfx/splunk-otel-db2/issues/21)), so an internal or self-signed
 Db2 certificate currently needs `tls.insecure: true`. That also means `port` is required
 whenever TLS is on: Db2 requires `ssl_svcename` to listen on a different port from
 `svcename`, so the cleartext default of 50000 cannot be reused.
 
 Note that Helm replaces a list wholesale rather than merging its elements: an entry you write
-here inherits nothing from the shipped one. Only `name`, `hostname`, `database` and
-credentials are required — `port`, `collectionInterval` and `tls.insecure` default, so a
-minimal entry is enough.
+here inherits nothing from the shipped one. `name`, `hostname`, `database` and credentials are
+always required, and `port` joins them whenever TLS is on. `collectionInterval`,
+`tls.insecure` and `tls.verifyHostname` default.
 
 **Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
 

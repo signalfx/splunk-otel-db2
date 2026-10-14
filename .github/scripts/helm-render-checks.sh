@@ -114,8 +114,8 @@ if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.collectorTarget=nope' 2>&1); then
   fail "render succeeded with collectorTarget=nope; it must be rejected"
 else
-  grep -Fq -- 'collectorTarget must be' <<<"$out" \
-    && pass "rejected with the actionable message" \
+  grep -Eq -- "'/otlp/collectorTarget'" <<<"$out" \
+    && pass "rejected by the schema enum, naming the path" \
     || fail "rejected, but not for collectorTarget; got: $out"
 fi
 
@@ -156,7 +156,7 @@ else
   fail "render with collectorNamespace failed: $out"
 fi
 
-echo "9. a receiver entry with only the required fields renders, and defaults the rest"
+echo "9. a minimal TLS entry renders, and defaults what it omits"
 # Helm replaces a list wholesale, so a user entry inherits nothing from the default entry.
 # Every field not listed here must therefore default, or enabling the chart aborts the
 # parent chart's entire render — which is how four reviewers hit this.
@@ -188,7 +188,9 @@ echo "10. enabling the chart without configuring credentials fails, naming the v
 # The shipped entry is a placeholder to edit, so enabling alone leaves credentials unset.
 # That must fail - a receiver with no credentials cannot connect - and the message has to
 # name what the reader has to set, in the path they would search for.
-if out=$(helm template "$RELEASE" "$PARENT" 2>&1); then
+credsonly="$workdir/creds-only.yaml"
+printf 'splunk-otel-db2:\n  receivers:\n    - name: default\n      hostname: h\n      database: d\n      port: 50001\n' >"$credsonly"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$credsonly" 2>&1); then
   fail "rendering with unset credentials succeeded; it must be rejected"
 else
   grep -Fq -- 'db2.receivers[0] needs credentials' <<<"$out" \
@@ -212,8 +214,8 @@ echo "10c. a non-list receivers value is rejected clearly"
 if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers=oops' 2>&1); then
   fail "a string receivers value rendered; it must be rejected"
 else
-  grep -Fq -- 'must be a list of receiver entries' <<<"$out" \
-    && pass "rejected without leaking a template internal error" \
+  grep -Eq -- "'/receivers'" <<<"$out" \
+    && pass "rejected by the schema, naming the path" \
     || fail "rejected, but with an unhelpful error; got: $out"
 fi
 
@@ -221,8 +223,8 @@ echo "10d. a non-map element inside the list is rejected clearly"
 if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers[0]=oops' 2>&1); then
   fail "a string list element rendered; it must be rejected"
 else
-  grep -Fq -- 'must be a map of receiver settings' <<<"$out" \
-    && pass "rejected without leaking a template internal error" \
+  grep -Eq -- "'/receivers/0'" <<<"$out" \
+    && pass "rejected by the schema, naming the element" \
     || fail "rejected, but with an unhelpful error; got: $out"
 fi
 
@@ -290,6 +292,47 @@ else
   fail "the cleartext path must not require a port, got: $out"
 fi
 
+echo "10h. the values schema rejects wrong types before any template runs"
+# These three all passed template-level checks previously: hasKey is true for a null value,
+# a non-empty string is truthy so "false" took the TLS-off branch, and `tls: true` reached dig.
+schema_case() {
+  f="$workdir/schema-$1.yaml"
+  { echo 'splunk-otel-db2:'; printf '%s\n' "$2" | sed 's/^/  /'; } >"$f"
+  if out=$(helm template "$RELEASE" "$PARENT" -f "$f" 2>&1); then
+    fail "$1 rendered; the schema must reject it"
+  else
+    grep -Fq -- "$3" <<<"$out" \
+      && pass "$1 rejected: $3" \
+      || fail "$1 rejected, but not by the schema; got: $out"
+  fi
+}
+schema_case null-port \
+  'receivers:
+  - name: default
+    hostname: h
+    database: d
+    credentialsSecret: s
+    port: null' \
+  "at '/receivers/0/port': got null, want integer"
+schema_case string-insecure \
+  'receivers:
+  - name: default
+    hostname: h
+    database: d
+    credentialsSecret: s
+    tls:
+      insecure: "false"' \
+  "at '/receivers/0/tls/insecure': got string, want boolean"
+schema_case bool-tls \
+  'receivers:
+  - name: default
+    hostname: h
+    database: d
+    credentialsSecret: s
+    port: 50001
+    tls: true' \
+  "at '/receivers/0/tls': got boolean, want null or object"
+
 echo "11. a receiver missing a required field names that field"
 if out=$(helm template "$RELEASE" "$PARENT" \
            --set 'splunk-otel-db2.receivers[0].name=default' \
@@ -297,7 +340,7 @@ if out=$(helm template "$RELEASE" "$PARENT" \
            --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' 2>&1); then
   fail "rendering without hostname succeeded; it must be rejected"
 else
-  grep -Fq -- 'db2.receivers[0].hostname is required' <<<"$out" \
+  grep -Fq -- "missing property 'hostname'" <<<"$out" \
     && pass "names the exact missing field" \
     || fail "rejected, but without naming the field; got: $out"
 fi

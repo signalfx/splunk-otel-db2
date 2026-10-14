@@ -60,14 +60,15 @@ resources:
 #
 # Note that Helm replaces a list wholesale rather than merging its elements: if you supply
 # your own `receivers` rather than editing the entry below, it inherits nothing from this
-# one. Only `name`, `hostname`, `database` and credentials are required — everything else
-# defaults, so a minimal entry is enough.
+# one. `name`, `hostname`, `database` and credentials are always required, and `port` joins
+# them whenever TLS is on; everything else defaults.
 receivers:
   - name: default
     hostname: "localhost"
-    # Required whenever TLS is on. Db2 requires ssl_svcename to listen on a different port
-    # from svcename, so the cleartext default below is only valid with tls.insecure: true.
-    port: 50000
+    # port is deliberately absent. TLS is on below, and Db2 requires ssl_svcename to listen
+    # on a different port from svcename — so shipping 50000 here would hand you a default
+    # that aims a TLS handshake at the cleartext listener. Set your ssl_svcename port, or
+    # set tls.insecure: true and the cleartext default (50000) applies.
     database: "SAMPLE"
     collectionInterval: "30s"
     # Reference a pre-existing Secret containing DB2_USER and DB2_PASSWORD. This is the
@@ -80,10 +81,13 @@ receivers:
     password: ""
     tls:
       # Db2 credentials travel over this connection, so TLS is the default. The certificate
-      # must be trusted by the JVM and issued for the hostname above — hostname validation is
-      # enforced. Supplying a private CA is not supported yet, so a self-signed or
-      # internal-CA certificate currently needs insecure: true.
+      # must be trusted by the JVM. Supplying a private CA is not supported yet, so a
+      # self-signed or internal-CA certificate currently needs insecure: true.
       insecure: false
+      # The certificate must also be issued for the hostname above. Set false when you
+      # connect by IP or by an alias the certificate does not list: that keeps the
+      # connection encrypted, unlike insecure, which drops TLS entirely.
+      verifyHostname: true
     events:
       dbServerTopQuery:
         enabled: false

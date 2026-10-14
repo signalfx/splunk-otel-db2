@@ -238,7 +238,16 @@ public class Db2ReceiverConfig {
 
     public static class TlsConfig {
         private boolean insecure = false;
+        /**
+         * Whether the certificate must be issued for the host being connected to. On by
+         * default, because encryption without it does not stop an impersonating server.
+         * Set false when connecting by IP or by an alias absent from the certificate: that
+         * keeps the connection encrypted, unlike {@code insecure}, which drops TLS entirely.
+         */
+        private boolean verifyHostname = true;
         public boolean isInsecure() { return insecure; }
         public void setInsecure(boolean insecure) { this.insecure = insecure; }
+        public boolean isVerifyHostname() { return verifyHostname; }
+        public void setVerifyHostname(boolean verifyHostname) { this.verifyHostname = verifyHostname; }
     }
 }
