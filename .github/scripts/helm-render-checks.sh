@@ -486,7 +486,62 @@ else
   fail "two receivers sharing a CA Secret must render, got: $out"
 fi
 
-echo "11e. a CA together with insecure is rejected"
+echo "11e. a long receiver name still yields a legal volume name"
+# The first attempt capped every receiver name at 60 characters so ca-<name> would fit a DNS
+# label. That penalised configurations that never mount a CA, so the name is hashed instead.
+long=$(printf 'a%.0s' $(seq 70))
+if out=$(helm template "$RELEASE" "$PARENT" \
+           --set "splunk-otel-db2.receivers[0].name=$long" \
+           --set 'splunk-otel-db2.receivers[0].hostname=h' \
+           --set 'splunk-otel-db2.receivers[0].database=d' \
+           --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+           --set 'splunk-otel-db2.receivers[0].port=50001' \
+           --set 'splunk-otel-db2.receivers[0].tls.caSecret=my-ca' 2>&1); then
+  vol=$(printf '%s' "$out" | yq e -N "$dep"' | .volumes[] | select(.name | test("^ca-")) | .name' -)
+  [ -n "$vol" ] && [ "${#vol}" -le 63 ] \
+    && pass "volume name is ${#vol} characters: $vol" \
+    || fail "expected a volume name within 63 characters, got '$vol' (${#vol})"
+  loc=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' - \
+        | yq e -N ".receivers[\"db2/$long\"].tls.ca_file" -)
+  [ "$loc" = "/etc/splunk-otel-db2/ca/$vol/ca.crt" ] \
+    && pass "the config path follows the same derived name" \
+    || fail "ca_file '$loc' does not match the volume '$vol'"
+else
+  fail "a 70-character receiver name must render, got: $out"
+fi
+
+echo "11f. a Secret name the Kubernetes API would reject is caught by the schema"
+# The first pattern allowed a..b, a.-b and over-long labels: Helm rendered them and the
+# failure only appeared later as a Secret reference that could not be resolved.
+label64=$(printf 'b%.0s' $(seq 64))
+for bad in "a..b" "a.-b" "$label64.example.com" "-abc"; do
+  if out=$(helm template "$RELEASE" "$PARENT" \
+             --set 'splunk-otel-db2.receivers[0].name=default' \
+             --set 'splunk-otel-db2.receivers[0].hostname=h' \
+             --set 'splunk-otel-db2.receivers[0].database=d' \
+             --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+             --set 'splunk-otel-db2.receivers[0].port=50001' \
+             --set "splunk-otel-db2.receivers[0].tls.caSecret=$bad" 2>&1); then
+    fail "caSecret '$bad' rendered; Kubernetes would reject that Secret name"
+  else
+    grep -Fq -- "caSecret" <<<"$out" \
+      && pass "rejected '$bad', naming caSecret" \
+      || fail "'$bad' rejected, but not for caSecret; got: $out"
+  fi
+done
+for good in my-db2-ca pki.example.com; do
+  helm template "$RELEASE" "$PARENT" \
+    --set 'splunk-otel-db2.receivers[0].name=default' \
+    --set 'splunk-otel-db2.receivers[0].hostname=h' \
+    --set 'splunk-otel-db2.receivers[0].database=d' \
+    --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+    --set 'splunk-otel-db2.receivers[0].port=50001' \
+    --set "splunk-otel-db2.receivers[0].tls.caSecret=$good" >/dev/null 2>&1 \
+    && pass "still accepts the legal name '$good'" \
+    || fail "legal Secret name '$good' was rejected"
+done
+
+echo "11g. a CA together with insecure is rejected"
 # Honouring insecure here would mount the CA, never consult it, and send the credentials in
 # the clear - so the contradiction is reported rather than resolved silently.
 if out=$(helm template "$RELEASE" "$PARENT" -f "$ca" \
@@ -498,7 +553,7 @@ else
     || fail "rejected, but not for the contradiction; got: $out"
 fi
 
-echo "11f. no CA Secret means no mount and no ca_file"
+echo "11h. no CA Secret means no mount and no ca_file"
 if out=$(helm template "$RELEASE" "$PARENT" -f "$minimal" 2>&1); then
   n=$(grep -c "ca_file" <<<"$out" || true)
   v=$(grep -c "name: ca-" <<<"$out" || true)

@@ -345,6 +345,24 @@ public class Db2Config {
                 throw new IllegalStateException("query_sample_collection.max_rows_per_query must be > 0");
         }
 
+        // The chart refuses this combination too, but systemd, Docker and bare-JVM installs
+        // never go through Helm, so the rule has to live here as well. Same reasoning as the
+        // exporter check below: insecure means no handshake, so the trust material is never
+        // consulted and the credentials go out in the clear.
+        Db2ReceiverConfig.TlsConfig db2Tls = rc.getTls();
+        if (db2Tls != null && db2Tls.isInsecure()) {
+            List<String> ignored = new ArrayList<>();
+            if (!db2Tls.getCaFile().isEmpty()) ignored.add("ca_file");
+            if (!db2Tls.getTrustStore().isEmpty()) ignored.add("trust_store");
+            if (!ignored.isEmpty())
+                throw new IllegalStateException(
+                    "receivers.db2.tls: insecure: true disables TLS entirely, so "
+                        + String.join(" and ", ignored)
+                        + " would never be consulted and the Db2 credentials would travel "
+                        + "unencrypted. Remove insecure to use the trust material, or remove "
+                        + String.join(" and ", ignored) + " to connect without TLS.");
+        }
+
         String endpoint = otlp.getEndpoint();
         if (endpoint == null || endpoint.isBlank())
             throw new IllegalStateException("exporters.otlp.endpoint is required");

@@ -62,13 +62,10 @@ spec:
             {{- $tls := .tls | default dict }}
             {{- if dig "caSecret" "" $tls }}
             {{- /* One mount per receiver: different databases can be fronted by different
-                   certificate authorities, so a single shared path would not do.
-                   Keyed by receiver name, not by Secret name: names are unique and the
-                   schema constrains them to a DNS label, whereas two receivers may share
-                   one CA Secret, and a Secret named with dots is a legal Secret but an
-                   illegal volume name. */}}
-            - name: ca-{{ .name }}
-              mountPath: /etc/splunk-otel-db2/ca/{{ .name }}
+                   certificate authorities, so a single shared path would not do. See
+                   caVolumeName for why it is keyed by receiver and not by Secret. */}}
+            - name: {{ include "splunk-otel-db2.caVolumeName" . }}
+              mountPath: /etc/splunk-otel-db2/ca/{{ include "splunk-otel-db2.caVolumeName" . }}
               readOnly: true
             {{- end }}
             {{- end }}
@@ -81,7 +78,7 @@ spec:
         {{- range .Values.receivers }}
         {{- $tls := .tls | default dict }}
         {{- if dig "caSecret" "" $tls }}
-        - name: ca-{{ .name }}
+        - name: {{ include "splunk-otel-db2.caVolumeName" . }}
           secret:
             secretName: {{ dig "caSecret" "" $tls | quote }}
             {{- /* Project just the one key, under a fixed name. Mounting the whole Secret

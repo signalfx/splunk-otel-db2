@@ -215,3 +215,22 @@ Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Volume name for a receiver's CA mount, and the directory it is mounted at.
+
+Named after the receiver rather than the Secret: two receivers may share one authority, which
+would collide, and a Secret name may contain dots, which a volume name may not.
+
+Hashed when the result would exceed the 63-character limit for a DNS label. The alternative
+was a length limit on every receiver name, which would have constrained configurations that
+never mount a CA at all.
+*/}}
+{{- define "splunk-otel-db2.caVolumeName" -}}
+{{- $name := printf "ca-%s" .name -}}
+{{- if gt (len $name) 63 -}}
+{{- printf "ca-%s" (sha256sum .name | trunc 16) -}}
+{{- else -}}
+{{- $name -}}
+{{- end -}}
+{{- end -}}

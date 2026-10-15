@@ -105,7 +105,7 @@ public class Db2ReceiverConfig {
     public String getHost() { return getHostname(); }
     public int getPort() { return getHostport(); }
 
-    private String resolveEnv(String value) {
+    static String resolveEnv(String value) {
         if (value == null) return null;
         if (value.startsWith("${env:") && value.endsWith("}")) {
             String key = value.substring(6, value.length() - 1);
@@ -258,6 +258,12 @@ public class Db2ReceiverConfig {
         private String caFile = "";
         /** Truststore, for installs that already distribute one. No OTLP analogue. */
         private String trustStore = "";
+        /**
+         * Read through {@code ${env:VAR}} like the Db2 password, so a truststore password need
+         * not be written into the config file. The paths above are deliberately not expanded:
+         * they are container paths, and {@code exporters.otlp.tls} treats its own file paths
+         * the same way.
+         */
         private String trustStorePassword = "";
         /** Defaults to the JVM's own default type when unset. */
         private String trustStoreType = "";
@@ -270,7 +276,7 @@ public class Db2ReceiverConfig {
         public void setCaFile(String caFile) { this.caFile = caFile != null ? caFile : ""; }
         public String getTrustStore() { return trustStore; }
         public void setTrustStore(String v) { this.trustStore = v != null ? v : ""; }
-        public String getTrustStorePassword() { return trustStorePassword; }
+        public String getTrustStorePassword() { return resolveEnv(trustStorePassword); }
         public void setTrustStorePassword(String v) { this.trustStorePassword = v != null ? v : ""; }
         public String getTrustStoreType() { return trustStoreType; }
         public void setTrustStoreType(String v) { this.trustStoreType = v != null ? v : ""; }

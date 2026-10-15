@@ -8,6 +8,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -67,5 +68,48 @@ class Db2ConfigTlsKeysTest {
         assertFalse(tls.isInsecure(), "TLS is on by default; the credentials travel over it");
         assertFalse(tls.isInsecureSkipVerify(), "the certificate hostname is checked by default");
         assertEquals("", tls.getCaFile());
+    }
+
+    /**
+     * The chart refuses this pair, but systemd, Docker and bare-JVM installs never run Helm,
+     * so it has to be refused here too. Accepting it configured neither TLS nor trust
+     * material and sent the Db2 credentials in the clear, which is the opposite of what
+     * supplying a CA asks for.
+     */
+    @Test
+    void refusesTrustMaterialWhenTlsIsDisabled(@TempDir Path dir) {
+        for (String key : new String[] {"ca_file", "trust_store"}) {
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> tlsFrom(dir, ""
+                    + "    tls:\n"
+                    + "      insecure: true\n"
+                    + "      " + key + ": /etc/ssl/thing\n"),
+                key + " with insecure: true must be refused, not silently ignored");
+            assertTrue(e.getMessage().contains(key),
+                "the error must name " + key + ", got: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void allowsInsecureOnItsOwn(@TempDir Path dir) throws Exception {
+        assertTrue(tlsFrom(dir, "    tls:\n      insecure: true\n").isInsecure(),
+            "only the contradictory pair is refused, not insecure by itself");
+    }
+
+    /**
+     * A truststore password is a credential, so it has to be sourceable from the environment
+     * like the Db2 password. It was being passed to the driver verbatim, which both broke
+     * password-protected truststores and left the config file as the only place to put it.
+     */
+    @Test
+    void expandsTheTrustStorePasswordFromTheEnvironment(@TempDir Path dir) throws Exception {
+        String var = System.getenv().keySet().stream().findFirst().orElseThrow();
+        Db2ReceiverConfig.TlsConfig tls = tlsFrom(dir, ""
+            + "    tls:\n"
+            + "      insecure: false\n"
+            + "      trust_store: /etc/ssl/db2.jks\n"
+            + "      trust_store_password: ${env:" + var + "}\n");
+        assertEquals(System.getenv(var), tls.getTrustStorePassword(),
+            "${env:...} must be expanded, as it is for the Db2 password");
     }
 }

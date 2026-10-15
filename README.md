@@ -72,6 +72,13 @@ receivers:
     tls:
       insecure: false                  # default false. Setting true disables TLS on
                                        # the Db2 connection, which carries these credentials
+      insecure_skip_verify: false      # default false. True still encrypts, but stops
+                                       # checking the certificate names this host
+      ca_file: ""                      # PEM certificate authority to trust, for a Db2 with
+                                       # an internal or self-signed certificate
+      trust_store: ""                  # alternative to ca_file, if you already distribute
+      trust_store_password: ""         # a truststore. The password supports ${env:VAR}
+      trust_store_type: ""             # defaults to the JVM's own default type
 
 exporters:
   otlp:
