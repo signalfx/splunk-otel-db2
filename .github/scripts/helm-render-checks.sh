@@ -346,6 +346,54 @@ schema_case bool-tls \
     tls: true' \
   tls object
 
+echo "10g. a mistyped receiver key is rejected rather than silently defaulted"
+# The chart reads a fixed set of keys, so anything else is a typo. Without
+# additionalProperties these validated cleanly and the receiver ran on the default, which
+# looks identical to a working install until you notice the interval never changed.
+for typo in collectionIntervl topQueryCollecton; do
+  if out=$(helm template "$RELEASE" "$PARENT" \
+             --set 'splunk-otel-db2.receivers[0].name=default' \
+             --set 'splunk-otel-db2.receivers[0].hostname=h' \
+             --set 'splunk-otel-db2.receivers[0].database=d' \
+             --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+             --set 'splunk-otel-db2.receivers[0].port=50001' \
+             --set "splunk-otel-db2.receivers[0].$typo=1s" 2>&1); then
+    fail "$typo was accepted; a key the chart never reads must be rejected"
+  else
+    grep -Fiq -- "$typo" <<<"$out" \
+      && pass "$typo rejected, naming the key" \
+      || fail "$typo rejected, but without naming it; got: $out"
+  fi
+done
+
+echo "10h. an optional block written with no value still renders"
+# `events:` with nothing after it parses as null, and dig cannot traverse a nil
+# intermediate - it aborted the whole render, which in a subchart takes the parent's
+# install with it. Both nesting levels are covered because both can be left empty.
+cat >"$workdir/nullblocks.yaml" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      port: 50001
+      events:
+        dbServerTopQuery:
+        dbServerQuerySample:
+      topQueryCollection:
+      querySampleCollection:
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$workdir/nullblocks.yaml" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"] | [.top_query_collection.top_query_count, .query_sample_collection.max_rows_per_query, .events["db.server.top_query"].enabled] | join(",")' -)
+  [ "$got" = "250,100,false" ] \
+    && pass "null blocks fall back to the documented defaults: $got" \
+    || fail "expected 250,100,false from null blocks, got '$got'"
+else
+  fail "null optional blocks must render, not abort; got: $out"
+fi
+
 echo "11. a receiver missing a required field names that field"
 if out=$(helm template "$RELEASE" "$PARENT" \
            --set 'splunk-otel-db2.receivers[0].name=default' \

@@ -43,8 +43,9 @@ DB2_USER=db2inst1 DB2_PASSWORD=secret ./gradlew run --args="my-config.yaml"
 receivers:
   db2:
     hostname: "localhost"              # DB2 host
-    hostport: 50000                    # default 50000, valid only with tls.insecure: true;
-                                       # TLS needs your ssl_svcename port
+    hostport: 50001                    # your ssl_svcename port. The 50000 default is the
+                                       # cleartext svcename port, so it is valid only
+                                       # with tls.insecure: true
     username: "${env:DB2_USER}"        # supports ${env:VAR} substitution
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"                 # database name (uppercase)

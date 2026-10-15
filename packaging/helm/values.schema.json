@@ -9,6 +9,8 @@
       "description": "One entry per monitored database.",
       "items": {
         "type": "object",
+        "description": "Closed to extra keys: the chart reads exactly the properties below, so an unrecognised one is a typo. Left open, `collectionIntervl` validated cleanly and the receiver silently ran on the default instead.",
+        "additionalProperties": false,
         "required": [
           "name",
           "hostname",
@@ -73,7 +75,10 @@
             "additionalProperties": false,
             "properties": {
               "dbServerTopQuery": {
-                "type": "object",
+                "type": [
+                  "object",
+                  "null"
+                ],
                 "additionalProperties": false,
                 "properties": {
                   "enabled": {
@@ -82,7 +87,10 @@
                 }
               },
               "dbServerQuerySample": {
-                "type": "object",
+                "type": [
+                  "object",
+                  "null"
+                ],
                 "additionalProperties": false,
                 "properties": {
                   "enabled": {
