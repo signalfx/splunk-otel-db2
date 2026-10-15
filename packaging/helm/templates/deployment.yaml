@@ -58,12 +58,44 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- range .Values.receivers }}
+            {{- $tls := .tls | default dict }}
+            {{- if dig "caSecret" "" $tls }}
+            {{- /* One mount per receiver: different databases can be fronted by different
+                   certificate authorities, so a single shared path would not do.
+                   Keyed by receiver name, not by Secret name: names are unique and the
+                   schema constrains them to a DNS label, whereas two receivers may share
+                   one CA Secret, and a Secret named with dots is a legal Secret but an
+                   illegal volume name. */}}
+            - name: ca-{{ .name }}
+              mountPath: /etc/splunk-otel-db2/ca/{{ .name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "splunk-otel-db2.fullname" . }}-config
+        {{- range .Values.receivers }}
+        {{- $tls := .tls | default dict }}
+        {{- if dig "caSecret" "" $tls }}
+        - name: ca-{{ .name }}
+          secret:
+            secretName: {{ dig "caSecret" "" $tls | quote }}
+            {{- /* Project just the one key, under a fixed name. Mounting the whole Secret
+                   would expose every other key in it to the container, and would make the
+                   file name depend on caSecretKey, which the config then has to agree
+                   with. The key must exist: with optional unset, a typo leaves the pod
+                   unschedulable with the reason on the Pod rather than silently starting
+                   without a CA. */}}
+            items:
+              - key: {{ dig "caSecretKey" "ca.crt" $tls | quote }}
+                path: ca.crt
+            defaultMode: 0444
+        {{- end }}
+        {{- end }}
         - name: tmp
           emptyDir: {}
       {{- with .Values.nodeSelector }}

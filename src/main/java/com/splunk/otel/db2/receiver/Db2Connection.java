@@ -69,6 +69,18 @@ public class Db2Connection {
     }
 
     /**
+     * Sets a property only when a value was configured. An empty string is treated as unset:
+     * the chart renders these fields unconditionally, so blanks reach here, and passing
+     * {@code sslCertLocation=""} makes the driver fail to find a certificate rather than
+     * fall back to the JVM truststore.
+     */
+    private static void setIfPresent(Properties props, String key, String value) {
+        if (value != null && !value.isEmpty()) {
+            props.setProperty(key, value);
+        }
+    }
+
+    /**
      * Builds the JDBC properties for a connection. Package-private so the TLS settings can be
      * asserted without a live server: {@code connect()} hands these straight to
      * {@link DriverManager}, so there is otherwise no seam to inspect them.
@@ -92,6 +104,13 @@ public class Db2Connection {
             // fall back to tls.insecure, which drops TLS altogether.
             props.setProperty("sslClientHostnameValidation",
                 config.getTls().isInsecureSkipVerify() ? "OFF" : "BASIC");
+            // Property names taken from DB2BaseDataSource in the pinned jcc jar rather than
+            // from IBM's documentation, which publishes the ODBC keyword list under a
+            // similar title and warns that JCC spellings differ.
+            setIfPresent(props, "sslCertLocation",       config.getTls().getCaFile());
+            setIfPresent(props, "sslTrustStoreLocation", config.getTls().getTrustStore());
+            setIfPresent(props, "sslTrustStorePassword", config.getTls().getTrustStorePassword());
+            setIfPresent(props, "sslTrustStoreType",     config.getTls().getTrustStoreType());
         }
         return props;
     }

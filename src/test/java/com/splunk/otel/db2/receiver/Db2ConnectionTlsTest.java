@@ -53,6 +53,51 @@ class Db2ConnectionTlsTest {
     }
 
     @Test
+    void passesTrustMaterialToTheDriver() {
+        Db2ReceiverConfig c = config(false);
+        c.getTls().setCaFile("/etc/splunk-otel-db2/ca/my-ca/ca.crt");
+        Properties props = Db2Connection.buildConnectionProperties(c);
+        assertEquals("/etc/splunk-otel-db2/ca/my-ca/ca.crt", props.getProperty("sslCertLocation"),
+            "without this the driver falls back to the JVM truststore, which will not hold "
+                + "an internal CA - the reason those installs had no option but insecure");
+    }
+
+    @Test
+    void passesATrustStoreWhenOneIsConfigured() {
+        Db2ReceiverConfig c = config(false);
+        c.getTls().setTrustStore("/etc/ssl/db2.jks");
+        c.getTls().setTrustStorePassword("changeit");
+        c.getTls().setTrustStoreType("JKS");
+        Properties props = Db2Connection.buildConnectionProperties(c);
+        assertEquals("/etc/ssl/db2.jks", props.getProperty("sslTrustStoreLocation"));
+        assertEquals("changeit", props.getProperty("sslTrustStorePassword"));
+        assertEquals("JKS", props.getProperty("sslTrustStoreType"));
+    }
+
+    @Test
+    void omitsBlankTrustMaterialRatherThanPassingEmptyStrings() {
+        Db2ReceiverConfig c = config(false);
+        c.getTls().setCaFile("");
+        c.getTls().setTrustStore("");
+        Properties props = Db2Connection.buildConnectionProperties(c);
+        // The chart renders these fields unconditionally, so blanks reach here. Passing
+        // sslCertLocation="" makes the driver look for a certificate at the empty path and
+        // fail, rather than falling back to the JVM truststore.
+        assertNull(props.getProperty("sslCertLocation"));
+        assertNull(props.getProperty("sslTrustStoreLocation"));
+    }
+
+    @Test
+    void sendsNoTrustMaterialWhenTlsIsOff() {
+        Db2ReceiverConfig c = config(true);
+        c.getTls().setCaFile("/etc/ca.crt");
+        Properties props = Db2Connection.buildConnectionProperties(c);
+        assertNull(props.getProperty("sslCertLocation"),
+            "trust material is meaningless without TLS and would only confuse a reader of "
+                + "the connection properties");
+    }
+
+    @Test
     void setsNoTlsPropertiesWhenInsecure() {
         Properties props = Db2Connection.buildConnectionProperties(config(true));
         assertNull(props.getProperty("sslConnection"));

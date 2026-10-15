@@ -6,18 +6,19 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Parses TLS settings from YAML rather than through setters.
  *
- * <p>This exists because a setter-based test passes happily while the key the chart writes
- * is never read. {@code insecure_skip_verify} was exposed in the schema, the README and the
- * config object, but neither rendered nor parsed, so the option had no effect on the
- * connection at all. Anything the chart emits has to be asserted through this path.
+ * <p>This exists because setter-based tests passed while the keys the chart writes were not
+ * being read at all: the parser only handled {@code insecure}, so {@code ca_file} and the
+ * hostname setting were rendered into config.yaml and silently ignored. Anything the chart
+ * emits has to be asserted through this path, not just through the config object.
  *
- * <p>Key names match {@code exporters.otlp.tls} in {@link Db2Config} and the collector's own
+ * <p>Key names match {@code exporters.otlp.tls} in this same file and the collector's own
  * database receivers, so a reader does not meet a third vocabulary for the same concepts.
  */
 class Db2ConfigTlsKeysTest {
@@ -42,20 +43,29 @@ class Db2ConfigTlsKeysTest {
     }
 
     @Test
-    void readsInsecureSkipVerifyFromYaml(@TempDir Path dir) throws Exception {
+    void readsEveryKeyTheChartRenders(@TempDir Path dir) throws Exception {
         Db2ReceiverConfig.TlsConfig tls = tlsFrom(dir, ""
             + "    tls:\n"
             + "      insecure: false\n"
-            + "      insecure_skip_verify: true\n");
+            + "      insecure_skip_verify: true\n"
+            + "      ca_file: /etc/splunk-otel-db2/ca/my-ca/ca.crt\n"
+            + "      trust_store: /etc/ssl/db2.jks\n"
+            + "      trust_store_password: changeit\n"
+            + "      trust_store_type: JKS\n");
+
         assertFalse(tls.isInsecure());
-        assertTrue(tls.isInsecureSkipVerify(),
-            "insecure_skip_verify was not parsed, so the chart value has no effect");
+        assertTrue(tls.isInsecureSkipVerify(), "insecure_skip_verify was not parsed");
+        assertEquals("/etc/splunk-otel-db2/ca/my-ca/ca.crt", tls.getCaFile(), "ca_file was not parsed");
+        assertEquals("/etc/ssl/db2.jks", tls.getTrustStore());
+        assertEquals("changeit", tls.getTrustStorePassword());
+        assertEquals("JKS", tls.getTrustStoreType());
     }
 
     @Test
-    void defaultsToCheckingTheCertificateHostname(@TempDir Path dir) throws Exception {
+    void defaultsToVerifyingWithNoTrustMaterial(@TempDir Path dir) throws Exception {
         Db2ReceiverConfig.TlsConfig tls = tlsFrom(dir, "");
         assertFalse(tls.isInsecure(), "TLS is on by default; the credentials travel over it");
         assertFalse(tls.isInsecureSkipVerify(), "the certificate hostname is checked by default");
+        assertEquals("", tls.getCaFile());
     }
 }

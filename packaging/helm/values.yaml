@@ -81,8 +81,8 @@ receivers:
     password: ""
     tls:
       # Db2 credentials travel over this connection, so TLS is the default. The certificate
-      # must be trusted by the JVM. Supplying a private CA is not supported yet, so a
-      # self-signed or internal-CA certificate currently needs insecure: true.
+      # must be trusted: either by the JVM's default truststore, or by a certificate
+      # authority you supply through caSecret below.
       insecure: false
       # Skip checking the certificate was issued for the hostname above. Set true when you
       # connect by IP or by an alias the certificate does not list: that keeps the
@@ -92,6 +92,14 @@ receivers:
       # default it to true; here it is false, so the certificate is checked unless you
       # opt out.
       insecureSkipVerify: false
+      # Name of an existing Secret holding a certificate authority to trust, for a Db2 with
+      # an internal or self-signed certificate. Mounted read-only and passed to the driver,
+      # so those installs no longer need insecure: true. Without it the driver falls back to
+      # the JVM default truststore, which will not contain an internal CA.
+      caSecret: ""
+      # Key within caSecret holding the PEM certificate. Only this key is mounted, so the
+      # rest of the Secret stays out of the container.
+      caSecretKey: ca.crt
     events:
       dbServerTopQuery:
         enabled: false

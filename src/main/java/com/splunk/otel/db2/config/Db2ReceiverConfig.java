@@ -250,9 +250,29 @@ public class Db2ReceiverConfig {
          * which drops TLS entirely.
          */
         private boolean insecureSkipVerify = false;
+        /**
+         * Certificate authority used to validate the server's certificate, typically an
+         * internal CA mounted into the container. Without it the driver uses the JVM default
+         * truststore, which will not contain an internal or self-signed Db2 certificate.
+         */
+        private String caFile = "";
+        /** Truststore, for installs that already distribute one. No OTLP analogue. */
+        private String trustStore = "";
+        private String trustStorePassword = "";
+        /** Defaults to the JVM's own default type when unset. */
+        private String trustStoreType = "";
+
         public boolean isInsecure() { return insecure; }
         public void setInsecure(boolean insecure) { this.insecure = insecure; }
         public boolean isInsecureSkipVerify() { return insecureSkipVerify; }
         public void setInsecureSkipVerify(boolean v) { this.insecureSkipVerify = v; }
+        public String getCaFile() { return caFile; }
+        public void setCaFile(String caFile) { this.caFile = caFile != null ? caFile : ""; }
+        public String getTrustStore() { return trustStore; }
+        public void setTrustStore(String v) { this.trustStore = v != null ? v : ""; }
+        public String getTrustStorePassword() { return trustStorePassword; }
+        public void setTrustStorePassword(String v) { this.trustStorePassword = v != null ? v : ""; }
+        public String getTrustStoreType() { return trustStoreType; }
+        public void setTrustStoreType(String v) { this.trustStoreType = v != null ? v : ""; }
     }
 }

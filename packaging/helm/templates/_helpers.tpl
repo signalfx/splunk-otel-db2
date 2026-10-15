@@ -172,6 +172,12 @@ inherits nothing from the default entry. Anything genuinely optional is therefor
 {{- if and (not (dig "insecure" false $tls)) (not (hasKey $r "port")) -}}
 {{- fail (printf "%s[%d].port is required when TLS is enabled. Db2 requires ssl_svcename to listen on a different port from svcename, so the cleartext default (50000) would send a TLS handshake to the cleartext listener. Set the port your ssl_svcename uses, or set tls.insecure: true to connect without TLS." $prefix $i) -}}
 {{- end -}}
+{{- /* A CA is only consulted during a TLS handshake, so the pair is contradictory and one
+       of the two settings is not what was meant. Silently honouring insecure would mount
+       the Secret and still send the credentials in the clear. */ -}}
+{{- if and (dig "caSecret" "" $tls) (dig "insecure" false $tls) -}}
+{{- fail (printf "%s[%d].tls sets both caSecret and insecure: true. insecure disables TLS entirely, so the certificate authority would never be consulted and the credentials would travel unencrypted. Remove insecure to use the CA, or remove caSecret to connect without TLS." $prefix $i) -}}
+{{- end -}}
 {{- if and (not $r.credentialsSecret) (not $r.username) -}}
 {{- fail (printf "%s[%d] needs credentials: set credentialsSecret to a pre-existing Secret holding DB2_USER and DB2_PASSWORD, or set username and password" $prefix $i) -}}
 {{- end -}}

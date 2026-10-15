@@ -239,11 +239,24 @@ public class Db2Config {
             if (tls.get("insecure") != null) {
                 rc.getTls().setInsecure(asBool(tls, "insecure"));
             }
-            // Every key the chart renders has to be read here: one written into
-            // config.yaml and not parsed is silently ignored, so the values would
-            // have no effect on the connection at all.
+            // Keys match exporters.otlp.tls above, and the collector's own database
+            // receivers. Every key the chart renders has to be read here: one written
+            // into config.yaml and not parsed is silently ignored, which is how
+            // verify_hostname and cert_location were landing with no effect at all.
             if (tls.get("insecure_skip_verify") != null) {
                 rc.getTls().setInsecureSkipVerify(asBool(tls, "insecure_skip_verify"));
+            }
+            if (tls.get("ca_file") != null) {
+                rc.getTls().setCaFile(asString(tls, "ca_file"));
+            }
+            if (tls.get("trust_store") != null) {
+                rc.getTls().setTrustStore(asString(tls, "trust_store"));
+            }
+            if (tls.get("trust_store_password") != null) {
+                rc.getTls().setTrustStorePassword(asString(tls, "trust_store_password"));
+            }
+            if (tls.get("trust_store_type") != null) {
+                rc.getTls().setTrustStoreType(asString(tls, "trust_store_type"));
             }
         }
         return rc;

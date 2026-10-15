@@ -20,7 +20,8 @@
           "name": {
             "type": "string",
             "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$",
-            "description": "Lowercase DNS-compatible. Uppercased into env-var keys, so hyphens and underscores would collide."
+            "maxLength": 60,
+            "description": "Lowercase DNS-compatible. Uppercased into env-var keys, so hyphens and underscores would collide. Bounded at 60 so the derived `ca-<name>` volume name stays within the 63-character limit for a DNS label."
           },
           "hostname": {
             "type": "string",
@@ -64,6 +65,18 @@
               "insecureSkipVerify": {
                 "type": "boolean",
                 "description": "Skip checking the certificate was issued for the configured hostname. Named and sensed to match exporters.otlp.tls and the collector's database receivers, which default it to true; here it is false."
+              },
+              "caSecret": {
+                "type": "string",
+                "pattern": "^$|^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+                "maxLength": 253,
+                "description": "Name of an existing Secret holding a certificate authority to trust. Constrained to a DNS subdomain, so a name Kubernetes would reject is reported here rather than as a failing mount."
+              },
+              "caSecretKey": {
+                "type": "string",
+                "pattern": "^[-._a-zA-Z0-9]+$",
+                "maxLength": 253,
+                "description": "Key within caSecret holding the PEM certificate. Constrained to the characters Kubernetes allows in a Secret key: the volume projects this key by name, and a key that cannot exist would leave the pod unable to mount."
               }
             }
           },
