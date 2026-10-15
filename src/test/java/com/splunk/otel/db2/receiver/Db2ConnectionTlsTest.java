@@ -45,7 +45,7 @@ class Db2ConnectionTlsTest {
     @Test
     void keepsEncryptionWhenHostnameVerificationIsWaived() {
         Db2ReceiverConfig c = config(false);
-        c.getTls().setVerifyHostname(false);
+        c.getTls().setInsecureSkipVerify(true);
         Properties props = Db2Connection.buildConnectionProperties(c);
         assertEquals("true", props.getProperty("sslConnection"),
             "waiving the hostname check must not drop TLS; that is what insecure does");

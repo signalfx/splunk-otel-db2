@@ -84,10 +84,14 @@ receivers:
       # must be trusted by the JVM. Supplying a private CA is not supported yet, so a
       # self-signed or internal-CA certificate currently needs insecure: true.
       insecure: false
-      # The certificate must also be issued for the hostname above. Set false when you
+      # Skip checking the certificate was issued for the hostname above. Set true when you
       # connect by IP or by an alias the certificate does not list: that keeps the
       # connection encrypted, unlike insecure, which drops TLS entirely.
-      verifyHostname: true
+      #
+      # Named to match exporters.otlp.tls and the collector's own database receivers. Those
+      # default it to true; here it is false, so the certificate is checked unless you
+      # opt out.
+      insecureSkipVerify: false
     events:
       dbServerTopQuery:
         enabled: false

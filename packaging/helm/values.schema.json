@@ -59,20 +59,91 @@
                 "type": "boolean",
                 "description": "Boolean, so the string \"false\" is rejected rather than being read as truthy and silently disabling the TLS-port check."
               },
-              "verifyHostname": {
+              "insecureSkipVerify": {
                 "type": "boolean",
-                "description": "Defaults true. False keeps encryption but skips the certificate hostname check, for hosts reached by IP or by an alias the certificate does not list."
+                "description": "Skip checking the certificate was issued for the configured hostname. Named and sensed to match exporters.otlp.tls and the collector's database receivers, which default it to true; here it is false."
               }
             }
           },
           "events": {
-            "type": "object"
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "dbServerTopQuery": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "dbServerQuerySample": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
           },
           "topQueryCollection": {
-            "type": "object"
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "collectionInterval": {
+                "type": "string",
+                "minLength": 1
+              },
+              "topQueryCount": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxQuerySampleCount": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxExplainEachInterval": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "queryPlanCacheSize": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "queryPlanCacheTtl": {
+                "type": "string",
+                "minLength": 1
+              },
+              "explainSchema": {
+                "type": "string"
+              }
+            }
           },
           "querySampleCollection": {
-            "type": "object"
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "collectionInterval": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxRowsPerQuery": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
           }
         }
       }

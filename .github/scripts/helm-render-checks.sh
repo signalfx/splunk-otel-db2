@@ -17,6 +17,19 @@ readonly CHART_DIR="${CHART_DIR:-packaging/helm}"
 readonly VALUES="${VALUES:-$CHART_DIR/ci/standalone-values.yaml}"
 readonly RELEASE=testrel
 
+# Helm 3 and Helm 4 word schema violations differently, and the chart supports both:
+#   helm 3.12: "- receivers.0.port: Invalid type. Expected: integer, given: null"
+#   helm 4.3:  "- at '/receivers/0/port': got null, want integer"
+# Asserting either string verbatim fails on the other version, so match on the parts both
+# carry: that it was the values schema, which field, and the expected type.
+schema_rejected() {
+  local out="$1" field="$2" want="$3"
+  grep -Fq -- "don't meet the specifications of the schema" <<<"$out" || return 1
+  grep -Fq -- "$field" <<<"$out" || return 1
+  [ -z "$want" ] || grep -Fiq -- "$want" <<<"$out" || return 1
+  return 0
+}
+
 failures=0
 
 fail() {
@@ -114,8 +127,8 @@ if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.collectorTarget=nope' 2>&1); then
   fail "render succeeded with collectorTarget=nope; it must be rejected"
 else
-  grep -Eq -- "'/otlp/collectorTarget'" <<<"$out" \
-    && pass "rejected by the schema enum, naming the path" \
+  schema_rejected "$out" "collectorTarget" "" \
+    && pass "rejected by the schema enum, naming the field" \
     || fail "rejected, but not for collectorTarget; got: $out"
 fi
 
@@ -214,8 +227,8 @@ echo "10c. a non-list receivers value is rejected clearly"
 if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers=oops' 2>&1); then
   fail "a string receivers value rendered; it must be rejected"
 else
-  grep -Eq -- "'/receivers'" <<<"$out" \
-    && pass "rejected by the schema, naming the path" \
+  schema_rejected "$out" "receivers" "" \
+    && pass "rejected by the schema, naming the field" \
     || fail "rejected, but with an unhelpful error; got: $out"
 fi
 
@@ -223,7 +236,7 @@ echo "10d. a non-map element inside the list is rejected clearly"
 if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers[0]=oops' 2>&1); then
   fail "a string list element rendered; it must be rejected"
 else
-  grep -Eq -- "'/receivers/0'" <<<"$out" \
+  schema_rejected "$out" "receivers" "" \
     && pass "rejected by the schema, naming the element" \
     || fail "rejected, but with an unhelpful error; got: $out"
 fi
@@ -301,9 +314,9 @@ schema_case() {
   if out=$(helm template "$RELEASE" "$PARENT" -f "$f" 2>&1); then
     fail "$1 rendered; the schema must reject it"
   else
-    grep -Fq -- "$3" <<<"$out" \
-      && pass "$1 rejected: $3" \
-      || fail "$1 rejected, but not by the schema; got: $out"
+    schema_rejected "$out" "$3" "$4" \
+      && pass "$1 rejected on $3 (want $4)" \
+      || fail "$1 rejected, but not by the schema on $3; got: $out"
   fi
 }
 schema_case null-port \
@@ -313,7 +326,7 @@ schema_case null-port \
     database: d
     credentialsSecret: s
     port: null' \
-  "at '/receivers/0/port': got null, want integer"
+  port integer
 schema_case string-insecure \
   'receivers:
   - name: default
@@ -322,7 +335,7 @@ schema_case string-insecure \
     credentialsSecret: s
     tls:
       insecure: "false"' \
-  "at '/receivers/0/tls/insecure': got string, want boolean"
+  insecure boolean
 schema_case bool-tls \
   'receivers:
   - name: default
@@ -331,7 +344,7 @@ schema_case bool-tls \
     credentialsSecret: s
     port: 50001
     tls: true' \
-  "at '/receivers/0/tls': got boolean, want null or object"
+  tls object
 
 echo "11. a receiver missing a required field names that field"
 if out=$(helm template "$RELEASE" "$PARENT" \
@@ -340,7 +353,7 @@ if out=$(helm template "$RELEASE" "$PARENT" \
            --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' 2>&1); then
   fail "rendering without hostname succeeded; it must be rejected"
 else
-  grep -Fq -- "missing property 'hostname'" <<<"$out" \
+  schema_rejected "$out" "hostname" "" \
     && pass "names the exact missing field" \
     || fail "rejected, but without naming the field; got: $out"
 fi

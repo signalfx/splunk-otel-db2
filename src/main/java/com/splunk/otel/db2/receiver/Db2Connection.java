@@ -91,7 +91,7 @@ public class Db2Connection {
             // certificate does not list. Those installs stay encrypted, rather than having to
             // fall back to tls.insecure, which drops TLS altogether.
             props.setProperty("sslClientHostnameValidation",
-                config.getTls().isVerifyHostname() ? "BASIC" : "OFF");
+                config.getTls().isInsecureSkipVerify() ? "OFF" : "BASIC");
         }
         return props;
     }

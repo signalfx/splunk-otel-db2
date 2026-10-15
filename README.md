@@ -43,7 +43,8 @@ DB2_USER=db2inst1 DB2_PASSWORD=secret ./gradlew run --args="my-config.yaml"
 receivers:
   db2:
     hostname: "localhost"              # DB2 host
-    hostport: 50000                    # DB2 port (default 50000)
+    hostport: 50000                    # default 50000, valid only with tls.insecure: true;
+                                       # TLS needs your ssl_svcename port
     username: "${env:DB2_USER}"        # supports ${env:VAR} substitution
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"                 # database name (uppercase)
@@ -84,7 +85,7 @@ Use the `receiver/name` component ID syntax — the same pattern used by the OTe
 receivers:
   db2/prod:
     hostname: "db2-prod-1.example.com"
-    hostport: 50000
+    hostport: 50001                    # ssl_svcename port, not the cleartext svcename one
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
     database: "PROD"
@@ -95,7 +96,7 @@ receivers:
 
   db2/analytics:
     hostname: "db2-prod-2.example.com"
-    hostport: 50000
+    hostport: 50001                    # ssl_svcename port, not the cleartext svcename one
     username: "${env:DB2_USER2}"
     password: "${env:DB2_PASSWORD2}"
     database: "ANALYTICS"
@@ -436,7 +437,7 @@ receiver that cannot connect.
 **TLS is on by default**, and the certificate must be trusted by the JVM *and* issued for the
 hostname you configure — hostname validation is enforced, which `sslConnection` alone does not
 do. If you connect by IP or by an alias the certificate does not list, set
-`tls.verifyHostname: false`: that keeps the connection encrypted, unlike `tls.insecure`, which
+`tls.insecureSkipVerify: true`: that keeps the connection encrypted, unlike `tls.insecure`, which
 drops TLS entirely. Supplying a private CA or truststore is not supported yet
 ([#21](https://github.com/signalfx/splunk-otel-db2/issues/21)), so an internal or self-signed
 Db2 certificate currently needs `tls.insecure: true`. That also means `port` is required
@@ -446,7 +447,7 @@ whenever TLS is on: Db2 requires `ssl_svcename` to listen on a different port fr
 Note that Helm replaces a list wholesale rather than merging its elements: an entry you write
 here inherits nothing from the shipped one. `name`, `hostname`, `database` and credentials are
 always required, and `port` joins them whenever TLS is on. `collectionInterval`,
-`tls.insecure` and `tls.verifyHostname` default.
+`tls.insecure` and `tls.insecureSkipVerify` default.
 
 **Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
 

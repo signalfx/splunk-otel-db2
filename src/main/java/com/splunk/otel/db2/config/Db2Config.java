@@ -239,6 +239,12 @@ public class Db2Config {
             if (tls.get("insecure") != null) {
                 rc.getTls().setInsecure(asBool(tls, "insecure"));
             }
+            // Every key the chart renders has to be read here: one written into
+            // config.yaml and not parsed is silently ignored, so the values would
+            // have no effect on the connection at all.
+            if (tls.get("insecure_skip_verify") != null) {
+                rc.getTls().setInsecureSkipVerify(asBool(tls, "insecure_skip_verify"));
+            }
         }
         return rc;
     }
