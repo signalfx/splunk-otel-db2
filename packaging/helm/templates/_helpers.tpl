@@ -217,20 +217,29 @@ Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)
 {{- end }}
 
 {{/*
-Volume name for a receiver's CA mount, and the directory it is mounted at.
+Per-receiver token identifying a CA mount: the receiver name, or a hash of it when the name
+is too long to fit a DNS label once prefixed.
 
-Named after the receiver rather than the Secret: two receivers may share one authority, which
-would collide, and a Secret name may contain dots, which a volume name may not.
+Derived from the receiver rather than the Secret: two receivers may share one authority,
+which would collide, and a Secret name may contain dots, which a volume name may not.
 
-Hashed when the result would exceed the 63-character limit for a DNS label. The alternative
-was a length limit on every receiver name, which would have constrained configurations that
-never mount a CA at all.
+Hashing rather than rejecting long names keeps the length constraint off receivers that never
+mount a CA. The volume name, the mount path and the rendered ca_file all come from this one
+token, so they cannot drift apart.
 */}}
-{{- define "splunk-otel-db2.caVolumeName" -}}
-{{- $name := printf "ca-%s" .name -}}
-{{- if gt (len $name) 63 -}}
-{{- printf "ca-%s" (sha256sum .name | trunc 16) -}}
+{{- define "splunk-otel-db2.caToken" -}}
+{{- if gt (len (printf "ca-%s" .name)) 63 -}}
+{{- sha256sum .name | trunc 16 -}}
 {{- else -}}
-{{- $name -}}
+{{- .name -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Directory a receiver's CA is mounted at. A sibling of the config mount, not a child of it:
+nesting under /etc/splunk-otel-db2 works, but it leaves a directory inside what is otherwise
+a read-only ConfigMap mount, and the two mounts have nothing to do with each other.
+*/}}
+{{- define "splunk-otel-db2.caMountPath" -}}
+{{- printf "/etc/splunk-otel-db2-ca/%s" (include "splunk-otel-db2.caToken" .) -}}
 {{- end -}}

@@ -38,7 +38,7 @@ data:
           # so the config and the mount cannot disagree. The file name is fixed because the
           # volume projects the chosen key to this path regardless of what it is called in
           # the Secret.
-          ca_file: /etc/splunk-otel-db2/ca/{{ include "splunk-otel-db2.caVolumeName" . }}/ca.crt
+          ca_file: {{ include "splunk-otel-db2.caMountPath" . }}/ca.crt
           {{- end }}
         events:
           db.server.top_query:

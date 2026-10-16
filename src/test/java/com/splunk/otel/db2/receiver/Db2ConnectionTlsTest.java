@@ -55,9 +55,9 @@ class Db2ConnectionTlsTest {
     @Test
     void passesTrustMaterialToTheDriver() {
         Db2ReceiverConfig c = config(false);
-        c.getTls().setCaFile("/etc/splunk-otel-db2/ca/my-ca/ca.crt");
+        c.getTls().setCaFile("/etc/splunk-otel-db2-ca/default/ca.crt");
         Properties props = Db2Connection.buildConnectionProperties(c);
-        assertEquals("/etc/splunk-otel-db2/ca/my-ca/ca.crt", props.getProperty("sslCertLocation"),
+        assertEquals("/etc/splunk-otel-db2-ca/default/ca.crt", props.getProperty("sslCertLocation"),
             "without this the driver falls back to the JVM truststore, which will not hold "
                 + "an internal CA - the reason those installs had no option but insecure");
     }

@@ -431,6 +431,15 @@ if out=$(helm template "$RELEASE" "$PARENT" -f "$ca" 2>&1); then
   [ "$loc" = "$mnt/ca.crt" ] \
     && pass "ca_file sits under the mount: $loc" \
     || fail "ca_file '$loc' is not under the mount '$mnt'"
+  # A sibling of the config mount, not a child. Nesting does work - the runtime creates the
+  # mount point before the container starts, verified in kind under this chart's non-root,
+  # read-only-rootfs security context - but it leaves a directory inside what is otherwise a
+  # read-only ConfigMap mount, and the two mounts are unrelated.
+  cfgmnt=$(printf '%s' "$out" | yq e -N "$dep"' | .containers[0].volumeMounts[] | select(.name == "config") | .mountPath' -)
+  case "$mnt" in
+    "$cfgmnt"/*) fail "the CA mount '$mnt' nests inside the config mount '$cfgmnt'" ;;
+    *) pass "the CA mount is a sibling of the config mount, not nested" ;;
+  esac
 else
   fail "a receiver with tls.caSecret must render, got: $out"
 fi
@@ -503,8 +512,8 @@ if out=$(helm template "$RELEASE" "$PARENT" \
     || fail "expected a volume name within 63 characters, got '$vol' (${#vol})"
   loc=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' - \
         | yq e -N ".receivers[\"db2/$long\"].tls.ca_file" -)
-  [ "$loc" = "/etc/splunk-otel-db2/ca/$vol/ca.crt" ] \
-    && pass "the config path follows the same derived name" \
+  [ "$loc" = "/etc/splunk-otel-db2-ca/${vol#ca-}/ca.crt" ] \
+    && pass "the config path follows the same derived token: $loc" \
     || fail "ca_file '$loc' does not match the volume '$vol'"
 else
   fail "a 70-character receiver name must render, got: $out"

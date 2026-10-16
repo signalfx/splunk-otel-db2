@@ -49,14 +49,14 @@ class Db2ConfigTlsKeysTest {
             + "    tls:\n"
             + "      insecure: false\n"
             + "      insecure_skip_verify: true\n"
-            + "      ca_file: /etc/splunk-otel-db2/ca/my-ca/ca.crt\n"
+            + "      ca_file: /etc/splunk-otel-db2-ca/default/ca.crt\n"
             + "      trust_store: /etc/ssl/db2.jks\n"
             + "      trust_store_password: changeit\n"
             + "      trust_store_type: JKS\n");
 
         assertFalse(tls.isInsecure());
         assertTrue(tls.isInsecureSkipVerify(), "insecure_skip_verify was not parsed");
-        assertEquals("/etc/splunk-otel-db2/ca/my-ca/ca.crt", tls.getCaFile(), "ca_file was not parsed");
+        assertEquals("/etc/splunk-otel-db2-ca/default/ca.crt", tls.getCaFile(), "ca_file was not parsed");
         assertEquals("/etc/ssl/db2.jks", tls.getTrustStore());
         assertEquals("changeit", tls.getTrustStorePassword());
         assertEquals("JKS", tls.getTrustStoreType());
