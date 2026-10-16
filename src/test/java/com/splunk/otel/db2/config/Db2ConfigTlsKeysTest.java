@@ -101,6 +101,27 @@ class Db2ConfigTlsKeysTest {
      * like the Db2 password. It was being passed to the driver verbatim, which both broke
      * password-protected truststores and left the config file as the only place to put it.
      */
+    /**
+     * Reported at load time, not on the first connection. The accessor resolves lazily and
+     * nothing in validation used to read it, so a typo in the variable name passed startup
+     * and then failed a connection later, naming only the variable with nothing to tie it
+     * back to this field.
+     */
+    @Test
+    void refusesAMissingTrustStorePasswordVariableAtLoad(@TempDir Path dir) {
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+            () -> tlsFrom(dir, ""
+                + "    tls:\n"
+                + "      insecure: false\n"
+                + "      trust_store: /etc/ssl/db2.jks\n"
+                + "      trust_store_password: ${env:DEFINITELY_NOT_SET_12345}\n"),
+            "a missing trust_store_password variable must fail loading, not the connection");
+        assertTrue(e.getMessage().contains("trust_store_password"),
+            "the error must name the field, got: " + e.getMessage());
+        assertTrue(e.getMessage().contains("DEFINITELY_NOT_SET_12345"),
+            "the error must name the variable, got: " + e.getMessage());
+    }
+
     @Test
     void expandsTheTrustStorePasswordFromTheEnvironment(@TempDir Path dir) throws Exception {
         String var = System.getenv().keySet().stream().findFirst().orElseThrow();

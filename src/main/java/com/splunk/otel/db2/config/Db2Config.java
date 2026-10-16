@@ -362,6 +362,18 @@ public class Db2Config {
                         + "unencrypted. Remove insecure to use the trust material, or remove "
                         + String.join(" and ", ignored) + " to connect without TLS.");
         }
+        // Force ${env:...} resolution now. The accessor resolves lazily, like the Db2
+        // password, but validate() reads that one and never read this: a missing variable
+        // passed load() and startup and only surfaced on the first connection attempt,
+        // reported as a bare variable name with nothing tying it to this field.
+        if (db2Tls != null && !db2Tls.isInsecure()) {
+            try {
+                db2Tls.getTrustStorePassword();
+            } catch (IllegalStateException e) {
+                throw new IllegalStateException(
+                    "receivers.db2.tls.trust_store_password: " + e.getMessage(), e);
+            }
+        }
 
         String endpoint = otlp.getEndpoint();
         if (endpoint == null || endpoint.isBlank())
