@@ -6,8 +6,11 @@ receivers:
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"
     collection_interval: "30s"
-    query_sample_enabled: true
-    query_sample_interval: "10s"
+    events:
+      db.server.query_sample:
+        enabled: true
+    query_sample_collection:
+      collection_interval: "10s"
     tls:
       insecure: true
 
