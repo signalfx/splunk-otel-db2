@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "splunk-otel-db2 values",
+  "description": "Helm validates these before any template renders, so a wrong type is reported as a values error rather than surfacing later as a template failure or, worse, rendering something that looks valid. Template-level checks are kept only for rules a schema cannot express, such as requiring a port when TLS is on.",
+  "type": "object",
+  "properties": {
+    "receivers": {
+      "type": "array",
+      "description": "One entry per monitored database.",
+      "items": {
+        "type": "object",
+        "description": "Closed to extra keys: the chart reads exactly the properties below, so an unrecognised one is a typo. Left open, `collectionIntervl` validated cleanly and the receiver silently ran on the default instead.",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "hostname",
+          "database"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$",
+            "description": "Lowercase DNS-compatible. Uppercased into env-var keys, so hyphens and underscores would collide."
+          },
+          "hostname": {
+            "type": "string",
+            "minLength": 1
+          },
+          "database": {
+            "type": "string",
+            "minLength": 1
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Typed as an integer so null or a string is rejected here. Db2 requires ssl_svcename to differ from svcename, so with TLS on this must be the TLS listener's port."
+          },
+          "collectionInterval": {
+            "type": "string",
+            "minLength": 1
+          },
+          "credentialsSecret": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "tls": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Typed so `tls: true` is rejected. null is allowed and means \"take the defaults\", which the template normalises - rejecting a bare `tls:` would be unhelpful for something harmless.",
+            "additionalProperties": false,
+            "properties": {
+              "insecure": {
+                "type": "boolean",
+                "description": "Boolean, so the string \"false\" is rejected rather than being read as truthy and silently disabling the TLS-port check."
+              },
+              "insecureSkipVerify": {
+                "type": "boolean",
+                "description": "Skip checking the certificate was issued for the configured hostname. Named and sensed to match exporters.otlp.tls and the collector's database receivers, which default it to true; here it is false."
+              }
+            }
+          },
+          "events": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "dbServerTopQuery": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              "dbServerQuerySample": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "topQueryCollection": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "collectionInterval": {
+                "type": "string",
+                "minLength": 1
+              },
+              "topQueryCount": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxQuerySampleCount": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxExplainEachInterval": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "queryPlanCacheSize": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "queryPlanCacheTtl": {
+                "type": "string",
+                "minLength": 1
+              },
+              "explainSchema": {
+                "type": "string"
+              }
+            }
+          },
+          "querySampleCollection": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "collectionInterval": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxRowsPerQuery": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "otlp": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "collectorTarget": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "gateway"
+          ]
+        },
+        "collectorNamespace": {
+          "type": "string"
+        },
+        "compression": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object"
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "insecure": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    }
+  }
+}

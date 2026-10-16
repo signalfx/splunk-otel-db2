@@ -53,20 +53,45 @@ resources:
 # `credentialsSecret` is the name of a pre-existing Kubernetes Secret with
 # keys DB2_USER and DB2_PASSWORD. If omitted, the chart creates the Secret
 # from `username` / `password` (not recommended for production).
+# `name` must be lowercase DNS-compatible: lowercase letters, digits, and interior hyphens,
+# starting with a letter (e.g. "prod-eu", "default"). Uppercase and underscores are rejected
+# because each name is uppercased into env-var keys (DB2_USER_<NAME>, DB2_PASSWORD_<NAME>),
+# so "foo-bar" and "foo_bar" would silently share credentials.
+#
+# Note that Helm replaces a list wholesale rather than merging its elements: if you supply
+# your own `receivers` rather than editing the entry below, it inherits nothing from this
+# one. `name`, `hostname`, `database` and credentials are always required, and `port` joins
+# them whenever TLS is on; everything else defaults.
 receivers:
   - name: default
     hostname: "localhost"
-    port: 50000
+    # port is deliberately absent. TLS is on below, and Db2 requires ssl_svcename to listen
+    # on a different port from svcename — so shipping 50000 here would hand you a default
+    # that aims a TLS handshake at the cleartext listener. Set your ssl_svcename port, or
+    # set tls.insecure: true and the cleartext default (50000) applies.
     database: "SAMPLE"
     collectionInterval: "30s"
-    # Reference a pre-existing Secret containing DB2_USER and DB2_PASSWORD.
-    # If set, `username` and `password` below are ignored.
+    # Reference a pre-existing Secret containing DB2_USER and DB2_PASSWORD. This is the
+    # recommended form, and the one thing you must set — the chart refuses to install
+    # without credentials rather than deploying a receiver that cannot connect.
     credentialsSecret: ""
-    # Used only when credentialsSecret is empty — creates a Secret from these values.
+    # Used only when credentialsSecret is empty — creates a Secret from these values,
+    # which then appear in the release manifest.
     username: ""
     password: ""
     tls:
-      insecure: true
+      # Db2 credentials travel over this connection, so TLS is the default. The certificate
+      # must be trusted by the JVM. Supplying a private CA is not supported yet, so a
+      # self-signed or internal-CA certificate currently needs insecure: true.
+      insecure: false
+      # Skip checking the certificate was issued for the hostname above. Set true when you
+      # connect by IP or by an alias the certificate does not list: that keeps the
+      # connection encrypted, unlike insecure, which drops TLS entirely.
+      #
+      # Named to match exporters.otlp.tls and the collector's own database receivers. Those
+      # default it to true; here it is false, so the certificate is checked unless you
+      # opt out.
+      insecureSkipVerify: false
     events:
       dbServerTopQuery:
         enabled: false

@@ -2,7 +2,9 @@
 receivers:
   db2:
     hostname: "localhost"
-    hostport: 50000
+    # Db2 requires ssl_svcename to listen on a different port from svcename, so with TLS on
+    # (the default below) this must be the TLS port, not the cleartext 50000.
+    hostport: 50001
     username: "${env:DB2_USER}"
     password: "${env:DB2_PASSWORD}"
     database: "SAMPLE"
@@ -28,7 +30,7 @@ exporters:
 # receivers:
 #   db2/prod:
 #     hostname: "db2-prod-1.example.com"
-#     hostport: 50000
+#     hostport: 50001
 #     username: "${env:DB2_USER}"
 #     password: "${env:DB2_PASSWORD}"
 #     database: "PROD"
@@ -38,7 +40,7 @@ exporters:
 #       insecure: false
 #   db2/analytics:
 #     hostname: "db2-prod-2.example.com"
-#     hostport: 50000
+#     hostport: 50001
 #     username: "${env:DB2_USER2}"
 #     password: "${env:DB2_PASSWORD2}"
 #     database: "ANALYTICS"

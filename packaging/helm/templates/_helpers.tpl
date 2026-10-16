@@ -136,6 +136,48 @@ Validate every receiver name.
   - After normalisation (upper + replace "-" "_") duplicates are caught explicitly.
 Call via: {{ include "splunk-otel-db2.validateReceiverNames" . }}
 */}}
+{{/*
+Validate that receivers are configured at all, and that each has the fields with no sane
+default. Messages name the full values path because this chart usually runs as a subchart,
+where a bare field name gives the reader nothing to search for — and because a failure here
+aborts the whole parent render, not just this subchart.
+
+Helm replaces a list wholesale rather than merging its elements, so a user-supplied entry
+inherits nothing from the default entry. Anything genuinely optional is therefore read with
+`dig` and a default in the templates, and only what cannot be guessed is required here.
+*/}}
+{{- define "splunk-otel-db2.validateReceivers" -}}
+{{- $prefix := .Chart.IsRoot | ternary "receivers" "db2.receivers" -}}
+{{- if not (kindIs "slice" .Values.receivers) -}}
+{{- if .Values.receivers -}}
+{{- fail (printf "%s must be a list of receiver entries, got %s. A single entry still needs to be a one-item list." $prefix (kindOf .Values.receivers)) -}}
+{{- end -}}
+{{- end -}}
+{{- if not .Values.receivers -}}
+{{- fail (printf "%s is empty. Enabling this chart is not enough on its own: at least one receiver must be configured, each with name, hostname, database and either credentialsSecret or username/password. See https://github.com/signalfx/splunk-otel-db2#installation" $prefix) -}}
+{{- end -}}
+{{- range $i, $r := .Values.receivers -}}
+{{- /* Check the element's kind before `get`, which otherwise reports
+       "expected map[string]interface {}; got string" with no indication of where. */ -}}
+{{- if not (kindIs "map" $r) -}}
+{{- fail (printf "%s[%d] must be a map of receiver settings, got %s" $prefix $i (kindOf $r)) -}}
+{{- end -}}
+{{- range $field := list "name" "hostname" "database" -}}
+{{- if not (get $r $field) -}}
+{{- fail (printf "%s[%d].%s is required" $prefix $i $field) -}}
+{{- end -}}
+{{- end -}}
+{{- /* `tls:` with no value parses as null, so normalise before reading through it. */ -}}
+{{- $tls := $r.tls | default dict -}}
+{{- if and (not (dig "insecure" false $tls)) (not (hasKey $r "port")) -}}
+{{- fail (printf "%s[%d].port is required when TLS is enabled. Db2 requires ssl_svcename to listen on a different port from svcename, so the cleartext default (50000) would send a TLS handshake to the cleartext listener. Set the port your ssl_svcename uses, or set tls.insecure: true to connect without TLS." $prefix $i) -}}
+{{- end -}}
+{{- if and (not $r.credentialsSecret) (not $r.username) -}}
+{{- fail (printf "%s[%d] needs credentials: set credentialsSecret to a pre-existing Secret holding DB2_USER and DB2_PASSWORD, or set username and password" $prefix $i) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "splunk-otel-db2.validateReceiverNames" -}}
 {{- $seen := dict -}}
 {{- range .Values.receivers -}}

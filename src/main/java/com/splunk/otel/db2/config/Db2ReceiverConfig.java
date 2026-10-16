@@ -238,7 +238,21 @@ public class Db2ReceiverConfig {
 
     public static class TlsConfig {
         private boolean insecure = false;
+        /**
+         * Whether to skip checking that the certificate was issued for the host being
+         * connected to. Named and sensed to match {@code exporters.otlp.tls} in this same
+         * codebase and the collector's own database receivers, rather than introducing a
+         * third vocabulary for the same concept.
+         *
+         * <p>Defaults to checking, because encryption without it does not stop an
+         * impersonating server. Set true when connecting by IP or by an alias absent from
+         * the certificate: that keeps the connection encrypted, unlike {@code insecure},
+         * which drops TLS entirely.
+         */
+        private boolean insecureSkipVerify = false;
         public boolean isInsecure() { return insecure; }
         public void setInsecure(boolean insecure) { this.insecure = insecure; }
+        public boolean isInsecureSkipVerify() { return insecureSkipVerify; }
+        public void setInsecureSkipVerify(boolean v) { this.insecureSkipVerify = v; }
     }
 }

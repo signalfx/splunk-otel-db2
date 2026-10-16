@@ -1,3 +1,4 @@
+{{- include "splunk-otel-db2.validateReceivers" . }}
 {{- include "splunk-otel-db2.validateReceiverNames" . }}
 apiVersion: v1
 kind: ConfigMap
@@ -9,31 +10,45 @@ data:
   config.yaml: |
     receivers:
     {{- range .Values.receivers }}
+      {{- /* Every optional block is normalised to a dict before it is read. A key written
+             with no value parses as null, and `dig` cannot traverse a nil intermediate: it
+             aborts the whole render, and in a subchart that takes the parent's entire
+             install with it. The schema accepts null here on purpose, because rejecting a
+             bare `events:` would be unhelpful for something harmless. */}}
+      {{- $tls := .tls | default dict }}
+      {{- $events := .events | default dict }}
+      {{- $topQueryEvent := get $events "dbServerTopQuery" | default dict }}
+      {{- $querySampleEvent := get $events "dbServerQuerySample" | default dict }}
+      {{- $topQuery := .topQueryCollection | default dict }}
+      {{- $querySample := .querySampleCollection | default dict }}
       db2/{{ .name }}:
         hostname: {{ .hostname | quote }}
-        hostport: {{ .port }}
+        hostport: {{ dig "port" 50000 . }}
         username: "${env:DB2_USER_{{ .name | upper | replace "-" "_" }}}"
         password: "${env:DB2_PASSWORD_{{ .name | upper | replace "-" "_" }}}"
         database: {{ .database | quote }}
-        collection_interval: {{ .collectionInterval | quote }}
+        collection_interval: {{ dig "collectionInterval" "30s" . | quote }}
         tls:
-          insecure: {{ .tls.insecure }}
+          # Defaults to TLS: Db2 credentials travel over this connection.
+          insecure: {{ dig "insecure" false $tls }}
+          # Key names match exporters.otlp.tls and the collector's own database receivers.
+          insecure_skip_verify: {{ dig "insecureSkipVerify" false $tls }}
         events:
           db.server.top_query:
-            enabled: {{ dig "events" "dbServerTopQuery" "enabled" false . }}
+            enabled: {{ dig "enabled" false $topQueryEvent }}
           db.server.query_sample:
-            enabled: {{ dig "events" "dbServerQuerySample" "enabled" false . }}
+            enabled: {{ dig "enabled" false $querySampleEvent }}
         top_query_collection:
-          collection_interval: {{ dig "topQueryCollection" "collectionInterval" "60s" . | quote }}
-          top_query_count: {{ dig "topQueryCollection" "topQueryCount" 250 . }}
-          max_query_sample_count: {{ dig "topQueryCollection" "maxQuerySampleCount" 1000 . }}
-          max_explain_each_interval: {{ dig "topQueryCollection" "maxExplainEachInterval" 0 . }}
-          query_plan_cache_size: {{ dig "topQueryCollection" "queryPlanCacheSize" 1000 . }}
-          query_plan_cache_ttl: {{ dig "topQueryCollection" "queryPlanCacheTtl" "1h" . | quote }}
-          explain_schema: {{ dig "topQueryCollection" "explainSchema" "" . | quote }}
+          collection_interval: {{ dig "collectionInterval" "60s" $topQuery | quote }}
+          top_query_count: {{ dig "topQueryCount" 250 $topQuery }}
+          max_query_sample_count: {{ dig "maxQuerySampleCount" 1000 $topQuery }}
+          max_explain_each_interval: {{ dig "maxExplainEachInterval" 0 $topQuery }}
+          query_plan_cache_size: {{ dig "queryPlanCacheSize" 1000 $topQuery }}
+          query_plan_cache_ttl: {{ dig "queryPlanCacheTtl" "1h" $topQuery | quote }}
+          explain_schema: {{ dig "explainSchema" "" $topQuery | quote }}
         query_sample_collection:
-          collection_interval: {{ dig "querySampleCollection" "collectionInterval" "10s" . | quote }}
-          max_rows_per_query: {{ dig "querySampleCollection" "maxRowsPerQuery" 100 . }}
+          collection_interval: {{ dig "collectionInterval" "10s" $querySample | quote }}
+          max_rows_per_query: {{ dig "maxRowsPerQuery" 100 $querySample }}
     {{- end }}
 
     exporters:

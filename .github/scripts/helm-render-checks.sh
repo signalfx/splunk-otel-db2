@@ -17,6 +17,19 @@ readonly CHART_DIR="${CHART_DIR:-packaging/helm}"
 readonly VALUES="${VALUES:-$CHART_DIR/ci/standalone-values.yaml}"
 readonly RELEASE=testrel
 
+# Helm 3 and Helm 4 word schema violations differently, and the chart supports both:
+#   helm 3.12: "- receivers.0.port: Invalid type. Expected: integer, given: null"
+#   helm 4.3:  "- at '/receivers/0/port': got null, want integer"
+# Asserting either string verbatim fails on the other version, so match on the parts both
+# carry: that it was the values schema, which field, and the expected type.
+schema_rejected() {
+  local out="$1" field="$2" want="$3"
+  grep -Fq -- "don't meet the specifications of the schema" <<<"$out" || return 1
+  grep -Fq -- "$field" <<<"$out" || return 1
+  [ -z "$want" ] || grep -Fiq -- "$want" <<<"$out" || return 1
+  return 0
+}
+
 failures=0
 
 fail() {
@@ -114,8 +127,8 @@ if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.collectorTarget=nope' 2>&1); then
   fail "render succeeded with collectorTarget=nope; it must be rejected"
 else
-  grep -Fq -- 'collectorTarget must be' <<<"$out" \
-    && pass "rejected with the actionable message" \
+  schema_rejected "$out" "collectorTarget" "" \
+    && pass "rejected by the schema enum, naming the field" \
     || fail "rejected, but not for collectorTarget; got: $out"
 fi
 
@@ -156,7 +169,244 @@ else
   fail "render with collectorNamespace failed: $out"
 fi
 
-echo "9. an explicit endpoint still wins as a subchart"
+echo "9. a minimal TLS entry renders, and defaults what it omits"
+# Helm replaces a list wholesale, so a user entry inherits nothing from the default entry.
+# Every field not listed here must therefore default, or enabling the chart aborts the
+# parent chart's entire render — which is how four reviewers hit this.
+minimal="$workdir/minimal.yaml"
+cat >"$minimal" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: my-db2-creds
+      port: 50001
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$minimal" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got_tls=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].tls.insecure' -)
+  got_port=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].hostport' -)
+  got_int=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].collection_interval' -)
+  [ "$got_tls" = "false" ] \
+    && pass "tls.insecure defaults to false — credentials are not sent in cleartext" \
+    || fail "tls.insecure should default to false, got '$got_tls'"
+  [ "$got_port" = "50001" ] && pass "the explicit TLS port is used" || fail "port, got '$got_port'"
+  [ "$got_int" = "30s" ] && pass "collectionInterval defaults to 30s" || fail "interval default, got '$got_int'"
+else
+  fail "a minimal receiver entry must render, got: $out"
+fi
+
+echo "10. enabling the chart without configuring credentials fails, naming the values path"
+# The shipped entry is a placeholder to edit, so enabling alone leaves credentials unset.
+# That must fail - a receiver with no credentials cannot connect - and the message has to
+# name what the reader has to set, in the path they would search for.
+credsonly="$workdir/creds-only.yaml"
+printf 'splunk-otel-db2:\n  receivers:\n    - name: default\n      hostname: h\n      database: d\n      port: 50001\n' >"$credsonly"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$credsonly" 2>&1); then
+  fail "rendering with unset credentials succeeded; it must be rejected"
+else
+  grep -Fq -- 'db2.receivers[0] needs credentials' <<<"$out" \
+    && pass "rejected, naming db2.receivers[0] and what to set" \
+    || fail "rejected, but without naming db2.receivers; got: $out"
+fi
+
+echo "10b. an explicitly empty receivers list fails too"
+# via a values file: `--set x=[]` assigns the literal string "[]", not an empty list.
+empty="$workdir/empty.yaml"
+printf 'splunk-otel-db2:\n  receivers: []\n' >"$empty"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$empty" 2>&1); then
+  fail "an empty receivers list rendered; it must be rejected"
+else
+  grep -Fq -- 'db2.receivers is empty' <<<"$out" \
+    && pass "rejected with the emptiness message" \
+    || fail "rejected, but not for emptiness; got: $out"
+fi
+
+echo "10c. a non-list receivers value is rejected clearly"
+if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers=oops' 2>&1); then
+  fail "a string receivers value rendered; it must be rejected"
+else
+  schema_rejected "$out" "receivers" "" \
+    && pass "rejected by the schema, naming the field" \
+    || fail "rejected, but with an unhelpful error; got: $out"
+fi
+
+echo "10d. a non-map element inside the list is rejected clearly"
+if out=$(helm template "$RELEASE" "$PARENT" --set 'splunk-otel-db2.receivers[0]=oops' 2>&1); then
+  fail "a string list element rendered; it must be rejected"
+else
+  schema_rejected "$out" "receivers" "" \
+    && pass "rejected by the schema, naming the element" \
+    || fail "rejected, but with an unhelpful error; got: $out"
+fi
+
+echo "10e. TLS on without an explicit port is rejected, naming ssl_svcename"
+# TLS defaults on, but the port default (50000) is Db2's cleartext listener: ssl_svcename must
+# differ from svcename, so guessing the port would send a TLS handshake to the wrong one.
+tlsnoport="$workdir/tls-noport.yaml"
+cat >"$tlsnoport" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$tlsnoport" 2>&1); then
+  fail "TLS with a guessed port rendered; the port must be required"
+else
+  grep -Fq -- 'ssl_svcename' <<<"$out" \
+    && pass "rejected, explaining why the cleartext default cannot be reused" \
+    || fail "rejected, but without explaining the port; got: $out"
+fi
+
+echo "10f. an explicitly null tls block does not crash, and means TLS on"
+nulltls="$workdir/null-tls.yaml"
+cat >"$nulltls" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      port: 50001
+      tls:
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$nulltls" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].tls.insecure' -)
+  [ "$got" = "false" ] \
+    && pass "null tls renders as insecure: false rather than erroring" \
+    || fail "expected insecure false from a null tls block, got '$got'"
+else
+  fail "a null tls block must not crash rendering, got: $out"
+fi
+
+echo "10g. insecure: true keeps the cleartext port default"
+insec="$workdir/insecure.yaml"
+cat >"$insec" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      tls:
+        insecure: true
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$insec" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].hostport' -)
+  [ "$got" = "50000" ] \
+    && pass "cleartext path still defaults the port to 50000" \
+    || fail "expected the 50000 default on the cleartext path, got '$got'"
+else
+  fail "the cleartext path must not require a port, got: $out"
+fi
+
+echo "10h. the values schema rejects wrong types before any template runs"
+# These three all passed template-level checks previously: hasKey is true for a null value,
+# a non-empty string is truthy so "false" took the TLS-off branch, and `tls: true` reached dig.
+schema_case() {
+  f="$workdir/schema-$1.yaml"
+  { echo 'splunk-otel-db2:'; printf '%s\n' "$2" | sed 's/^/  /'; } >"$f"
+  if out=$(helm template "$RELEASE" "$PARENT" -f "$f" 2>&1); then
+    fail "$1 rendered; the schema must reject it"
+  else
+    schema_rejected "$out" "$3" "$4" \
+      && pass "$1 rejected on $3 (want $4)" \
+      || fail "$1 rejected, but not by the schema on $3; got: $out"
+  fi
+}
+schema_case null-port \
+  'receivers:
+  - name: default
+    hostname: h
+    database: d
+    credentialsSecret: s
+    port: null' \
+  port integer
+schema_case string-insecure \
+  'receivers:
+  - name: default
+    hostname: h
+    database: d
+    credentialsSecret: s
+    tls:
+      insecure: "false"' \
+  insecure boolean
+schema_case bool-tls \
+  'receivers:
+  - name: default
+    hostname: h
+    database: d
+    credentialsSecret: s
+    port: 50001
+    tls: true' \
+  tls object
+
+echo "10g. a mistyped receiver key is rejected rather than silently defaulted"
+# The chart reads a fixed set of keys, so anything else is a typo. Without
+# additionalProperties these validated cleanly and the receiver ran on the default, which
+# looks identical to a working install until you notice the interval never changed.
+for typo in collectionIntervl topQueryCollecton; do
+  if out=$(helm template "$RELEASE" "$PARENT" \
+             --set 'splunk-otel-db2.receivers[0].name=default' \
+             --set 'splunk-otel-db2.receivers[0].hostname=h' \
+             --set 'splunk-otel-db2.receivers[0].database=d' \
+             --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+             --set 'splunk-otel-db2.receivers[0].port=50001' \
+             --set "splunk-otel-db2.receivers[0].$typo=1s" 2>&1); then
+    fail "$typo was accepted; a key the chart never reads must be rejected"
+  else
+    grep -Fiq -- "$typo" <<<"$out" \
+      && pass "$typo rejected, naming the key" \
+      || fail "$typo rejected, but without naming it; got: $out"
+  fi
+done
+
+echo "10h. an optional block written with no value still renders"
+# `events:` with nothing after it parses as null, and dig cannot traverse a nil
+# intermediate - it aborted the whole render, which in a subchart takes the parent's
+# install with it. Both nesting levels are covered because both can be left empty.
+cat >"$workdir/nullblocks.yaml" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      port: 50001
+      events:
+        dbServerTopQuery:
+        dbServerQuerySample:
+      topQueryCollection:
+      querySampleCollection:
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$workdir/nullblocks.yaml" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  got=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"] | [.top_query_collection.top_query_count, .query_sample_collection.max_rows_per_query, .events["db.server.top_query"].enabled] | join(",")' -)
+  [ "$got" = "250,100,false" ] \
+    && pass "null blocks fall back to the documented defaults: $got" \
+    || fail "expected 250,100,false from null blocks, got '$got'"
+else
+  fail "null optional blocks must render, not abort; got: $out"
+fi
+
+echo "11. a receiver missing a required field names that field"
+if out=$(helm template "$RELEASE" "$PARENT" \
+           --set 'splunk-otel-db2.receivers[0].name=default' \
+           --set 'splunk-otel-db2.receivers[0].database=PROD' \
+           --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' 2>&1); then
+  fail "rendering without hostname succeeded; it must be rejected"
+else
+  schema_rejected "$out" "hostname" "" \
+    && pass "names the exact missing field" \
+    || fail "rejected, but without naming the field; got: $out"
+fi
+
+echo "12. an explicit endpoint still wins as a subchart"
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.endpoint=http://explicit:4317' 2>&1); then
   got=$(printf '%s' "$out" | endpoint_of)
