@@ -239,11 +239,24 @@ public class Db2Config {
             if (tls.get("insecure") != null) {
                 rc.getTls().setInsecure(asBool(tls, "insecure"));
             }
-            // Every key the chart renders has to be read here: one written into
-            // config.yaml and not parsed is silently ignored, so the values would
-            // have no effect on the connection at all.
+            // Keys match exporters.otlp.tls above, and the collector's own database
+            // receivers. Every key the chart renders has to be read here: one written
+            // into config.yaml and not parsed is silently ignored, which is how
+            // verify_hostname and cert_location were landing with no effect at all.
             if (tls.get("insecure_skip_verify") != null) {
                 rc.getTls().setInsecureSkipVerify(asBool(tls, "insecure_skip_verify"));
+            }
+            if (tls.get("ca_file") != null) {
+                rc.getTls().setCaFile(asString(tls, "ca_file"));
+            }
+            if (tls.get("trust_store") != null) {
+                rc.getTls().setTrustStore(asString(tls, "trust_store"));
+            }
+            if (tls.get("trust_store_password") != null) {
+                rc.getTls().setTrustStorePassword(asString(tls, "trust_store_password"));
+            }
+            if (tls.get("trust_store_type") != null) {
+                rc.getTls().setTrustStoreType(asString(tls, "trust_store_type"));
             }
         }
         return rc;
@@ -330,6 +343,36 @@ public class Db2Config {
             rc.getQuerySampleCollection().getCollectionIntervalDuration();
             if (rc.getQuerySampleCollection().getMaxRowsPerQuery() <= 0)
                 throw new IllegalStateException("query_sample_collection.max_rows_per_query must be > 0");
+        }
+
+        // The chart refuses this combination too, but systemd, Docker and bare-JVM installs
+        // never go through Helm, so the rule has to live here as well. Same reasoning as the
+        // exporter check below: insecure means no handshake, so the trust material is never
+        // consulted and the credentials go out in the clear.
+        Db2ReceiverConfig.TlsConfig db2Tls = rc.getTls();
+        if (db2Tls != null && db2Tls.isInsecure()) {
+            List<String> ignored = new ArrayList<>();
+            if (!db2Tls.getCaFile().isEmpty()) ignored.add("ca_file");
+            if (!db2Tls.getTrustStore().isEmpty()) ignored.add("trust_store");
+            if (!ignored.isEmpty())
+                throw new IllegalStateException(
+                    "receivers.db2.tls: insecure: true disables TLS entirely, so "
+                        + String.join(" and ", ignored)
+                        + " would never be consulted and the Db2 credentials would travel "
+                        + "unencrypted. Remove insecure to use the trust material, or remove "
+                        + String.join(" and ", ignored) + " to connect without TLS.");
+        }
+        // Force ${env:...} resolution now. The accessor resolves lazily, like the Db2
+        // password, but validate() reads that one and never read this: a missing variable
+        // passed load() and startup and only surfaced on the first connection attempt,
+        // reported as a bare variable name with nothing tying it to this field.
+        if (db2Tls != null && !db2Tls.isInsecure()) {
+            try {
+                db2Tls.getTrustStorePassword();
+            } catch (IllegalStateException e) {
+                throw new IllegalStateException(
+                    "receivers.db2.tls.trust_store_password: " + e.getMessage(), e);
+            }
         }
 
         String endpoint = otlp.getEndpoint();

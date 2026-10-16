@@ -64,6 +64,18 @@
               "insecureSkipVerify": {
                 "type": "boolean",
                 "description": "Skip checking the certificate was issued for the configured hostname. Named and sensed to match exporters.otlp.tls and the collector's database receivers, which default it to true; here it is false."
+              },
+              "caSecret": {
+                "type": "string",
+                "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+                "maxLength": 253,
+                "description": "Name of an existing Secret holding a certificate authority to trust. Matched as a true DNS subdomain — dot-separated labels, each 1–63 characters and starting and ending alphanumeric — so names the Kubernetes API would reject, such as `a..b` or `a.-b`, are caught here rather than surfacing later as a Secret reference that cannot be resolved."
+              },
+              "caSecretKey": {
+                "type": "string",
+                "pattern": "^[-._a-zA-Z0-9]+$",
+                "maxLength": 253,
+                "description": "Key within caSecret holding the PEM certificate. Constrained to the characters Kubernetes allows in a Secret key: the volume projects this key by name, and a key that cannot exist would leave the pod unable to mount."
               }
             }
           },

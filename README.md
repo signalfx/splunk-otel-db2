@@ -72,6 +72,13 @@ receivers:
     tls:
       insecure: false                  # default false. Setting true disables TLS on
                                        # the Db2 connection, which carries these credentials
+      insecure_skip_verify: false      # default false. True still encrypts, but stops
+                                       # checking the certificate names this host
+      ca_file: ""                      # PEM certificate authority to trust, for a Db2 with
+                                       # an internal or self-signed certificate
+      trust_store: ""                  # alternative to ca_file, if you already distribute
+      trust_store_password: ""         # a truststore. The password supports ${env:VAR}
+      trust_store_type: ""             # defaults to the JVM's own default type
 
 exporters:
   otlp:
@@ -439,16 +446,36 @@ receiver that cannot connect.
 hostname you configure — hostname validation is enforced, which `sslConnection` alone does not
 do. If you connect by IP or by an alias the certificate does not list, set
 `tls.insecureSkipVerify: true`: that keeps the connection encrypted, unlike `tls.insecure`, which
-drops TLS entirely. Supplying a private CA or truststore is not supported yet
-([#21](https://github.com/signalfx/splunk-otel-db2/issues/21)), so an internal or self-signed
-Db2 certificate currently needs `tls.insecure: true`. That also means `port` is required
-whenever TLS is on: Db2 requires `ssl_svcename` to listen on a different port from
-`svcename`, so the cleartext default of 50000 cannot be reused.
+drops TLS entirely. `port` is required whenever TLS is on: Db2 requires `ssl_svcename` to
+listen on a different port from `svcename`, so the cleartext default of 50000 cannot be reused.
+
+For a Db2 with an internal or self-signed certificate, point `tls.caSecret` at a Secret
+holding the certificate authority. The chart mounts it read-only and passes the path to the
+driver, so these installs do not need `tls.insecure: true`:
+
+```bash
+kubectl create secret generic my-db2-ca --from-file=ca.crt=/path/to/ca.crt
+```
+
+```yaml
+db2:
+  receivers:
+    - name: default
+      # ...
+      tls:
+        caSecret: my-db2-ca
+        caSecretKey: ca.crt     # default
+```
+
+Only `caSecretKey` is mounted, so the rest of the Secret stays out of the container. One
+Secret is mounted per receiver, so databases fronted by different authorities can each have
+their own. Without `caSecret` the driver falls back to the JVM default truststore, which will
+not contain an internal CA.
 
 Note that Helm replaces a list wholesale rather than merging its elements: an entry you write
 here inherits nothing from the shipped one. `name`, `hostname`, `database` and credentials are
 always required, and `port` joins them whenever TLS is on. `collectionInterval`,
-`tls.insecure` and `tls.insecureSkipVerify` default.
+`tls.insecure`, `tls.insecureSkipVerify` and `tls.caSecretKey` default.
 
 **Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
 

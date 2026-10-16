@@ -33,6 +33,13 @@ data:
           insecure: {{ dig "insecure" false $tls }}
           # Key names match exporters.otlp.tls and the collector's own database receivers.
           insecure_skip_verify: {{ dig "insecureSkipVerify" false $tls }}
+          {{- if dig "caSecret" "" $tls }}
+          # Where the deployment mounts tls.caSecret, derived from the same receiver name,
+          # so the config and the mount cannot disagree. The file name is fixed because the
+          # volume projects the chosen key to this path regardless of what it is called in
+          # the Secret.
+          ca_file: {{ include "splunk-otel-db2.caMountPath" . }}/ca.crt
+          {{- end }}
         events:
           db.server.top_query:
             enabled: {{ dig "enabled" false $topQueryEvent }}

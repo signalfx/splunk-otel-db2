@@ -406,6 +406,173 @@ else
     || fail "rejected, but without naming the field; got: $out"
 fi
 
+echo "11b. a CA Secret is mounted and the rendered config points at the mount"
+# The config path and the mount path are rendered from the same receiver name rather than
+# configured separately, so they cannot disagree - which is the failure this would invite.
+ca="$workdir/ca.yaml"
+dep='select(.kind == "Deployment") | .spec.template.spec'
+cat >"$ca" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: default
+      hostname: db2.example.com
+      database: PROD
+      credentialsSecret: s
+      port: 50001
+      tls:
+        caSecret: my-db2-ca
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$ca" 2>&1); then
+  cfg=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' -)
+  loc=$(printf '%s' "$cfg" | yq e -N '.receivers["db2/default"].tls.ca_file' -)
+  mnt=$(printf '%s' "$out" | yq e -N "$dep"' | .containers[0].volumeMounts[] | select(.name == "ca-default") | .mountPath' -)
+  sec=$(printf '%s' "$out" | yq e -N "$dep"' | .volumes[] | select(.name == "ca-default") | .secret.secretName' -)
+  [ "$sec" = "my-db2-ca" ] && pass "the named Secret is mounted" || fail "secret mount, got '$sec'"
+  [ "$loc" = "$mnt/ca.crt" ] \
+    && pass "ca_file sits under the mount: $loc" \
+    || fail "ca_file '$loc' is not under the mount '$mnt'"
+  # A sibling of the config mount, not a child. Nesting does work - the runtime creates the
+  # mount point before the container starts, verified in kind under this chart's non-root,
+  # read-only-rootfs security context - but it leaves a directory inside what is otherwise a
+  # read-only ConfigMap mount, and the two mounts are unrelated.
+  cfgmnt=$(printf '%s' "$out" | yq e -N "$dep"' | .containers[0].volumeMounts[] | select(.name == "config") | .mountPath' -)
+  case "$mnt" in
+    "$cfgmnt"/*) fail "the CA mount '$mnt' nests inside the config mount '$cfgmnt'" ;;
+    *) pass "the CA mount is a sibling of the config mount, not nested" ;;
+  esac
+else
+  fail "a receiver with tls.caSecret must render, got: $out"
+fi
+
+echo "11c. only caSecretKey is projected, under a fixed name"
+# Mounting the whole Secret would hand every other key in it to the container, and would
+# make the file name depend on the key, which the config would then have to track.
+printf '%s\n' "        caSecretKey: corp-root.pem" >>"$ca"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$ca" 2>&1); then
+  items=$(printf '%s' "$out" | yq e -N "$dep"' | .volumes[] | select(.name == "ca-default") | .secret.items | map(.key + "->" + .path) | join(",")' -)
+  loc=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' - \
+        | yq e -N '.receivers["db2/default"].tls.ca_file' -)
+  [ "$items" = "corp-root.pem->ca.crt" ] \
+    && pass "just that key, projected to ca.crt" \
+    || fail "expected only corp-root.pem->ca.crt, got '$items'"
+  [ "${loc##*/}" = "ca.crt" ] \
+    && pass "the config path is unaffected by the key name" \
+    || fail "expected the config to end in /ca.crt, got '$loc'"
+else
+  fail "caSecretKey must render, got: $out"
+fi
+
+echo "11d. receivers sharing one CA Secret get distinct, legal volume names"
+# Naming the volume after the Secret produced duplicates here, and a Secret name containing
+# dots is legal for a Secret but not for a volume. Both are why this is keyed by receiver.
+cat >"$workdir/ca-shared.yaml" <<'EOF'
+splunk-otel-db2:
+  receivers:
+    - name: alpha
+      hostname: a.example.com
+      database: A
+      credentialsSecret: s
+      port: 50001
+      tls:
+        caSecret: pki.example.com
+    - name: beta
+      hostname: b.example.com
+      database: B
+      credentialsSecret: s
+      port: 50001
+      tls:
+        caSecret: pki.example.com
+EOF
+if out=$(helm template "$RELEASE" "$PARENT" -f "$workdir/ca-shared.yaml" 2>&1); then
+  names=$(printf '%s' "$out" | yq e -N "$dep"' | .volumes[] | select(.name | test("^ca-")) | .name' - | sort | paste -sd, -)
+  [ "$names" = "ca-alpha,ca-beta" ] \
+    && pass "one volume per receiver: $names" \
+    || fail "expected ca-alpha,ca-beta, got '$names'"
+  printf '%s' "$names" | grep -q '\.' \
+    && fail "a volume name contains a dot, which Kubernetes rejects for a DNS label" \
+    || pass "no Secret name leaked into a volume name"
+else
+  fail "two receivers sharing a CA Secret must render, got: $out"
+fi
+
+echo "11e. a long receiver name still yields a legal volume name"
+# The first attempt capped every receiver name at 60 characters so ca-<name> would fit a DNS
+# label. That penalised configurations that never mount a CA, so the name is hashed instead.
+long=$(printf 'a%.0s' $(seq 70))
+if out=$(helm template "$RELEASE" "$PARENT" \
+           --set "splunk-otel-db2.receivers[0].name=$long" \
+           --set 'splunk-otel-db2.receivers[0].hostname=h' \
+           --set 'splunk-otel-db2.receivers[0].database=d' \
+           --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+           --set 'splunk-otel-db2.receivers[0].port=50001' \
+           --set 'splunk-otel-db2.receivers[0].tls.caSecret=my-ca' 2>&1); then
+  vol=$(printf '%s' "$out" | yq e -N "$dep"' | .volumes[] | select(.name | test("^ca-")) | .name' -)
+  [ -n "$vol" ] && [ "${#vol}" -le 63 ] \
+    && pass "volume name is ${#vol} characters: $vol" \
+    || fail "expected a volume name within 63 characters, got '$vol' (${#vol})"
+  loc=$(printf '%s' "$out" | yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' - \
+        | yq e -N ".receivers[\"db2/$long\"].tls.ca_file" -)
+  [ "$loc" = "/etc/splunk-otel-db2-ca/${vol#ca-}/ca.crt" ] \
+    && pass "the config path follows the same derived token: $loc" \
+    || fail "ca_file '$loc' does not match the volume '$vol'"
+else
+  fail "a 70-character receiver name must render, got: $out"
+fi
+
+echo "11f. a Secret name the Kubernetes API would reject is caught by the schema"
+# The first pattern allowed a..b, a.-b and over-long labels: Helm rendered them and the
+# failure only appeared later as a Secret reference that could not be resolved.
+label64=$(printf 'b%.0s' $(seq 64))
+for bad in "a..b" "a.-b" "$label64.example.com" "-abc"; do
+  if out=$(helm template "$RELEASE" "$PARENT" \
+             --set 'splunk-otel-db2.receivers[0].name=default' \
+             --set 'splunk-otel-db2.receivers[0].hostname=h' \
+             --set 'splunk-otel-db2.receivers[0].database=d' \
+             --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+             --set 'splunk-otel-db2.receivers[0].port=50001' \
+             --set "splunk-otel-db2.receivers[0].tls.caSecret=$bad" 2>&1); then
+    fail "caSecret '$bad' rendered; Kubernetes would reject that Secret name"
+  else
+    grep -Fq -- "caSecret" <<<"$out" \
+      && pass "rejected '$bad', naming caSecret" \
+      || fail "'$bad' rejected, but not for caSecret; got: $out"
+  fi
+done
+for good in my-db2-ca pki.example.com; do
+  helm template "$RELEASE" "$PARENT" \
+    --set 'splunk-otel-db2.receivers[0].name=default' \
+    --set 'splunk-otel-db2.receivers[0].hostname=h' \
+    --set 'splunk-otel-db2.receivers[0].database=d' \
+    --set 'splunk-otel-db2.receivers[0].credentialsSecret=s' \
+    --set 'splunk-otel-db2.receivers[0].port=50001' \
+    --set "splunk-otel-db2.receivers[0].tls.caSecret=$good" >/dev/null 2>&1 \
+    && pass "still accepts the legal name '$good'" \
+    || fail "legal Secret name '$good' was rejected"
+done
+
+echo "11g. a CA together with insecure is rejected"
+# Honouring insecure here would mount the CA, never consult it, and send the credentials in
+# the clear - so the contradiction is reported rather than resolved silently.
+if out=$(helm template "$RELEASE" "$PARENT" -f "$ca" \
+           --set 'splunk-otel-db2.receivers[0].tls.insecure=true' 2>&1); then
+  fail "caSecret with insecure: true rendered; it must be rejected"
+else
+  grep -Fq -- "sets both caSecret and insecure" <<<"$out" \
+    && pass "rejected, explaining which of the two to drop" \
+    || fail "rejected, but not for the contradiction; got: $out"
+fi
+
+echo "11h. no CA Secret means no mount and no ca_file"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$minimal" 2>&1); then
+  n=$(grep -c "ca_file" <<<"$out" || true)
+  v=$(grep -c "name: ca-" <<<"$out" || true)
+  [ "$n" = "0" ] && [ "$v" = "0" ] \
+    && pass "neither is emitted, so the driver keeps the JVM truststore" \
+    || fail "ca_file=$n ca volumes=$v, expected none"
+else
+  fail "the minimal entry must still render, got: $out"
+fi
+
 echo "12. an explicit endpoint still wins as a subchart"
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.endpoint=http://explicit:4317' 2>&1); then

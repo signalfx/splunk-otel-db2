@@ -172,6 +172,12 @@ inherits nothing from the default entry. Anything genuinely optional is therefor
 {{- if and (not (dig "insecure" false $tls)) (not (hasKey $r "port")) -}}
 {{- fail (printf "%s[%d].port is required when TLS is enabled. Db2 requires ssl_svcename to listen on a different port from svcename, so the cleartext default (50000) would send a TLS handshake to the cleartext listener. Set the port your ssl_svcename uses, or set tls.insecure: true to connect without TLS." $prefix $i) -}}
 {{- end -}}
+{{- /* A CA is only consulted during a TLS handshake, so the pair is contradictory and one
+       of the two settings is not what was meant. Silently honouring insecure would mount
+       the Secret and still send the credentials in the clear. */ -}}
+{{- if and (dig "caSecret" "" $tls) (dig "insecure" false $tls) -}}
+{{- fail (printf "%s[%d].tls sets both caSecret and insecure: true. insecure disables TLS entirely, so the certificate authority would never be consulted and the credentials would travel unencrypted. Remove insecure to use the CA, or remove caSecret to connect without TLS." $prefix $i) -}}
+{{- end -}}
 {{- if and (not $r.credentialsSecret) (not $r.username) -}}
 {{- fail (printf "%s[%d] needs credentials: set credentialsSecret to a pre-existing Secret holding DB2_USER and DB2_PASSWORD, or set username and password" $prefix $i) -}}
 {{- end -}}
@@ -209,3 +215,31 @@ Call with a dict: (dict "receiver" . "releaseName" $.Release.Name)
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{/*
+Per-receiver token identifying a CA mount: the receiver name, or a hash of it when the name
+is too long to fit a DNS label once prefixed.
+
+Derived from the receiver rather than the Secret: two receivers may share one authority,
+which would collide, and a Secret name may contain dots, which a volume name may not.
+
+Hashing rather than rejecting long names keeps the length constraint off receivers that never
+mount a CA. The volume name, the mount path and the rendered ca_file all come from this one
+token, so they cannot drift apart.
+*/}}
+{{- define "splunk-otel-db2.caToken" -}}
+{{- if gt (len (printf "ca-%s" .name)) 63 -}}
+{{- sha256sum .name | trunc 16 -}}
+{{- else -}}
+{{- .name -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Directory a receiver's CA is mounted at. A sibling of the config mount, not a child of it:
+nesting under /etc/splunk-otel-db2 works, but it leaves a directory inside what is otherwise
+a read-only ConfigMap mount, and the two mounts have nothing to do with each other.
+*/}}
+{{- define "splunk-otel-db2.caMountPath" -}}
+{{- printf "/etc/splunk-otel-db2-ca/%s" (include "splunk-otel-db2.caToken" .) -}}
+{{- end -}}
