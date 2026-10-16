@@ -10,13 +10,22 @@ receivers:
     database: "SAMPLE"
     collection_interval: "30s"
     connect_timeout_seconds: 10
-    top_query_count: 250
-    top_query_enabled: false
-    top_query_interval: "60s"
-    query_sample_enabled: true
-    max_query_sample_count: 1000
-    query_sample_interval: "10s"
     use_snapshot_monitor: false
+    # Top queries and query samples are opt-in, and each is enabled here rather than by a
+    # flag beside its tuning: the receiver reads `events` for the switch and the
+    # *_collection blocks for the settings.
+    events:
+      db.server.top_query:
+        enabled: false
+      db.server.query_sample:
+        enabled: true
+    top_query_collection:
+      collection_interval: "60s"
+      top_query_count: 250
+      max_query_sample_count: 1000
+    query_sample_collection:
+      collection_interval: "10s"
+      max_rows_per_query: 100
     tls:
       insecure: false
 
