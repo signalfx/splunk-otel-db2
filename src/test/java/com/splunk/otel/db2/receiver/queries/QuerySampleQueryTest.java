@@ -352,6 +352,31 @@ class QuerySampleQueryTest {
     }
 
     @Test
+    void defaultPathOrdersBlockedAndActiveRowsAheadOfIdleUnderCapPressure() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(false).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue().replaceAll("\\s+", " ");
+
+        // The row budget is shared, so ordering decides who survives FETCH FIRST. An IDLE cursor
+        // waits on the client while ELAPSED_TIME_SEC counts from when the activity began, so on
+        // elapsed time alone a long-open idle cursor would displace a newer executing or
+        // lock-waiting statement. Assert the priority tier is applied BEFORE elapsed time.
+        int tier = sql.indexOf("ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0");
+        int active = sql.indexOf("WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1");
+        int elapsed = sql.indexOf("S.ELAPSED_TIME_SEC DESC NULLS LAST", tier);
+        int fetch = sql.indexOf("FETCH FIRST");
+
+        assertThat(tier).as("blocked rows must be the first ORDER BY tier").isGreaterThan(-1);
+        assertThat(active).as("non-IDLE activity must outrank IDLE").isGreaterThan(tier);
+        assertThat(elapsed).as("elapsed time must break ties WITHIN a tier, not across tiers")
+            .isGreaterThan(active);
+        assertThat(fetch).as("the tiered ordering must feed FETCH FIRST").isGreaterThan(elapsed);
+    }
+
+    @Test
     void idleActivityIsEmittedWithStatementText() throws Exception {
         when(rs.next()).thenReturn(true, false);
         // An IDLE activity in Db2 is an open activity that is not currently executing (for

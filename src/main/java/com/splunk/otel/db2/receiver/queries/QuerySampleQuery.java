@@ -140,10 +140,20 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
-        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
-        // row budget.
-        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
+        // Priority tiers before elapsed time, because this ordering feeds FETCH FIRST and the row
+        // budget is shared. An IDLE activity waits on the client, while ELAPSED_TIME_SEC counts
+        // from when the activity began — so a long-open idle cursor outranks a newer executing or
+        // lock-waiting statement on elapsed time alone and would consume the budget ahead of it.
+        // Blocked rows first (they also drive blocking detection), then other non-IDLE activity,
+        // then IDLE, which can therefore only ever fill leftover capacity.
+        // S.ACTIVITY_STATE is the base column ('IDLE'), not the SELECT alias, which is the
+        // concatenation of state and type ('IDLE READ_DML').
+        // NULLS LAST here too: a row with an unknown elapsed time would otherwise be sampled ahead
+        // of genuinely long-running statements and consume the row budget.
+        "ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0 " +
+        "              WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1 " +
+        "              ELSE 2 END, " +
+        "         S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Db2 10.5+ variant: also LEFT JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
@@ -252,10 +262,20 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
-        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
-        // row budget.
-        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
+        // Priority tiers before elapsed time, because this ordering feeds FETCH FIRST and the row
+        // budget is shared. An IDLE activity waits on the client, while ELAPSED_TIME_SEC counts
+        // from when the activity began — so a long-open idle cursor outranks a newer executing or
+        // lock-waiting statement on elapsed time alone and would consume the budget ahead of it.
+        // Blocked rows first (they also drive blocking detection), then other non-IDLE activity,
+        // then IDLE, which can therefore only ever fill leftover capacity.
+        // S.ACTIVITY_STATE is the base column ('IDLE'), not the SELECT alias, which is the
+        // concatenation of state and type ('IDLE READ_DML').
+        // NULLS LAST here too: a row with an unknown elapsed time would otherwise be sampled ahead
+        // of genuinely long-running statements and consume the row budget.
+        "ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0 " +
+        "              WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1 " +
+        "              ELSE 2 END, " +
+        "         S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Snapshot monitor fallback (Db2 9.7+). Blocking detection not available.
