@@ -2,6 +2,29 @@ apiVersion: v1
 entries:
   splunk-otel-db2:
   - apiVersion: v2
+    appVersion: 0.1.6
+    created: "2026-10-22T12:29:09.935556707Z"
+    description: Standalone OpenTelemetry receiver for IBM DB2, shipping metrics and
+      query samples to an OTLP endpoint.
+    digest: 6e69bf9d20e72f41cde22287c175f89f637c8f32c3588b6c461a16ed74f65324
+    home: https://github.com/signalfx/splunk-otel-db2
+    keywords:
+    - db2
+    - ibm
+    - opentelemetry
+    - splunk
+    - observability
+    maintainers:
+    - name: signalfx/splunk-otel-db2-maintainers
+      url: https://github.com/signalfx/splunk-otel-db2
+    name: splunk-otel-db2
+    sources:
+    - https://github.com/signalfx/splunk-otel-db2
+    type: application
+    urls:
+    - https://github.com/signalfx/splunk-otel-db2/releases/download/splunk-otel-db2-0.1.6/splunk-otel-db2-0.1.6.tgz
+    version: 0.1.6
+  - apiVersion: v2
     appVersion: 0.1.5
     created: "2026-10-22T11:56:45.309330555Z"
     description: Standalone OpenTelemetry receiver for IBM DB2, shipping metrics and
@@ -139,4 +162,4 @@ entries:
     urls:
     - https://github.com/signalfx/splunk-otel-db2/releases/download/splunk-otel-db2-0.1.0/splunk-otel-db2-0.1.0.tgz
     version: 0.1.0
-generated: "2026-10-22T11:56:45.309358798Z"
+generated: "2026-10-22T12:29:09.935580823Z"
