@@ -397,11 +397,15 @@ imagePullSecrets:
 
 Install this chart as a dependency of [splunk-otel-collector-chart](https://github.com/signalfx/splunk-otel-collector-chart), so a single release deploys the Collector and the Db2 receiver. The receiver still runs as its own Deployment and exports *into* the Collector — it is not a Collector receiver.
 
-**Step 1 — Add the dependency** to that chart's `Chart.yaml`:
+Steps 1 and 2 describe what that chart has to declare for this one to be installable as a
+subchart. They are maintained upstream, so if you are consuming a released
+`splunk-otel-collector` that already offers `db2.enabled`, skip to step 3.
+
+**Step 1 — The dependency** in that chart's `Chart.yaml`:
 
 ```yaml
   - name: splunk-otel-db2
-    version: 0.1.0
+    version: <latest>            # see the Releases page
     alias: db2
     repository: https://signalfx.github.io/splunk-otel-db2
     condition: db2.enabled
@@ -409,18 +413,19 @@ Install this chart as a dependency of [splunk-otel-collector-chart](https://gith
 
 The alias must stay lowercase and hyphen-free — that chart uppercases aliases into resource names, and hyphens break its template rendering.
 
-**Step 2 — Make two further changes in that chart.** The second is load-bearing: skipping it breaks that chart for **every** user of it, not only those enabling this receiver.
+**Step 2 — Two further declarations in that chart.** The second is load-bearing: omitting it
+breaks that chart for **every** user of it, not only those enabling this receiver.
 
-1. `values.yaml` should set `db2.enabled: false`, so the toggle is discoverable where users
-   look for it. It is no longer load-bearing: this chart declares its own `enabled: false`,
-   which the parent's `condition` resolves against when the parent has no such key. That
-   matters because `helm upgrade --reuse-values` reuses the previous release's values
-   instead of merging new chart defaults, so an upgrade from a release predating the key
-   would otherwise leave the condition unresolved — and Helm leaves an unresolved
-   dependency enabled.
-2. `values.schema.json` must declare a `db2` property. That schema sets `additionalProperties: false` at the top level, so an undeclared key makes the chart fail to render at its defaults with `additional properties 'db2' not allowed`.
-
-Both are handled in [signalfx/splunk-otel-collector-chart#2658](https://github.com/signalfx/splunk-otel-collector-chart/pull/2658).
+1. `values.yaml` sets `db2.enabled: false`, so the toggle is discoverable where users look
+   for it. It is not what disables the subchart — this chart declares its own
+   `enabled: false`, which the parent's `condition` resolves against when the parent has no
+   such key. That case arises under `helm upgrade --reuse-values`, which reuses the previous
+   release's values instead of merging new chart defaults: an upgrade from a release
+   predating the key would otherwise leave the condition unresolved, and Helm leaves an
+   unresolved dependency enabled.
+2. `values.schema.json` declares a `db2` property. That schema sets
+   `additionalProperties: false` at the top level, so an undeclared key makes the chart fail
+   to render at its own defaults with `additional properties 'db2' not allowed`.
 
 **Step 3 — Create the credentials Secret**, as in option 1A:
 
