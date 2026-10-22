@@ -353,26 +353,39 @@ class QuerySampleQueryTest {
 
     @Test
     void defaultPathOrdersBlockedAndActiveRowsAheadOfIdleUnderCapPressure() throws Exception {
+        assertTieredOrdering(query(false));
+    }
+
+    // SQL_MON_CURRENT_105 duplicates the ORDER BY, so it needs its own assertion: a regression
+    // could otherwise land in one string and not the other, and Db2 10.5+ is the production path.
+    @Test
+    void db2_105PathOrdersBlockedAndActiveRowsAheadOfIdleUnderCapPressure() throws Exception {
+        assertTieredOrdering(query105());
+    }
+
+    // The row budget is shared, so ordering decides which rows survive FETCH FIRST. An IDLE
+    // activity waits on the client while ELAPSED_TIME_SEC counts from when the activity began, so
+    // on elapsed time alone a long-open idle cursor would displace a newer executing or
+    // lock-waiting statement. Assert the priority tier is applied BEFORE elapsed time.
+    private void assertTieredOrdering(QuerySampleQuery q) throws Exception {
         when(rs.next()).thenReturn(false);
-        query(false).collect();
+        q.collect();
 
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue().replaceAll("\\s+", " ");
 
-        // The row budget is shared, so ordering decides who survives FETCH FIRST. An IDLE cursor
-        // waits on the client while ELAPSED_TIME_SEC counts from when the activity began, so on
-        // elapsed time alone a long-open idle cursor would displace a newer executing or
-        // lock-waiting statement. Assert the priority tier is applied BEFORE elapsed time.
         int tier = sql.indexOf("ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0");
-        int active = sql.indexOf("WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1");
-        int elapsed = sql.indexOf("S.ELAPSED_TIME_SEC DESC NULLS LAST", tier);
-        int fetch = sql.indexOf("FETCH FIRST");
+        int active = sql.indexOf("WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1", tier);
+        int idle = sql.indexOf("ELSE 2 END", active);
+        int elapsed = sql.indexOf("S.ELAPSED_TIME_SEC DESC NULLS LAST", idle);
+        int fetch = sql.indexOf("FETCH FIRST", elapsed);
 
         assertThat(tier).as("blocked rows must be the first ORDER BY tier").isGreaterThan(-1);
         assertThat(active).as("non-IDLE activity must outrank IDLE").isGreaterThan(tier);
+        assertThat(idle).as("IDLE must be the last tier (ELSE 2)").isGreaterThan(active);
         assertThat(elapsed).as("elapsed time must break ties WITHIN a tier, not across tiers")
-            .isGreaterThan(active);
+            .isGreaterThan(idle);
         assertThat(fetch).as("the tiered ordering must feed FETCH FIRST").isGreaterThan(elapsed);
     }
 
