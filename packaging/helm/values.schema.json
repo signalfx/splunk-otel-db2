@@ -4,6 +4,10 @@
   "description": "Helm validates these before any template renders, so a wrong type is reported as a values error rather than surfacing later as a template failure or, worse, rendering something that looks valid. Template-level checks are kept only for rules a schema cannot express, such as requiring a port when TLS is on.",
   "type": "object",
   "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "Read by a parent chart's `condition: <alias>.enabled`, not by this chart's templates. Present so the subchart stays disabled when a parent's own key is absent, as under `helm upgrade --reuse-values` from a release predating it. Ignored by a standalone install."
+    },
     "receivers": {
       "type": "array",
       "description": "One entry per monitored database.",

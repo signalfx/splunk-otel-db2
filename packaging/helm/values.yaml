@@ -1,5 +1,17 @@
 # Default values for splunk-otel-db2 Helm chart.
 
+# Read by a parent chart's `condition: <alias>.enabled`, not by this chart's own templates.
+#
+# A parent gates this subchart on a key in its own values, and Helm resolves that condition
+# against the coalesced values — which include this file. Declaring it here means the
+# subchart stays disabled even when the parent's key is missing, which is what happens under
+# `helm upgrade --reuse-values` from a release that predates the parent adding it. Without
+# this, such an upgrade enables the subchart and then fails to render on the placeholder
+# receiver.
+#
+# Installing this chart directly ignores it; a standalone install renders regardless.
+enabled: false
+
 image:
   repository: ghcr.io/signalfx/splunk-otel-db2
   pullPolicy: IfNotPresent
