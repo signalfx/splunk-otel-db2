@@ -324,7 +324,7 @@ class QuerySampleQueryTest {
     }
 
     @Test
-    void defaultPathSqlExcludesSelfAndIdleAndQueryText() throws Exception {
+    void defaultPathSqlExcludesSelfAndQueryText() throws Exception {
         when(rs.next()).thenReturn(false);
         query(false).collect();
 
@@ -332,8 +332,82 @@ class QuerySampleQueryTest {
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
         assertThat(sql).contains("splunk-otel-db2");
-        assertThat(sql).containsIgnoringCase("IDLE");
         assertThat(sql).containsIgnoringCase("SYSIBMADM.MON_CURRENT_SQL");
+        // IDLE activities must reach the sample: DB Agent surfaces them (e.g. "IDLE READ_DML")
+        // and parity matters for the AppD migration. Asserted on the predicate rather than the
+        // bare word "IDLE", which also appears in the BLOCKER_IS_IDLE projection.
+        assertThat(sql).doesNotContain("ACTIVITY_STATE NOT IN ('IDLE')");
+        // Rows with no statement text stay excluded — a query sample without SQL carries no value.
+        assertThat(sql).contains("S.STMT_TEXT IS NOT NULL");
+    }
+
+    @Test
+    void snapshotPathSqlDoesNotFilterIdleActivities() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(true).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).doesNotContain("ACTIVITY_STATE NOT IN ('IDLE')");
+    }
+
+    @Test
+    void defaultPathOrdersBlockedAndActiveRowsAheadOfIdleUnderCapPressure() throws Exception {
+        assertTieredOrdering(query(false));
+    }
+
+    // SQL_MON_CURRENT_105 duplicates the ORDER BY, so it needs its own assertion: a regression
+    // could otherwise land in one string and not the other, and Db2 10.5+ is the production path.
+    @Test
+    void db2_105PathOrdersBlockedAndActiveRowsAheadOfIdleUnderCapPressure() throws Exception {
+        assertTieredOrdering(query105());
+    }
+
+    // The row budget is shared, so ordering decides which rows survive FETCH FIRST. An IDLE
+    // activity waits on the client while ELAPSED_TIME_SEC counts from when the activity began, so
+    // on elapsed time alone a long-open idle cursor would displace a newer executing or
+    // lock-waiting statement. Assert the priority tier is applied BEFORE elapsed time.
+    private void assertTieredOrdering(QuerySampleQuery q) throws Exception {
+        when(rs.next()).thenReturn(false);
+        q.collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String sql = sqlCap.getValue().replaceAll("\\s+", " ");
+
+        int tier = sql.indexOf("ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0");
+        int active = sql.indexOf("WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1", tier);
+        int idle = sql.indexOf("ELSE 2 END", active);
+        int elapsed = sql.indexOf("S.ELAPSED_TIME_SEC DESC NULLS LAST", idle);
+        int fetch = sql.indexOf("FETCH FIRST", elapsed);
+
+        assertThat(tier).as("blocked rows must be the first ORDER BY tier").isGreaterThan(-1);
+        assertThat(active).as("non-IDLE activity must outrank IDLE").isGreaterThan(tier);
+        assertThat(idle).as("IDLE must be the last tier (ELSE 2)").isGreaterThan(active);
+        assertThat(elapsed).as("elapsed time must break ties WITHIN a tier, not across tiers")
+            .isGreaterThan(idle);
+        assertThat(fetch).as("the tiered ordering must feed FETCH FIRST").isGreaterThan(elapsed);
+    }
+
+    @Test
+    void idleActivityIsEmittedWithStatementText() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        // An IDLE activity in Db2 is an open activity that is not currently executing (for
+        // example an open cursor between fetches). MON_CURRENT_SQL still carries its STMT_TEXT,
+        // which is why DB Agent reports "IDLE READ_DML" with SQL attached.
+        stubRow("SELECT * FROM ORDERS WHERE ID = 42", "IDLE READ_DML",
+                "2024-01-01-12.00.00.000000", 7L, "user1", "host1", "100", 0L, 0L);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        verify(logBuilder).emit();
+        io.opentelemetry.api.common.Attributes attrs = cap.getValue();
+        assertThat(attrs.get(QuerySampleEvent.DB2_ACTIVITY)).isEqualTo("IDLE READ_DML");
+        assertThat(attrs.get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("idle");
+        assertThat(attrs.get(QuerySampleEvent.DB_QUERY_TEXT)).isNotBlank();
     }
 
     @Test
