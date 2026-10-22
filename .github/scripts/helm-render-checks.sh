@@ -573,6 +573,24 @@ else
   fail "the minimal entry must still render, got: $out"
 fi
 
+echo "11i. the chart declares its own enabled: false for a parent condition"
+# A parent gates this subchart on `condition: <alias>.enabled`, resolved against the
+# coalesced values. Without this key here, a parent whose own key is missing enables the
+# subchart - which is what `helm upgrade --reuse-values` does from a release predating it.
+got=$(yq e -N '.enabled' "$CHART_DIR/values.yaml")
+[ "$got" = "false" ] \
+  && pass "values.yaml ships enabled: false" \
+  || fail "values.yaml .enabled is '$got', expected false"
+# Standalone installs must be unaffected by it.
+if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" 2>&1); then
+  n=$(printf '%s' "$out" | grep -c "^kind:" || true)
+  [ "$n" -gt 0 ] \
+    && pass "a standalone install still renders ($n objects)" \
+    || fail "a standalone install rendered nothing"
+else
+  fail "a standalone install must render, got: $out"
+fi
+
 echo "12. an explicit endpoint still wins as a subchart"
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
            --set 'splunk-otel-db2.otlp.endpoint=http://explicit:4317' 2>&1); then

@@ -97,11 +97,6 @@ class Db2ConfigTlsKeysTest {
     }
 
     /**
-     * A truststore password is a credential, so it has to be sourceable from the environment
-     * like the Db2 password. It was being passed to the driver verbatim, which both broke
-     * password-protected truststores and left the config file as the only place to put it.
-     */
-    /**
      * Reported at load time, not on the first connection. The accessor resolves lazily and
      * nothing in validation used to read it, so a typo in the variable name passed startup
      * and then failed a connection later, naming only the variable with nothing to tie it
