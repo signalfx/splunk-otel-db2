@@ -134,7 +134,6 @@ public class QuerySampleQuery {
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
-        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_LOCKWAITS%%%%' " +
@@ -246,7 +245,6 @@ public class QuerySampleQuery {
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
-        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_LOCKWAITS%%%%' " +

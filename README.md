@@ -809,7 +809,7 @@ The log record's native `event_name` field is set to `db.server.query_sample` (n
 | `user.name` | Authenticated user ID |
 | `client.address` | Client workstation name |
 
-**Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `SYSIBMADM.MON_CURRENT_SQL` view + `MON_GET_CONNECTION` TVF JOIN. No `DFT_MON_STMT` requirement. Filters out IDLE sessions and the receiver's own queries.
+**Default path** (`use_snapshot_monitor: false`, Db2 9.7+): `SYSIBMADM.MON_CURRENT_SQL` view + `MON_GET_CONNECTION` TVF JOIN. No `DFT_MON_STMT` requirement. Filters out the receiver's own queries and rows with no statement text. IDLE activities **are** sampled — in Db2 an `IDLE` activity is an open activity that is not currently executing (for example an open cursor between fetches), and `MON_CURRENT_SQL` still carries its `STMT_TEXT`, so these appear with SQL attached and `db2.session_status: idle`.
 
 **Snapshot monitor fallback** (`use_snapshot_monitor: true`, Db2 9.7+): `SNAP_GET_APPL_INFO` + `SNAP_GET_STMT` + `SYSCAT.STATEMENTS`. Requires `DFT_MON_STMT ON`. Provides richer states (`LOCKWAIT`, `UOWWAIT`, etc.) and static SQL fallback.
 

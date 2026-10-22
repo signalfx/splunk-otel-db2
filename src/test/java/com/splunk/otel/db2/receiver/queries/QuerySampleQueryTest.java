@@ -324,7 +324,7 @@ class QuerySampleQueryTest {
     }
 
     @Test
-    void defaultPathSqlExcludesSelfAndIdleAndQueryText() throws Exception {
+    void defaultPathSqlExcludesSelfAndQueryText() throws Exception {
         when(rs.next()).thenReturn(false);
         query(false).collect();
 
@@ -332,8 +332,44 @@ class QuerySampleQueryTest {
         verify(stmt).executeQuery(sqlCap.capture());
         String sql = sqlCap.getValue();
         assertThat(sql).contains("splunk-otel-db2");
-        assertThat(sql).containsIgnoringCase("IDLE");
         assertThat(sql).containsIgnoringCase("SYSIBMADM.MON_CURRENT_SQL");
+        // IDLE activities must reach the sample: DB Agent surfaces them (e.g. "IDLE READ_DML")
+        // and parity matters for the AppD migration. Asserted on the predicate rather than the
+        // bare word "IDLE", which also appears in the BLOCKER_IS_IDLE projection.
+        assertThat(sql).doesNotContain("ACTIVITY_STATE NOT IN ('IDLE')");
+        // Rows with no statement text stay excluded — a query sample without SQL carries no value.
+        assertThat(sql).contains("S.STMT_TEXT IS NOT NULL");
+    }
+
+    @Test
+    void snapshotPathSqlDoesNotFilterIdleActivities() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query(true).collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        assertThat(sqlCap.getValue()).doesNotContain("ACTIVITY_STATE NOT IN ('IDLE')");
+    }
+
+    @Test
+    void idleActivityIsEmittedWithStatementText() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        // An IDLE activity in Db2 is an open activity that is not currently executing (for
+        // example an open cursor between fetches). MON_CURRENT_SQL still carries its STMT_TEXT,
+        // which is why DB Agent reports "IDLE READ_DML" with SQL attached.
+        stubRow("SELECT * FROM ORDERS WHERE ID = 42", "IDLE READ_DML",
+                "2024-01-01-12.00.00.000000", 7L, "user1", "host1", "100", 0L, 0L);
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.api.common.Attributes> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
+        verify(logBuilder).setAllAttributes(cap.capture());
+        verify(logBuilder).emit();
+        io.opentelemetry.api.common.Attributes attrs = cap.getValue();
+        assertThat(attrs.get(QuerySampleEvent.DB2_ACTIVITY)).isEqualTo("IDLE READ_DML");
+        assertThat(attrs.get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("idle");
+        assertThat(attrs.get(QuerySampleEvent.DB_QUERY_TEXT)).isNotBlank();
     }
 
     @Test
