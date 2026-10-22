@@ -54,6 +54,11 @@ public class QuerySampleQuery {
     // wrapped in a derived table so Db2 does not raise "duplicate TVF" errors.
     // The main session join is LEFT so sessions not yet in MON_GET_CONNECTION (race,
     // closing connection) are not silently dropped — CLIENT_APPLNAME is COALESCE-guarded.
+    // ORDER BY tiers (blocked, other non-IDLE, IDLE) ahead of elapsed time because it feeds a
+    // shared FETCH FIRST budget: an IDLE activity waits on the client while ELAPSED_TIME_SEC
+    // counts from activity start, so a long-open idle cursor would otherwise outrank newer active
+    // work. S.ACTIVITY_STATE there is the base column ('IDLE'), not the SELECT alias
+    // ('IDLE READ_DML'). NULLS LAST for the same budget reason.
     private static final String SQL_MON_CURRENT =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
@@ -134,20 +139,20 @@ public class QuerySampleQuery {
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
-        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_LOCKWAITS%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_CONNECTION%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
-        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
-        // row budget.
-        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
+        "ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0 " +
+        "              WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1 " +
+        "              ELSE 2 END, " +
+        "         S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Db2 10.5+ variant: also LEFT JOINs MON_GET_ACTIVITY for LOCK_WAIT_TIME.
+    // Same tiered ORDER BY as SQL_MON_CURRENT — see the rationale there.
     private static final String SQL_MON_CURRENT_105 =
         "SELECT S.APPLICATION_HANDLE, " +
         "       S.STMT_TEXT, " +
@@ -246,7 +251,6 @@ public class QuerySampleQuery {
         "  ON BLOCKER_CON.APPLICATION_HANDLE = LW.HLD_APPLICATION_HANDLE " +
         " AND BLOCKER_CON.MEMBER = LW.HLD_MEMBER " +
         "WHERE S.STMT_TEXT IS NOT NULL " +
-        "  AND S.ACTIVITY_STATE NOT IN ('IDLE') " +
         "  AND COALESCE(C.CLIENT_APPLNAME, '') <> 'splunk-otel-db2' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_CURRENT_SQL%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_LOCKWAITS%%%%' " +
@@ -254,10 +258,10 @@ public class QuerySampleQuery {
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_PKG_CACHE_STMT%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%MON_GET_ACTIVITY%%%%' " +
         "  AND S.STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
-        // NULLS LAST here too: this ordering feeds FETCH FIRST, so a row with an unknown elapsed
-        // time would otherwise be sampled ahead of genuinely long-running statements and consume the
-        // row budget.
-        "ORDER BY S.ELAPSED_TIME_SEC DESC NULLS LAST " +
+        "ORDER BY CASE WHEN LW.REQ_APPLICATION_HANDLE IS NOT NULL THEN 0 " +
+        "              WHEN S.ACTIVITY_STATE <> 'IDLE' THEN 1 " +
+        "              ELSE 2 END, " +
+        "         S.ELAPSED_TIME_SEC DESC NULLS LAST " +
         "FETCH FIRST %d ROWS ONLY";
 
     // Snapshot monitor fallback (Db2 9.7+). Blocking detection not available.
