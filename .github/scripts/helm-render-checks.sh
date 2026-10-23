@@ -573,6 +573,32 @@ else
   fail "the minimal entry must still render, got: $out"
 fi
 
+echo "11k. the duration pattern matches exactly what the receiver's parser accepts"
+# The schema exists so a bad duration is a values error rather than a pod that exits once
+# scheduled. Being stricter than the parser is its own bug: it fails upgrades that worked.
+# The parser trims surrounding whitespace and accepts leading zeros, so these must too.
+duration_case() {
+  local value="$1" want="$2" out
+  if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
+             --set-string "receivers[0].querySampleCollection.collectionInterval=$value" 2>&1); then
+    [ "$want" = accept ] \
+      && pass "duration '$value' accepted" \
+      || fail "duration '$value' was accepted; the parser rejects it"
+  else
+    if grep -Fq -- "collectionInterval" <<<"$out"; then
+      [ "$want" = reject ] \
+        && pass "duration '$value' rejected by the schema" \
+        || fail "duration '$value' was rejected; the parser accepts it"
+    else
+      fail "duration '$value' failed for an unrelated reason: $out"
+    fi
+  fi
+}
+# Accepted by Db2ReceiverConfig.parseDuration, so accepted here.
+for v in "30s" "1s" "01s" "05s" "010s" "5m" "1h" " 30s " "  05s"; do duration_case "$v" accept; done
+# Rejected by the parser, so rejected here.
+for v in "0s" "00s" " 0s " "500ms" " 500ms " "1x" "s" "abc"; do duration_case "$v" reject; done
+
 echo "11i. the chart declares its own enabled: false for a parent condition"
 # A parent gates this subchart on `condition: <alias>.enabled`, resolved against the
 # coalesced values. Without this key here, a parent whose own key is missing enables the

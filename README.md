@@ -65,7 +65,7 @@ receivers:
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
       explain_schema: ""              # schema where explain tables live (default: USER)
     query_sample_collection:
-      collection_interval: "10s"      # how often to sample active queries (minimum 5s)
+      collection_interval: "10s"      # how often to sample active queries (5s recommended floor)
       max_rows_per_query: 100         # max active sessions fetched per sample
     use_snapshot_monitor: false        # set true for the SNAP_GET_STMT query sample path,
                                        # and to add SNAP_GET_DB SQL activity metrics
@@ -184,7 +184,7 @@ Each monitored database uses 1–3 JDBC connections depending on which collector
 
 Plan collection (`max_explain_each_interval > 0`) reuses the top-query connection — it does **not** open a fourth connection.
 
-There is no connection pool — the monitoring workload fires queries at intervals of 10–60 seconds, which is too infrequent for pooling to help. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
+There is no connection pool, and the reason is the shape of the workload rather than its cadence. Each collector owns one dedicated connection, so there is never a second concurrent query on it to hand out from a pool. Query-sample and top-query collection additionally run on single-thread fixed-delay executors, so a run there starts only after the previous one finishes — which is what keeps the faster query-sample intervals from overlapping. Metrics are driven by the OTel SDK's `PeriodicMetricReader`, which is fixed-rate, and share `metricsConnection`. Connections are validated before each use (`isValid`) and reconnected automatically with exponential backoff (2s → 4s → 8s → 16s → 30s cap) on failure. A deadline-based fail-fast prevents every metric callback from blocking during the backoff window — only the first caller after the deadline attempts reconnection.
 
 Heap grows with the number of configured databases: each database gets its own OTel SDK pipeline, metric readers, OTLP exporters, schedulers, and in-memory caches (top-query delta baseline, query-sample deduplication). At steady state expect roughly 50–80 MB base plus ~15–30 MB per additional database. The dominant per-cycle allocation is the `MON_GET_PKG_CACHE_STMT` result set (all matching rows are loaded; `top_query_count` limits how many are emitted after sorting) and the delta baseline map (bounded by `MAX_STALE_CYCLES` eviction).
 
@@ -798,7 +798,7 @@ Active log file numbers are identifiers rather than measurements and are not emi
 
 ## Query samples (log records)
 
-Active statements are sampled at `query_sample_collection.collection_interval` (minimum **5s**; values below that are rejected at startup) and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Active statements are sampled at `query_sample_collection.collection_interval` (**5s recommended floor**; lower values are honoured, with a warning at startup) and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
 
@@ -906,7 +906,7 @@ receivers:
       db.server.query_sample:
         enabled: true              # enables query sampling and blocking detection
     query_sample_collection:
-      collection_interval: "10s"  # controls poll cadence for both (minimum 5s)
+      collection_interval: "10s"  # controls poll cadence for both (5s recommended floor)
 ```
 
 | Attribute | Description |

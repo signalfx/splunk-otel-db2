@@ -117,6 +117,41 @@ class Db2ConfigTlsKeysTest {
             "the error must name the variable, got: " + e.getMessage());
     }
 
+    /**
+     * A sub-5s sampling interval used to abort startup. It is advisory now: the receiver
+     * warns and runs. Asserted through YAML because that is the path a chart install takes,
+     * and the previous behaviour was a CrashLoopBackOff rather than a values error.
+     */
+    @Test
+    void loadsASubFiveSecondQuerySampleInterval(@TempDir Path dir) throws Exception {
+        Path f = dir.resolve("config.yaml");
+        Files.writeString(f, ""
+            + "receivers:\n"
+            + "  db2:\n"
+            + "    hostname: db2.example.com\n"
+            + "    hostport: 50001\n"
+            + "    username: u\n"
+            + "    password: p\n"
+            + "    database: PROD\n"
+            + "    events:\n"
+            + "      db.server.query_sample:\n"
+            + "        enabled: true\n"
+            + "    query_sample_collection:\n"
+            + "      collection_interval: \"1s\"\n"
+            + "exporters:\n"
+            + "  otlp:\n"
+            + "    endpoint: http://localhost:4317\n"
+            + "    tls:\n"
+            + "      insecure: true\n");
+
+        Db2ReceiverConfig rc = Db2Config.load(f.toString()).getReceivers().get(0);
+        assertEquals(1L,
+            rc.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds(),
+            "the configured interval must be honoured, not overridden");
+        assertTrue(rc.getQuerySampleCollection().isBelowRecommendedInterval(),
+            "1s is below the advisory floor, so the warning path should be taken");
+    }
+
     @Test
     void expandsTheTrustStorePasswordFromTheEnvironment(@TempDir Path dir) throws Exception {
         String var = System.getenv().keySet().stream().findFirst().orElseThrow();

@@ -1198,20 +1198,44 @@ class QuerySampleQueryTest {
     // A floor on the sampling interval, mirroring top-query's 60s rule: below this the monitor
     // queries dominate the instance they are measuring.
     @Test
-    void querySampleIntervalBelowTheFloorIsRejected() {
+    void querySampleIntervalBelowTheFloorIsHonouredAndFlagged() {
         com.splunk.otel.db2.config.Db2ReceiverConfig.QuerySampleCollectionConfig cfg =
             new com.splunk.otel.db2.config.Db2ReceiverConfig.QuerySampleCollectionConfig();
 
+        // The floor is advisory. Sampling runs on a fixed delay, so a collection that
+        // overruns cannot stack runs, and how much monitoring load to accept is the
+        // operator's decision - refusing to start took that decision away.
         cfg.setCollectionInterval("1s");
-        assertThatThrownBy(cfg::getCollectionIntervalDuration)
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("must be at least 5s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(1L);
+        assertThat(cfg.isBelowRecommendedInterval()).isTrue();
 
         cfg.setCollectionInterval("5s");
         assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(5L);
+        assertThat(cfg.isBelowRecommendedInterval()).isFalse();
 
         cfg.setCollectionInterval("30s");
         assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(30L);
+        assertThat(cfg.isBelowRecommendedInterval()).isFalse();
+
+        // Zero and negative are still rejected by the shared duration parser.
+        cfg.setCollectionInterval("0s");
+        assertThatThrownBy(cfg::getCollectionIntervalDuration)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("at least 1s");
+
+        // Leading zeros are accepted, matching the chart's schema pattern.
+        cfg.setCollectionInterval("05s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(5L);
+
+        // "500ms" ends in "s", so the unit check alone let "500m" reach parseLong and the
+        // operator saw a bare NumberFormatException. It is shape-checked first now.
+        for (String bad : new String[] {"500ms", "1x", "s", "", "-5s"}) {
+            cfg.setCollectionInterval(bad);
+            assertThatThrownBy(cfg::getCollectionIntervalDuration)
+                .as("interval %s", bad)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unsupported duration format");
+        }
     }
 
     @Test

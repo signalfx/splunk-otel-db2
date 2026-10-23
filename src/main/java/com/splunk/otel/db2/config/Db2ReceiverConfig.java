@@ -50,11 +50,18 @@ public class Db2ReceiverConfig {
     static Duration parseDuration(String s, long defaultSeconds) {
         if (s == null) return Duration.ofSeconds(defaultSeconds);
         s = s.trim();
+        // Only whole s/m/h are supported. The unit check alone is not enough: "500ms" ends in
+        // "s", so the old code handed "500m" to parseLong and surfaced a bare
+        // NumberFormatException instead of saying what was wrong.
+        if (!s.matches("\\d+[smh]")) {
+            throw new IllegalArgumentException(
+                "Unsupported duration format '" + s + "': use whole seconds, minutes or hours, "
+                    + "as in '30s', '5m' or '1h'");
+        }
         Duration d;
         if (s.endsWith("s")) d = Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
         else if (s.endsWith("m")) d = Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
-        else if (s.endsWith("h")) d = Duration.ofHours(Long.parseLong(s.substring(0, s.length() - 1)));
-        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s', '5m', or '1h'");
+        else d = Duration.ofHours(Long.parseLong(s.substring(0, s.length() - 1)));
         if (d.getSeconds() <= 0) throw new IllegalArgumentException("Interval must be at least 1s, got '" + s + "'");
         return d;
     }
@@ -211,20 +218,25 @@ public class Db2ReceiverConfig {
     // --- query_sample_collection ---
 
     public static class QuerySampleCollectionConfig {
-        /** Floor on the sampling interval. Below this the monitor queries dominate the instance. */
-        static final long MIN_COLLECTION_INTERVAL_SECONDS = 5;
+        /**
+         * Interval below which the monitor queries start to weigh on the instance. Advisory,
+         * not enforced: sampling runs on a fixed delay, so a collection that overruns cannot
+         * stack runs, and how much monitoring load to accept is the operator's call. Going
+         * below this is warned about once at startup.
+         */
+        public static final long RECOMMENDED_MIN_COLLECTION_INTERVAL_SECONDS = 5;
 
         private String collectionInterval = "10s";
         private int maxRowsPerQuery = 100;
 
         public Duration getCollectionIntervalDuration() {
-            Duration d = Db2ReceiverConfig.parseDuration(collectionInterval, 10);
-            if (d.getSeconds() < MIN_COLLECTION_INTERVAL_SECONDS) {
-                throw new IllegalArgumentException(
-                    "query_sample_collection.collection_interval must be at least "
-                        + MIN_COLLECTION_INTERVAL_SECONDS + "s, got '" + collectionInterval + "'");
-            }
-            return d;
+            return Db2ReceiverConfig.parseDuration(collectionInterval, 10);
+        }
+
+        /** True when the configured interval is below the advisory floor. */
+        public boolean isBelowRecommendedInterval() {
+            return getCollectionIntervalDuration().getSeconds()
+                < RECOMMENDED_MIN_COLLECTION_INTERVAL_SECONDS;
         }
         public void setCollectionInterval(String v) { this.collectionInterval = v; }
 
