@@ -187,6 +187,20 @@ public class Db2Receiver {
         long intervalSeconds           = config.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds();
         int  querySampleTimeoutSeconds = (int) Math.max(5L, intervalSeconds / 2);
 
+        // Warned here rather than during config validation so every startup path is covered:
+        // Db2Receiver and Db2Pipeline both take a Db2ReceiverConfig directly, without going
+        // through Db2Config.load(). Scheduling happens once per receiver, so this logs once
+        // per database and can name which one.
+        if (config.getQuerySampleCollection().isBelowRecommendedInterval()) {
+            log.warn("[{}] query_sample_collection.collection_interval is {}s, below the "
+                    + "recommended {}s. Sampling runs on a fixed delay so collections cannot "
+                    + "stack, but the monitor queries will weigh more heavily on the instance "
+                    + "at this cadence.",
+                label, intervalSeconds,
+                Db2ReceiverConfig.QuerySampleCollectionConfig
+                    .RECOMMENDED_MIN_COLLECTION_INTERVAL_SECONDS);
+        }
+
         // db2.query_plan.hash is only useful if something will populate db2.query_plan, which needs
         // top-query collection enabled and a positive explain budget.
         boolean planCollectionEnabled =

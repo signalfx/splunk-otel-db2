@@ -50,11 +50,18 @@ public class Db2ReceiverConfig {
     static Duration parseDuration(String s, long defaultSeconds) {
         if (s == null) return Duration.ofSeconds(defaultSeconds);
         s = s.trim();
+        // Only whole s/m/h are supported. The unit check alone is not enough: "500ms" ends in
+        // "s", so the old code handed "500m" to parseLong and surfaced a bare
+        // NumberFormatException instead of saying what was wrong.
+        if (!s.matches("\\d+[smh]")) {
+            throw new IllegalArgumentException(
+                "Unsupported duration format '" + s + "': use whole seconds, minutes or hours, "
+                    + "as in '30s', '5m' or '1h'");
+        }
         Duration d;
         if (s.endsWith("s")) d = Duration.ofSeconds(Long.parseLong(s.substring(0, s.length() - 1)));
         else if (s.endsWith("m")) d = Duration.ofMinutes(Long.parseLong(s.substring(0, s.length() - 1)));
-        else if (s.endsWith("h")) d = Duration.ofHours(Long.parseLong(s.substring(0, s.length() - 1)));
-        else throw new IllegalArgumentException("Unsupported duration format '" + s + "': use '30s', '5m', or '1h'");
+        else d = Duration.ofHours(Long.parseLong(s.substring(0, s.length() - 1)));
         if (d.getSeconds() <= 0) throw new IllegalArgumentException("Interval must be at least 1s, got '" + s + "'");
         return d;
     }

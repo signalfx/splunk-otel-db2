@@ -42,7 +42,8 @@
           },
           "collectionInterval": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[1-9][0-9]*[smh]$",
+            "description": "Whole seconds, minutes or hours, as in '30s', '5m' or '1h'. Matched here so a malformed or zero value such as '500ms' or '0s' is a values error rather than a receiver that exits at startup."
           },
           "credentialsSecret": {
             "type": "string"
@@ -125,7 +126,8 @@
             "properties": {
               "collectionInterval": {
                 "type": "string",
-                "minLength": 1
+                "pattern": "^[1-9][0-9]*[smh]$",
+                "description": "Whole seconds, minutes or hours, as in '30s', '5m' or '1h'. Matched here so a malformed or zero value such as '500ms' or '0s' is a values error rather than a receiver that exits at startup."
               },
               "topQueryCount": {
                 "type": "integer",
@@ -145,7 +147,8 @@
               },
               "queryPlanCacheTtl": {
                 "type": "string",
-                "minLength": 1
+                "pattern": "^[1-9][0-9]*[smh]$",
+                "description": "Whole seconds, minutes or hours, as in '30s', '5m' or '1h'. Matched here so a malformed or zero value such as '500ms' or '0s' is a values error rather than a receiver that exits at startup."
               },
               "explainSchema": {
                 "type": "string"
@@ -161,7 +164,8 @@
             "properties": {
               "collectionInterval": {
                 "type": "string",
-                "minLength": 1
+                "pattern": "^[1-9][0-9]*[smh]$",
+                "description": "Whole seconds, minutes or hours, as in '30s', '5m' or '1h'. Matched here so a malformed or zero value such as '500ms' or '0s' is a values error rather than a receiver that exits at startup."
               },
               "maxRowsPerQuery": {
                 "type": "integer",
