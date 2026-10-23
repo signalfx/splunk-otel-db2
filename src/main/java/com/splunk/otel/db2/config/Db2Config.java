@@ -1,6 +1,8 @@
 package com.splunk.otel.db2.config;
 
 import com.splunk.otel.db2.util.HostNormalizer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
@@ -16,6 +18,8 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 public class Db2Config {
+
+    private static final Logger log = LoggerFactory.getLogger(Db2Config.class);
 
     // Mirrors the OTel Collector nameRegexp: no Unicode separator (Z), control (C), or symbol (S) chars.
     private static final Pattern NAME_PATTERN = Pattern.compile("^[^\\pZ\\pC\\pS]+$");
@@ -341,6 +345,15 @@ public class Db2Config {
         }
         if (rc.getEvents().getDbServerQuerySample().isEnabled()) {
             rc.getQuerySampleCollection().getCollectionIntervalDuration();
+            if (rc.getQuerySampleCollection().isBelowRecommendedInterval()) {
+                log.warn("query_sample_collection.collection_interval is {}s, below the "
+                        + "recommended {}s. Sampling runs on a fixed delay so collections "
+                        + "cannot stack, but the monitor queries will weigh more heavily on "
+                        + "the instance at this cadence.",
+                    rc.getQuerySampleCollection().getCollectionIntervalDuration().getSeconds(),
+                    Db2ReceiverConfig.QuerySampleCollectionConfig
+                        .RECOMMENDED_MIN_COLLECTION_INTERVAL_SECONDS);
+            }
             if (rc.getQuerySampleCollection().getMaxRowsPerQuery() <= 0)
                 throw new IllegalStateException("query_sample_collection.max_rows_per_query must be > 0");
         }

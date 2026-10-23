@@ -65,7 +65,7 @@ receivers:
       query_plan_cache_ttl: "1h"      # how long to cache a plan before re-explaining
       explain_schema: ""              # schema where explain tables live (default: USER)
     query_sample_collection:
-      collection_interval: "10s"      # how often to sample active queries (minimum 5s)
+      collection_interval: "10s"      # how often to sample active queries (5s recommended floor)
       max_rows_per_query: 100         # max active sessions fetched per sample
     use_snapshot_monitor: false        # set true for the SNAP_GET_STMT query sample path,
                                        # and to add SNAP_GET_DB SQL activity metrics
@@ -798,7 +798,7 @@ Active log file numbers are identifiers rather than measurements and are not emi
 
 ## Query samples (log records)
 
-Active statements are sampled at `query_sample_collection.collection_interval` (minimum **5s**; values below that are rejected at startup) and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
+Active statements are sampled at `query_sample_collection.collection_interval` (**5s recommended floor**; lower values are honoured, with a warning at startup) and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
 
@@ -906,7 +906,7 @@ receivers:
       db.server.query_sample:
         enabled: true              # enables query sampling and blocking detection
     query_sample_collection:
-      collection_interval: "10s"  # controls poll cadence for both (minimum 5s)
+      collection_interval: "10s"  # controls poll cadence for both (5s recommended floor)
 ```
 
 | Attribute | Description |

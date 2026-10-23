@@ -127,8 +127,9 @@ receivers:
       queryPlanCacheTtl: "1h"
       explainSchema: ""
     querySampleCollection:
-      # Minimum 5s; lower values are rejected at startup. Upgrading from a release that
-      # allowed 1-4s requires raising this first or the receiver will not start.
+      # 5s is a recommended floor, not a limit. Lower values are honoured and warned
+      # about once at startup: sampling runs on a fixed delay so collections cannot
+      # stack, but the monitor queries weigh more heavily at a faster cadence.
       collectionInterval: "10s"
       maxRowsPerQuery: 100
 
