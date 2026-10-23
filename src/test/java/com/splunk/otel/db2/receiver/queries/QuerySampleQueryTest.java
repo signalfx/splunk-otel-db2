@@ -1222,6 +1222,20 @@ class QuerySampleQueryTest {
         assertThatThrownBy(cfg::getCollectionIntervalDuration)
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("at least 1s");
+
+        // Leading zeros are accepted, matching the chart's schema pattern.
+        cfg.setCollectionInterval("05s");
+        assertThat(cfg.getCollectionIntervalDuration().getSeconds()).isEqualTo(5L);
+
+        // "500ms" ends in "s", so the unit check alone let "500m" reach parseLong and the
+        // operator saw a bare NumberFormatException. It is shape-checked first now.
+        for (String bad : new String[] {"500ms", "1x", "s", "", "-5s"}) {
+            cfg.setCollectionInterval(bad);
+            assertThatThrownBy(cfg::getCollectionIntervalDuration)
+                .as("interval %s", bad)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unsupported duration format");
+        }
     }
 
     @Test

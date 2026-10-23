@@ -53,14 +53,12 @@ class QuerySampleIntervalWarningTest {
         config.getEvents().getDbServerQuerySample().setEnabled(true);
         config.getQuerySampleCollection().setCollectionInterval(interval);
 
-        // Scheduling opens a connection, which cannot succeed here. The warning is emitted
-        // before that, so drive the scheduler and ignore the connection failure.
-        try {
-            new Db2Receiver(config, (io.opentelemetry.api.metrics.Meter) null,
-                (io.opentelemetry.api.logs.Logger) null).startQuerySampleScheduler(11);
-        } catch (RuntimeException ignored) {
-            // expected: no Db2 to connect to
-        }
+        // Calls the warning directly rather than starting the scheduler. Driving the
+        // scheduler left three of them running per test, each retrying a real connection to
+        // db2.example.com on its own thread - the failures are asynchronous, so a try/catch
+        // around the call cannot see them, and they leaked into unrelated suites.
+        new Db2Receiver(config, (io.opentelemetry.api.metrics.Meter) null,
+            (io.opentelemetry.api.logs.Logger) null).warnIfSamplingIntervalBelowRecommended();
 
         return appender.list.stream()
             .filter(e -> e.getLevel() == Level.WARN)
