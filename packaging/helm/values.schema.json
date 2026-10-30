@@ -45,6 +45,11 @@
             "pattern": "^\\s*0*[1-9][0-9]*[smh]\\s*$",
             "description": "Whole seconds, minutes or hours, as in '30s', '5m' or '1h'. Mirrors what the receiver's parser accepts: surrounding whitespace is trimmed and leading zeros are allowed, but an all-zero value is not. Matched here so '500ms' or '0s' is a values error rather than a receiver that exits at startup."
           },
+          "serviceInstanceId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Overrides the service.instance.id resource attribute. Omit it to let the receiver compose one from hostname, port and database. minLength rejects an empty string, which would otherwise render an empty override and leave the receiver with no identity at all."
+          },
           "credentialsSecret": {
             "type": "string"
           },

@@ -28,6 +28,9 @@ data:
         password: "${env:DB2_PASSWORD_{{ .name | upper | replace "-" "_" }}}"
         database: {{ .database | quote }}
         collection_interval: {{ dig "collectionInterval" "30s" . | quote }}
+        {{- if dig "serviceInstanceId" "" . }}
+        service_instance_id: {{ dig "serviceInstanceId" "" . | quote }}
+        {{- end }}
         tls:
           # Defaults to TLS: Db2 credentials travel over this connection.
           insecure: {{ dig "insecure" false $tls }}

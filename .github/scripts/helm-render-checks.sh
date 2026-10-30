@@ -694,6 +694,38 @@ else
   fail "subchart render with an explicit endpoint failed: $out"
 fi
 
+echo "13. serviceInstanceId renders service_instance_id, and is absent when unset"
+sid_of() {
+  yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' - \
+    | yq e -N '.receivers.["db2/default"].service_instance_id'
+}
+if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
+           --set 'receivers[0].serviceInstanceId=prod-db2-01' 2>&1); then
+  got=$(printf '%s' "$out" | sid_of)
+  [ "$got" = "prod-db2-01" ] \
+    && pass "override rendered: $got" \
+    || fail "expected the override to render, got '$got'"
+else
+  fail "render with serviceInstanceId failed: $out"
+fi
+# Non-vacuous: without the key the field must be absent entirely, not an empty string.
+# An empty service_instance_id would override the receiver's composed identity with
+# nothing, which is worse than not setting it.
+if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" 2>&1); then
+  got=$(printf '%s' "$out" | sid_of)
+  [ "$got" = "null" ] \
+    && pass "absent when unset, so the receiver composes its own identity" \
+    || fail "expected no service_instance_id key when unset, got '$got'"
+else
+  fail "render without serviceInstanceId failed: $out"
+fi
+# An empty string is a values error, not a silently empty override.
+out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
+        --set 'receivers[0].serviceInstanceId=' 2>&1)
+schema_rejected "$out" "serviceInstanceId" "" \
+  && pass "an empty serviceInstanceId is rejected by the schema" \
+  || fail "an empty serviceInstanceId should be a schema error; got: $out"
+
 if [ "$failures" -ne 0 ]; then
   echo "::error::$failures helm render check(s) failed"
   exit 1
