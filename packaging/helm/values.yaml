@@ -84,14 +84,19 @@ receivers:
     database: "SAMPLE"
     collectionInterval: "30s"
     # Overrides the service.instance.id resource attribute, which identifies this scraper
-    # in the backend. Left unset, the receiver composes it as hostname:port/database —
-    # already stable across Pod rescheduling, so set this only when that composition is
-    # not the identity you want: two scrapers reaching the same database from different
-    # clusters, or an identity you need to keep steady while the database moves hosts.
+    # in the backend. Empty composes it from the receiver's own hostname, port and
+    # database instead.
     #
-    # Commented out rather than defaulted to "": the schema rejects an empty string,
-    # because rendering an empty override would leave the receiver with no identity.
-    # serviceInstanceId: "prod-db2-01"
+    # Set it when that composition is not the identity you want. Two cases: two scrapers
+    # reaching the same database from different clusters compose the same value, and an
+    # identity that must survive the database moving hosts cannot contain the hostname.
+    #
+    # A third case is specific to Kubernetes. The composed value is stable across Pod
+    # rescheduling for a remote hostname, but not for a loopback one — the receiver
+    # cannot use "localhost" as an identity shared by every Pod, so it substitutes the
+    # local hostname, which for a Deployment is the Pod name and changes when the Pod is
+    # replaced. Set this whenever the Db2 target is loopback.
+    serviceInstanceId: ""
     # Reference a pre-existing Secret containing DB2_USER and DB2_PASSWORD. This is the
     # recommended form, and the one thing you must set — the chart refuses to install
     # without credentials rather than deploying a receiver that cannot connect.

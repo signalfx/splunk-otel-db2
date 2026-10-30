@@ -47,8 +47,8 @@
           },
           "serviceInstanceId": {
             "type": "string",
-            "minLength": 1,
-            "description": "Overrides the service.instance.id resource attribute. Omit it to let the receiver compose one from hostname, port and database. minLength rejects an empty string, which would otherwise render an empty override and leave the receiver with no identity at all."
+            "pattern": "^$|^\\S(.*\\S)?$",
+            "description": "Overrides the service.instance.id resource attribute. Empty means unset, as elsewhere in this file, and the receiver composes one from hostname, port and database. Anything else must begin and end with a non-whitespace character: the receiver treats a blank override as absent and uses an untrimmed value verbatim, so ' ' would be silently discarded and ' id ' would become an identity with spaces in it. Both are rejected here instead."
           },
           "credentialsSecret": {
             "type": "string"

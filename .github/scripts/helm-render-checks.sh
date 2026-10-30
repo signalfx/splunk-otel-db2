@@ -708,23 +708,30 @@ if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
 else
   fail "render with serviceInstanceId failed: $out"
 fi
-# Non-vacuous: without the key the field must be absent entirely, not an empty string.
-# An empty service_instance_id would override the receiver's composed identity with
-# nothing, which is worse than not setting it.
-if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" 2>&1); then
-  got=$(printf '%s' "$out" | sid_of)
-  [ "$got" = "null" ] \
-    && pass "absent when unset, so the receiver composes its own identity" \
-    || fail "expected no service_instance_id key when unset, got '$got'"
-else
-  fail "render without serviceInstanceId failed: $out"
-fi
-# An empty string is a values error, not a silently empty override.
-out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
-        --set 'receivers[0].serviceInstanceId=' 2>&1)
-schema_rejected "$out" "serviceInstanceId" "" \
-  && pass "an empty serviceInstanceId is rejected by the schema" \
-  || fail "an empty serviceInstanceId should be a schema error; got: $out"
+# Non-vacuous: the key must be omitted when empty, not rendered as "". The receiver
+# reads a blank override as absent, so an empty rendered value and an absent one behave
+# alike — but only the absent form says so in the config.
+for empty_case in 'unset' 'explicitly empty'; do
+  args=(-f "$VALUES")
+  [ "$empty_case" = 'explicitly empty' ] && args+=(--set 'receivers[0].serviceInstanceId=')
+  if out=$(helm template "$RELEASE" "$CHART_DIR" "${args[@]}" 2>&1); then
+    got=$(printf '%s' "$out" | sid_of)
+    [ "$got" = "null" ] \
+      && pass "$empty_case: omitted, so the receiver composes its own identity" \
+      || fail "$empty_case: expected no service_instance_id key, got '$got'"
+  else
+    fail "$empty_case: render failed: $out"
+  fi
+done
+# Blank and untrimmed values are values errors. The receiver discards a blank override
+# and uses an untrimmed one verbatim, so neither can be allowed to reach it.
+for bad in ' ' '  ' ' id ' 'id '; do
+  out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
+          --set-string "receivers[0].serviceInstanceId=$bad" 2>&1)
+  schema_rejected "$out" "serviceInstanceId" "" \
+    && pass "serviceInstanceId '$bad' rejected by the schema" \
+    || fail "serviceInstanceId '$bad' should be a schema error; got: $out"
+done
 
 if [ "$failures" -ne 0 ]; then
   echo "::error::$failures helm render check(s) failed"
