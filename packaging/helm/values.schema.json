@@ -45,6 +45,11 @@
             "pattern": "^\\s*0*[1-9][0-9]*[smh]\\s*$",
             "description": "Whole seconds, minutes or hours, as in '30s', '5m' or '1h'. Mirrors what the receiver's parser accepts: surrounding whitespace is trimmed and leading zeros are allowed, but an all-zero value is not. Matched here so '500ms' or '0s' is a values error rather than a receiver that exits at startup."
           },
+          "serviceInstanceId": {
+            "type": "string",
+            "pattern": "^$|^[^\\s\\p{Z}\\p{C}](.*[^\\s\\p{Z}\\p{C}])?$",
+            "description": "Overrides the service.instance.id resource attribute. Empty means unset, as elsewhere in this file, and the receiver composes one from hostname, port and database. Anything else must begin and end with a visible character: the receiver discards a blank override and uses an untrimmed one verbatim, so ' ' would be silently ignored and ' id ' would become an identity with spaces in it. The class excludes Unicode separators and controls as well as ASCII whitespace, because \\s alone is ASCII-only here while Java's isBlank is not — an EM SPACE would otherwise pass this pattern and then be discarded as blank. Non-breaking spaces are excluded for the opposite reason: Java does not consider them blank, so one would survive as the whole identity."
+          },
           "credentialsSecret": {
             "type": "string"
           },

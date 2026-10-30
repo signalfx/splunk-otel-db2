@@ -694,6 +694,56 @@ else
   fail "subchart render with an explicit endpoint failed: $out"
 fi
 
+echo "13. serviceInstanceId renders service_instance_id, and is absent when unset"
+sid_of() {
+  yq e -N 'select(.kind == "ConfigMap") | .data["config.yaml"]' - \
+    | yq e -N '.receivers.["db2/default"].service_instance_id'
+}
+if out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
+           --set 'receivers[0].serviceInstanceId=prod-db2-01' 2>&1); then
+  got=$(printf '%s' "$out" | sid_of)
+  [ "$got" = "prod-db2-01" ] \
+    && pass "override rendered: $got" \
+    || fail "expected the override to render, got '$got'"
+else
+  fail "render with serviceInstanceId failed: $out"
+fi
+# Non-vacuous: the key must be omitted when empty, not rendered as "". The receiver
+# reads a blank override as absent, so an empty rendered value and an absent one behave
+# alike — but only the absent form says so in the config.
+for empty_case in 'unset' 'explicitly empty'; do
+  args=(-f "$VALUES")
+  [ "$empty_case" = 'explicitly empty' ] && args+=(--set 'receivers[0].serviceInstanceId=')
+  if out=$(helm template "$RELEASE" "$CHART_DIR" "${args[@]}" 2>&1); then
+    got=$(printf '%s' "$out" | sid_of)
+    [ "$got" = "null" ] \
+      && pass "$empty_case: omitted, so the receiver composes its own identity" \
+      || fail "$empty_case: expected no service_instance_id key, got '$got'"
+  else
+    fail "$empty_case: render failed: $out"
+  fi
+done
+# Blank and untrimmed values are values errors. The receiver discards a blank override
+# and uses an untrimmed one verbatim, so neither can be allowed to reach it.
+#
+# The non-ASCII cases are not hypothetical: the pattern's character class has to name
+# Unicode separators and controls explicitly, because \s is ASCII-only in the regexp
+# engine Helm validates with while Java's isBlank is not. An EM SPACE therefore passes
+# an \S-based pattern and is then discarded as blank. A NBSP is the mirror image — Java
+# does not consider it blank, so it would survive as the entire identity.
+#
+# $'...' is bash-only, which this script already requires via arrays and [[ ]].
+for bad in ' ' '  ' ' id ' 'id ' $'\t' $' ' $' id' $'id ' $' ' $'id ' $'​'; do
+  out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
+          --set-string "receivers[0].serviceInstanceId=$bad" 2>&1)
+  # Name the codepoints rather than the raw bytes: the invisible cases are
+  # indistinguishable in CI logs otherwise.
+  label=$(printf '%s' "$bad" | od -An -tx1 | tr -s ' ' | sed 's/^ //;s/ $//')
+  schema_rejected "$out" "serviceInstanceId" "" \
+    && pass "serviceInstanceId [$label] rejected by the schema" \
+    || fail "serviceInstanceId [$label] should be a schema error; got: $out"
+done
+
 if [ "$failures" -ne 0 ]; then
   echo "::error::$failures helm render check(s) failed"
   exit 1
