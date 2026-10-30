@@ -725,12 +725,23 @@ for empty_case in 'unset' 'explicitly empty'; do
 done
 # Blank and untrimmed values are values errors. The receiver discards a blank override
 # and uses an untrimmed one verbatim, so neither can be allowed to reach it.
-for bad in ' ' '  ' ' id ' 'id '; do
+#
+# The non-ASCII cases are not hypothetical: the pattern's character class has to name
+# Unicode separators and controls explicitly, because \s is ASCII-only in the regexp
+# engine Helm validates with while Java's isBlank is not. An EM SPACE therefore passes
+# an \S-based pattern and is then discarded as blank. A NBSP is the mirror image — Java
+# does not consider it blank, so it would survive as the entire identity.
+#
+# $'...' is bash-only, which this script already requires via arrays and [[ ]].
+for bad in ' ' '  ' ' id ' 'id ' $'\t' $' ' $' id' $'id ' $' ' $'id ' $'​'; do
   out=$(helm template "$RELEASE" "$CHART_DIR" -f "$VALUES" \
           --set-string "receivers[0].serviceInstanceId=$bad" 2>&1)
+  # Name the codepoints rather than the raw bytes: the invisible cases are
+  # indistinguishable in CI logs otherwise.
+  label=$(printf '%s' "$bad" | od -An -tx1 | tr -s ' ' | sed 's/^ //;s/ $//')
   schema_rejected "$out" "serviceInstanceId" "" \
-    && pass "serviceInstanceId '$bad' rejected by the schema" \
-    || fail "serviceInstanceId '$bad' should be a schema error; got: $out"
+    && pass "serviceInstanceId [$label] rejected by the schema" \
+    || fail "serviceInstanceId [$label] should be a schema error; got: $out"
 done
 
 if [ "$failures" -ne 0 ]; then
