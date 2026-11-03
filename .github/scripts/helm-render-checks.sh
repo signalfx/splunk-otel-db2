@@ -10,7 +10,7 @@
 # The subchart cases matter because the OTLP endpoint is derived from the parent release
 # name, which cannot be exercised standalone. The expected Service names below are the ones
 # splunk-otel-collector actually renders: the gateway takes the release fullname and the
-# agent appends -agent.
+# the agent target appends -agent.
 set -uo pipefail
 
 readonly CHART_DIR="${CHART_DIR:-packaging/helm}"
@@ -90,14 +90,27 @@ else
     || fail "rejected, but not for the endpoint; got: $out"
 fi
 
-echo "3. subchart defaults to the node-local agent Service"
+echo "3. subchart defaults to the gateway Service"
+# The agent stamps its own Node onto the resource and overrides host.name, which is wrong
+# for a receiver that scrapes remote databases.
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" 2>&1); then
+  got=$(printf '%s' "$out" | endpoint_of)
+  [ "$got" = "http://${RELEASE}-splunk-otel-collector.default.svc.cluster.local:4317" ] \
+    && pass "derived $got" \
+    || fail "expected the gateway Service, got '$got'"
+else
+  fail "subchart render failed: $out"
+fi
+
+echo "3b. collectorTarget: agent still selects the node-local agent Service"
+if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" \
+           --set 'splunk-otel-db2.otlp.collectorTarget=agent' 2>&1); then
   got=$(printf '%s' "$out" | endpoint_of)
   [ "$got" = "http://${RELEASE}-splunk-otel-collector-agent.default.svc.cluster.local:4317" ] \
     && pass "derived $got" \
     || fail "expected the agent Service, got '$got'"
 else
-  fail "subchart render failed: $out"
+  fail "subchart render with collectorTarget=agent failed: $out"
 fi
 
 echo "4. parent-supplied global.gateway.enabled selects the gateway Service"
@@ -140,9 +153,9 @@ echo "7. the derived name collapses when the release name contains the chart nam
 for rel in my-splunk-otel-collector splunk-otel-collector splunk-otel-collector-prod; do
   if out=$(helm template "$rel" "$PARENT" -f "$SUB_VALUES" 2>&1); then
     got=$(printf '%s' "$out" | endpoint_of)
-    [ "$got" = "http://${rel}-agent.default.svc.cluster.local:4317" ] \
+    [ "$got" = "http://${rel}.default.svc.cluster.local:4317" ] \
       && pass "release '$rel' derived $got" \
-      || fail "release '$rel': expected http://${rel}-agent.default.svc.cluster.local:4317, got '$got'"
+      || fail "release '$rel': expected http://${rel}.default.svc.cluster.local:4317, got '$got'"
   else
     fail "release '$rel' render failed: $out"
   fi
@@ -153,7 +166,7 @@ echo "8. the endpoint namespace follows the release, and collectorNamespace over
 # cannot see. collectorNamespace is the escape hatch that avoids writing out a full endpoint.
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" --namespace observability 2>&1); then
   got=$(printf '%s' "$out" | endpoint_of)
-  [ "$got" = "http://${RELEASE}-splunk-otel-collector-agent.observability.svc.cluster.local:4317" ] \
+  [ "$got" = "http://${RELEASE}-splunk-otel-collector.observability.svc.cluster.local:4317" ] \
     && pass "follows the release namespace: $got" \
     || fail "expected the release namespace in the FQDN, got '$got'"
 else
@@ -162,7 +175,7 @@ fi
 if out=$(helm template "$RELEASE" "$PARENT" -f "$SUB_VALUES" --namespace observability \
            --set 'splunk-otel-db2.otlp.collectorNamespace=collectors' 2>&1); then
   got=$(printf '%s' "$out" | endpoint_of)
-  [ "$got" = "http://${RELEASE}-splunk-otel-collector-agent.collectors.svc.cluster.local:4317" ] \
+  [ "$got" = "http://${RELEASE}-splunk-otel-collector.collectors.svc.cluster.local:4317" ] \
     && pass "collectorNamespace override respected: $got" \
     || fail "expected the overridden namespace, got '$got'"
 else
