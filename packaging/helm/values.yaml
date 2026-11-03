@@ -154,18 +154,17 @@ otlp:
   # collector Service name cannot be known.
   endpoint: ""
   # Which collector Service to derive the endpoint from: "agent" or "gateway".
-  # Ignored when `endpoint` is set, and overridden to "gateway" if the parent chart passes
-  # `global.gateway.enabled: true`.
+  # Ignored when `endpoint` is set.
   #
-  # "agent" targets <release>-splunk-otel-collector-agent, deployed by default upstream but
-  # internalTrafficPolicy: Local — it only reaches an agent Pod on this Pod's own Node.
-  # "gateway" targets <release>-splunk-otel-collector, cluster-wide routable but only
-  # deployed when the parent sets gateway.enabled.
+  # The gateway is the default because this receiver scrapes remote databases, while the
+  # agent's pipelines assume telemetry from Pods on the agent's own Node: they stamp that
+  # Node onto the resource and replace the database's host.name with the Collector's, so
+  # metrics and query events stop agreeing. The gateway applies none of that.
   #
-  # Use "gateway" (or set `endpoint`) when the agent Service does not exist. The parent does
-  # not render it when agent.service.enabled is false, nor on EKS Fargate, which cannot run
-  # DaemonSets. This chart cannot detect either case, so exports would silently go nowhere.
-  collectorTarget: "agent"
+  # "gateway" targets <release>-splunk-otel-collector, which the parent only deploys when
+  # gateway.enabled is set. An agent-only install must set "agent" here, or an explicit
+  # endpoint, and accepts that host.name on metrics becomes the Collector's Node.
+  collectorTarget: "gateway"
   # Namespace of the collector Services, used only when deriving the endpoint. Defaults to
   # this release's namespace. Set it when the parent uses `namespaceOverride`, which places
   # those Services elsewhere and is not visible to a subchart.

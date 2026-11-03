@@ -64,15 +64,15 @@ values to a subchart only through `global`, so a parent that sets `gateway.enabl
 its top level is invisible here. Honour `global.gateway.enabled` when the parent chooses to
 pass it down, and otherwise fall back to this chart's own otlp.collectorTarget.
 
-The agent Service is `internalTrafficPolicy: Local`, so it only resolves to an agent Pod on
-the same Node. That is the default because the agent DaemonSet is enabled upstream by
-default while the gateway is not, but it means exports blackhole if this Pod's Node has no
-healthy agent. Prefer the gateway when it is deployed.
+The gateway is the default target. This receiver scrapes remote databases, while the agent's
+pipelines are written for telemetry produced by Pods on the agent's own Node: they stamp that
+Node onto the resource and run resource_detection with override: true, which replaces the
+database's host.name with the Collector's. The gateway applies none of that, so metrics and
+query events keep the same host.name and stay attributable to the database.
 
-The agent Service is also not always rendered: the parent gates it on
-`agent.service.enabled`, and never creates it on EKS Fargate, which cannot run DaemonSets.
-Those configurations need `otlp.collectorTarget: gateway` or an explicit otlp.endpoint,
-and cannot be detected from here because the gating values are parent top-level values.
+An agent-only install therefore has to set `otlp.collectorTarget: agent` or an explicit
+otlp.endpoint. That cannot be detected from here, since `gateway.enabled` is a parent
+top-level value; the parent chart reports the mismatch instead.
 
 Addresses are emitted as cluster FQDNs rather than short names so they do not depend on the
 Pod's resolv.conf search order and can cross namespaces. The namespace defaults to this
@@ -86,7 +86,7 @@ out the whole endpoint.
 {{- else if .Chart.IsRoot -}}
 {{- fail "otlp.endpoint is required when installing splunk-otel-db2 standalone; it can only be derived when the chart runs as a dependency of splunk-otel-collector" -}}
 {{- else -}}
-{{- $target := .Values.otlp.collectorTarget | default "agent" -}}
+{{- $target := .Values.otlp.collectorTarget | default "gateway" -}}
 {{- if dig "gateway" "enabled" false (.Values.global | default dict) -}}
 {{- $target = "gateway" -}}
 {{- end -}}

@@ -501,19 +501,20 @@ With `db2.otlp.endpoint` empty, the chart builds the address from the parent rel
 
 | `db2.otlp.collectorTarget` | Service | Reachability |
 | --- | --- | --- |
-| `agent` (default) | `<release>-splunk-otel-collector-agent` | `internalTrafficPolicy: Local` — only an agent Pod on this Pod's own Node |
-| `gateway` | `<release>-splunk-otel-collector` | cluster-wide |
+| `gateway` (default) | `<release>-splunk-otel-collector` | cluster-wide |
+| `agent` | `<release>-splunk-otel-collector-agent` | `internalTrafficPolicy: Local` — only an agent Pod on this Pod's own Node |
 
-The agent is the default because the agent DaemonSet is deployed by default upstream while the gateway is opt-in. The tradeoff is that `Local` traffic policy means exports blackhole if this Pod's Node has no healthy agent, so prefer `gateway` wherever it is enabled.
+The gateway is the default because this receiver scrapes remote databases. The agent's pipelines are written for telemetry produced by Pods on the agent's own Node: they stamp that Node onto the resource and run `resource_detection` with `override: true`, which replaces the database's `host.name` with the Collector's, so metrics and query events stop agreeing on it. The gateway applies none of that.
 
-Addresses are emitted as cluster FQDNs (`<service>.<namespace>.svc.cluster.local`) so they do not depend on the Pod's DNS search order. The name reproduces the collector chart's own `fullname` helper, including the rule that the chart-name suffix is dropped when the release name already contains it — release `my-splunk-otel-collector` resolves to `my-splunk-otel-collector-agent`, not `my-splunk-otel-collector-splunk-otel-collector-agent`.
+Choosing `agent` is still supported for installs that run no gateway. It accepts the Node stamping above, and the `Local` traffic policy means exports blackhole if this Pod's Node has no healthy agent.
 
-Four cases need an explicit override, because each depends on a parent top-level value that Helm does not expose to a subchart through `global`:
+Addresses are emitted as cluster FQDNs (`<service>.<namespace>.svc.cluster.local`) so they do not depend on the Pod's DNS search order. The name reproduces the collector chart's own `fullname` helper, including the rule that the chart-name suffix is dropped when the release name already contains it — release `my-splunk-otel-collector` resolves to `my-splunk-otel-collector`, not `my-splunk-otel-collector-splunk-otel-collector`.
+
+Three cases need an explicit override, because each depends on a parent top-level value that Helm does not expose to a subchart through `global`:
 
 | Parent configuration | Symptom | Fix |
 | --- | --- | --- |
-| `gateway.enabled: true` | still targets the agent | `db2.otlp.collectorTarget: gateway`, or have the parent pass `global.gateway.enabled: true` |
-| `agent.service.enabled: false`, or EKS Fargate | agent Service does not exist, exports silently dropped | `db2.otlp.collectorTarget: gateway` |
+| no gateway deployed | gateway Service does not exist, exports silently dropped | `db2.otlp.collectorTarget: agent` |
 | `namespaceOverride` | Services are in another namespace | `db2.otlp.collectorNamespace` |
 | `fullnameOverride` / `nameOverride` | derived name does not exist | `db2.otlp.endpoint` |
 
