@@ -397,9 +397,9 @@ imagePullSecrets:
 
 Install this chart as a dependency of [splunk-otel-collector-chart](https://github.com/signalfx/splunk-otel-collector-chart), so a single release deploys the Collector and the Db2 receiver. The receiver still runs as its own Deployment and exports *into* the Collector — it is not a Collector receiver.
 
-Steps 1 and 2 describe what that chart has to declare for this one to be installable as a
-subchart. They are maintained upstream, so if you are consuming a released
-`splunk-otel-collector` that already offers `db2.enabled`, skip to step 3.
+`splunk-otel-collector` declares this dependency upstream, so with a released chart that
+offers `db2.enabled` you only need steps 3 to 5. Steps 1 and 2 record what that chart has to
+declare, for anyone maintaining it or vendoring the chart themselves.
 
 **Step 1 — The dependency** in that chart's `Chart.yaml`:
 
@@ -488,12 +488,52 @@ here inherits nothing from the shipped one. `name`, `hostname`, `database` and c
 always required, and `port` joins them whenever TLS is on. `collectionInterval`,
 `tls.insecure`, `tls.insecureSkipVerify` and `tls.caSecretKey` default.
 
-**Step 5 — Install the parent chart** as you normally would; the Db2 receiver comes with it.
+**Step 4b — To send query samples and top queries to Database Monitoring**, enable the
+parent's routing as well. The events are OTel log records rather than metrics, so they need
+their own destination; without this they are collected and then dropped.
+
+```yaml
+splunkObservability:
+  dbMonitoringEnabled: true
+
+db2:
+  receivers:
+    - name: default
+      # ...
+      events:
+        dbServerQuerySample:
+          enabled: true
+        dbServerTopQuery:
+          enabled: true
+```
+
+This renders a dedicated exporter carrying the Database Monitoring library header, fed by a
+pipeline that the parent's logs routing connector selects on this receiver's instrumentation
+scope. It needs `splunkObservability` configured — Database Monitoring has no Splunk Platform
+destination — and applies to any supported database receiver, not only this one.
+
+**Step 5 — Install the parent chart**; the Db2 receiver comes with it.
 
 ```bash
-helm install my-splunk-otel-collector -f my-values.yaml \
-  splunk-otel-collector-chart/splunk-otel-collector
+helm repo add splunk-otel-collector-chart https://signalfx.github.io/splunk-otel-collector-chart
+helm repo update
+
+helm install my-splunk-otel-collector \
+  splunk-otel-collector-chart/splunk-otel-collector \
+  --namespace splunk-otel --create-namespace \
+  --values my-values.yaml
 ```
+
+The credentials Secret from step 3 has to be in the release namespace. Confirm the receiver
+started and is scraping:
+
+```bash
+kubectl --namespace splunk-otel get pods -l app.kubernetes.io/name=db2
+kubectl --namespace splunk-otel logs -l app.kubernetes.io/name=db2 --tail=20
+```
+
+A `CrashLoopBackOff` here is usually credentials or TLS; the receiver validates both at
+startup and names the field it rejected.
 
 ##### How the endpoint is derived
 
@@ -802,6 +842,9 @@ Active log file numbers are identifiers rather than measurements and are not emi
 Active statements are sampled at `query_sample_collection.collection_interval` (**5s recommended floor**; lower values are honoured, with a warning at startup) and emitted as OTel log records (severity INFO). Disabled by default — set `events.db.server.query_sample.enabled: true` to opt in. SQL text is obfuscated before emission — literal values are replaced with `?`.
 
 The log record's native `event_name` field is set to `db.server.query_sample` (not stored as an attribute).
+
+Under `splunk-otel-collector` these records also need `splunkObservability.dbMonitoringEnabled`
+on the parent, or they are collected and then dropped — see option 1B, step 4b.
 
 | Attribute | Description |
 |---|---|
