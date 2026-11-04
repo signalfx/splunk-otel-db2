@@ -435,9 +435,17 @@ kubectl create secret generic my-db2-credentials \
   --from-literal=DB2_PASSWORD='<password>'
 ```
 
-**Step 4 — Enable it in that chart's values.** Everything nests under the alias, and `otlp.endpoint` can be omitted because it is derived from the release:
+**Step 4 — Enable it in that chart's values.** Everything nests under the alias, and
+`otlp.endpoint` can be omitted because it is derived from the release. Query samples and top
+queries are OTel log records rather than metrics, so routing them to Database Monitoring
+takes the parent's `dbMonitoringEnabled` as well — without it they are collected and then
+dropped:
 
 ```yaml
+splunkObservability:
+  # Routes this receiver's query events to Database Monitoring. Omit for metrics only.
+  dbMonitoringEnabled: true
+
 db2:
   enabled: true
   receivers:
@@ -446,7 +454,18 @@ db2:
       database: "PROD"
       credentialsSecret: "my-db2-credentials"
       port: 50001                # your ssl_svcename port
+      events:
+        dbServerQuerySample:
+          enabled: true
+        dbServerTopQuery:
+          enabled: true
 ```
+
+`dbMonitoringEnabled` needs `splunkObservability` configured — Database Monitoring has no
+Splunk Platform destination — and applies to any supported database receiver, not only this
+one. It renders a dedicated exporter carrying the Database Monitoring library header, fed by
+a pipeline that the parent's logs routing connector selects on this receiver's instrumentation
+scope.
 
 `db2.enabled: true` on its own is not enough. The chart ships a placeholder receiver with no
 credentials, so enabling it without configuring one fails with
@@ -472,7 +491,10 @@ kubectl create secret generic my-db2-ca --from-file=ca.crt=/path/to/ca.crt
 db2:
   receivers:
     - name: default
-      # ...
+      hostname: "db2.example.com"
+      database: "PROD"
+      credentialsSecret: "my-db2-credentials"
+      port: 50001
       tls:
         caSecret: my-db2-ca
         caSecretKey: ca.crt     # default
@@ -487,30 +509,6 @@ Note that Helm replaces a list wholesale rather than merging its elements: an en
 here inherits nothing from the shipped one. `name`, `hostname`, `database` and credentials are
 always required, and `port` joins them whenever TLS is on. `collectionInterval`,
 `tls.insecure`, `tls.insecureSkipVerify` and `tls.caSecretKey` default.
-
-**Step 4b — To send query samples and top queries to Database Monitoring**, enable the
-parent's routing as well. The events are OTel log records rather than metrics, so they need
-their own destination; without this they are collected and then dropped.
-
-```yaml
-splunkObservability:
-  dbMonitoringEnabled: true
-
-db2:
-  receivers:
-    - name: default
-      # ...
-      events:
-        dbServerQuerySample:
-          enabled: true
-        dbServerTopQuery:
-          enabled: true
-```
-
-This renders a dedicated exporter carrying the Database Monitoring library header, fed by a
-pipeline that the parent's logs routing connector selects on this receiver's instrumentation
-scope. It needs `splunkObservability` configured — Database Monitoring has no Splunk Platform
-destination — and applies to any supported database receiver, not only this one.
 
 **Step 5 — Install the parent chart**; the Db2 receiver comes with it.
 
