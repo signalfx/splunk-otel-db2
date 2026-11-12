@@ -114,6 +114,30 @@ class Db2PipelineResourceTest {
             .isFalse();
     }
 
+    // Without this the attrs.put wiring could be deleted and every other test would still pass:
+    // the production path needs a live Db2, and the override test goes through the
+    // resource_attributes loop rather than the collected value.
+    @Test
+    void aCollectedNameReachesTheResource() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+
+        Resource resource = Db2Pipeline.buildResource(rc, "db2.example.com", "db2inst1");
+
+        assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .isEqualTo("db2inst1");
+    }
+
+    // A blank or absent name must not reach the Resource as an empty dimension.
+    @Test
+    void aBlankCollectedNameIsNotPutOnTheResource() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", "   ")
+            .getAttribute(AttributeKey.stringKey("db2.instance.name"))).isNull();
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", null)
+            .getAttribute(AttributeKey.stringKey("db2.instance.name"))).isNull();
+    }
+
     // An unrelated override must not suppress the lookup.
     @Test
     void anUnrelatedOverrideStillLeavesTheLookupNeeded() {

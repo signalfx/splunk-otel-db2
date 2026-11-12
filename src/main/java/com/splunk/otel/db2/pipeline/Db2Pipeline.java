@@ -110,8 +110,11 @@ public class Db2Pipeline {
         }
     }
 
-    private static Resource buildResource(Db2ReceiverConfig rc, String identityHost,
-                                          String instanceName) {
+    // Package-private so a test can assert a collected name actually reaches the Resource. The
+    // production path needs a live Db2, and the override path exercises the resource_attributes
+    // loop instead, so neither would catch this wiring being dropped.
+    static Resource buildResource(Db2ReceiverConfig rc, String identityHost,
+                                  String instanceName) {
         // G1: explicit overrides take precedence over generated values
         String serviceName       = firstNonBlank(rc.getServiceName(), "splunk-otel-db2");
         String serviceInstanceId = firstNonBlank(rc.getServiceInstanceId(),
