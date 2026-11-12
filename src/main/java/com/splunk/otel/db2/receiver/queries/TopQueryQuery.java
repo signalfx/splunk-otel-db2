@@ -144,6 +144,13 @@ public class TopQueryQuery {
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_APPL_INFO%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_STMT%%%%' " +
         "  AND STMT_TEXT NOT LIKE '%%%%SNAP_GET_DB%%%%' " +
+        // The startup instance-name lookup. It runs once, but the package cache is cumulative and
+        // LAST_METRICS_UPDATE keeps it a candidate for the whole lookback window, so without this
+        // the receiver reports its own query as a top query and spends an explain budget slot on
+        // it. Both names are needed: we execute against the ENV_INST_INFO view, which Db2 may also
+        // cache as the ENV_GET_INST_INFO table function it wraps.
+        "  AND STMT_TEXT NOT LIKE '%%%%ENV_INST_INFO%%%%' " +
+        "  AND STMT_TEXT NOT LIKE '%%%%ENV_GET_INST_INFO%%%%' " +
         // No SYSDUMMY1 filter. SELECT ... FROM SYSIBM.SYSDUMMY1 is everyday Db2 application code,
         // so excluding it dropped legitimate customer top queries. It was also redundant: this
         // receiver's only SYSDUMMY1 statement is the snapshot query sample, which the

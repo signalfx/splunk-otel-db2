@@ -209,6 +209,14 @@ GRANT CONNECT ON DATABASE TO USER db2mon;
 -- Stored procedure called unconditionally on every connection
 GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
 
+-- Instance name (db2.instance.name), read once at startup.
+-- Only needed where PUBLIC grants on the administrative views have been revoked: Db2 grants
+-- SELECT on this view to PUBLIC by default, so a stock install needs nothing here. Without it
+-- the query fails with SQL0551N and the attribute is omitted — nothing else is affected.
+-- EXECUTE on SYSPROC.ENV_GET_INST_INFO is NOT required: the view's definer chain covers the
+-- table function it wraps (verified on 11.5.9.0 with PUBLIC EXECUTE revoked).
+GRANT SELECT ON TABLE SYSIBMADM.ENV_INST_INFO TO USER db2mon;
+
 -- Core metrics scrapers
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_CONNECTION TO USER db2mon;

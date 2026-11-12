@@ -83,7 +83,20 @@ public class Db2Pipeline {
      * <p>Costs one connect attempt at startup, bounded by {@code connect_timeout}. A failure is not
      * fatal: the attribute is dropped and startup continues.
      */
+    /**
+     * False when {@code resource_attributes} already names the instance. The override replaces
+     * whatever is collected, so connecting to collect it is pure waste — and the waste is not just
+     * a connection: pipelines are constructed one after another, so an unreachable database holds
+     * up every later receiver for its {@code connect_timeout}.
+     */
+    static boolean instanceNameLookupNeeded(Db2ReceiverConfig rc) {
+        return !rc.getResourceAttributes().containsKey("db2.instance.name");
+    }
+
     private static String lookUpInstanceName(Db2ReceiverConfig rc, String label) {
+        if (!instanceNameLookupNeeded(rc)) {
+            return null;
+        }
         Db2Connection conn = new Db2Connection(rc, rc.getComponentName());
         try {
             return InstanceInfoQuery.fetchInstanceName(

@@ -407,6 +407,28 @@ class TopQueryQueryTest {
         assertThat(sql).doesNotContainIgnoringCase("NUM_EXEC_WITH_METRICS");
     }
 
+    /**
+     * Ties the self-filter to the lookup it has to exclude. The startup query runs once, but the
+     * package cache is cumulative, so an unfiltered lookup is reported as a user top query for the
+     * whole lookback window. Asserting against {@link InstanceInfoQuery#SQL} rather than a literal
+     * means retargeting that query at a different object fails here instead of silently.
+     */
+    @Test
+    void selfFilterCoversTheInstanceNameLookup() throws Exception {
+        when(rs.next()).thenReturn(false);
+        query().collect();
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(stmt).executeQuery(sqlCap.capture());
+        String topQuerySql = sqlCap.getValue();
+
+        assertThat(InstanceInfoQuery.SQL)
+            .as("the lookup still targets ENV_INST_INFO; if retargeted, update the filter below")
+            .contains("ENV_INST_INFO");
+        assertThat(topQuerySql).contains("ENV_INST_INFO");
+        assertThat(topQuerySql).contains("ENV_GET_INST_INFO");
+    }
+
     @Test
     void sqlContainsSelfFilterClauses() throws Exception {
         when(rs.next()).thenReturn(false);
@@ -432,6 +454,8 @@ class TopQueryQueryTest {
         // The metric collectors' own table functions must be excluded too, or the receiver's
         // monitoring SQL is ranked as a user top query and consumes explain-plan budget.
         assertThat(sql).contains("MON_GET_TRANSACTION_LOG");
+        assertThat(sql).contains("ENV_INST_INFO");
+        assertThat(sql).contains("ENV_GET_INST_INFO");
         assertThat(sql).contains("SNAP_GET_DB");
     }
 

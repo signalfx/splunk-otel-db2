@@ -98,6 +98,31 @@ class Db2PipelineResourceTest {
             .isEqualTo("db2inst9");
     }
 
+    // Pipelines are constructed serially, so a lookup against an unreachable database delays every
+    // later receiver by its connect_timeout. When the value would be discarded anyway, the connect
+    // must not happen at all.
+    @Test
+    void anOverrideSkipsTheLookupEntirely() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc))
+            .as("no override configured, so the instance name has to be collected")
+            .isTrue();
+
+        rc.setResourceAttributes(Map.of("db2.instance.name", "db2inst9"));
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc))
+            .as("override present, so connecting to collect a value we would discard is waste")
+            .isFalse();
+    }
+
+    // An unrelated override must not suppress the lookup.
+    @Test
+    void anUnrelatedOverrideStillLeavesTheLookupNeeded() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        rc.setResourceAttributes(Map.of("deployment.environment", "production"));
+
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc)).isTrue();
+    }
+
     /** Builds a pipeline and returns the Resource stamped on its metrics. */
     private static Resource resourceOf(Db2Config cfg) throws Exception {
         InMemoryMetricReader reader = InMemoryMetricReader.create();
