@@ -22,6 +22,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -70,6 +71,46 @@ class Db2PipelineResourceTest {
             .as("service.instance.id should be qualified with the resolved hostname, not 'localhost'")
             .startsWith(expectedHost)
             .doesNotStartWith("localhost:");
+    }
+
+    // The test constructor does not run the instance-name lookup, so this also covers the
+    // production path where the lookup failed: the attribute must be absent rather than empty,
+    // since an empty dimension reads as a real value.
+    @Test
+    void instanceNameIsAbsentWhenItWasNotCollected() throws Exception {
+        Resource resource = resourceOf(minimalConfig("db2.example.com", 50000, "TESTDB"));
+
+        assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("db2.instance.name must be omitted, not blank, when the lookup yielded nothing")
+            .isNull();
+    }
+
+    // The collected value is put before the resource_attributes loop, so an operator can still
+    // name the instance themselves — the only option available before this was collected.
+    @Test
+    void resourceAttributesCanOverrideInstanceName() throws Exception {
+        Db2Config cfg = minimalConfig("db2.example.com", 50000, "TESTDB");
+        cfg.getReceivers().get(0).setResourceAttributes(Map.of("db2.instance.name", "db2inst9"));
+
+        Resource resource = resourceOf(cfg);
+
+        assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .isEqualTo("db2inst9");
+    }
+
+    /** Builds a pipeline and returns the Resource stamped on its metrics. */
+    private static Resource resourceOf(Db2Config cfg) throws Exception {
+        InMemoryMetricReader reader = InMemoryMetricReader.create();
+        Db2Pipeline pipeline = new Db2Pipeline(cfg, reader);
+
+        Field mpField = Db2Pipeline.class.getDeclaredField("meterProvider");
+        mpField.setAccessible(true);
+        SdkMeterProvider meterProvider = (SdkMeterProvider) mpField.get(pipeline);
+        meterProvider.get("splunk-otel-db2").counterBuilder("test.counter").build().add(1);
+
+        Collection<MetricData> metrics = reader.collectAllMetrics();
+        assertThat(metrics).isNotEmpty();
+        return metrics.iterator().next().getResource();
     }
 
     /**

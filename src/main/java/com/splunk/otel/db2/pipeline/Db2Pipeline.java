@@ -5,7 +5,9 @@ import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.exporter.Db2Exporter;
 import com.splunk.otel.db2.processor.Db2Processor;
+import com.splunk.otel.db2.receiver.Db2Connection;
 import com.splunk.otel.db2.receiver.Db2Receiver;
+import com.splunk.otel.db2.receiver.queries.InstanceInfoQuery;
 import com.splunk.otel.db2.util.ResourceIdentity;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -39,7 +41,7 @@ public class Db2Pipeline {
         // Resolve once: loopback → collector hostname so co-located sidecars have unique identities.
         // Remote targets are returned unchanged. Never triggers DNS on the configured host.
         String identityHost = ResourceIdentity.resolveIdentityHost(rc.getHost());
-        Resource resource = buildResource(rc, identityHost);
+        Resource resource = buildResource(rc, identityHost, lookUpInstanceName(rc, name));
         // instanceId mirrors service.instance.id so logs and backend agree
         String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
             identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
@@ -64,7 +66,7 @@ public class Db2Pipeline {
         String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
             identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
         this.instanceId = effectiveInstanceId;
-        Resource resource   = buildResource(rc, identityHost);
+        Resource resource   = buildResource(rc, identityHost, null);
         this.meterProvider  = buildMeterProvider(testReader, resource);
         this.loggerProvider = null;
 
@@ -72,7 +74,31 @@ public class Db2Pipeline {
         this.receiver = new Db2Receiver(rc, meter, (Logger) null);
     }
 
-    private static Resource buildResource(Db2ReceiverConfig rc, String identityHost) {
+    /**
+     * Reads the instance name over a connection of its own, discarded immediately. The receiver's
+     * connections do not exist yet — they are created with the Meter and Logger, which need the
+     * Resource this feeds — and the resource is immutable once built, so the lookup cannot be
+     * deferred into the receiver's lifecycle.
+     *
+     * <p>Costs one connect attempt at startup, bounded by {@code connect_timeout}. A failure is not
+     * fatal: the attribute is dropped and startup continues.
+     */
+    private static String lookUpInstanceName(Db2ReceiverConfig rc, String label) {
+        Db2Connection conn = new Db2Connection(rc, rc.getComponentName());
+        try {
+            return InstanceInfoQuery.fetchInstanceName(
+                conn.getOrConnect(), rc.getConnectTimeoutSeconds(), label);
+        } catch (Exception e) {
+            log.warn("{}Could not connect to read the Db2 instance name ({}); "
+                + "db2.instance.name omitted", label, e.getMessage());
+            return null;
+        } finally {
+            conn.close();
+        }
+    }
+
+    private static Resource buildResource(Db2ReceiverConfig rc, String identityHost,
+                                          String instanceName) {
         // G1: explicit overrides take precedence over generated values
         String serviceName       = firstNonBlank(rc.getServiceName(), "splunk-otel-db2");
         String serviceInstanceId = firstNonBlank(rc.getServiceInstanceId(),
@@ -90,6 +116,12 @@ public class Db2Pipeline {
         // service.namespace only when configured — avoids polluting the resource for single-cluster setups
         String ns = rc.getServiceNamespace();
         if (ns != null && !ns.isBlank()) attrs.put("service.namespace", ns);
+
+        // Read from the server, so absent when the lookup failed. Placed before the
+        // resource_attributes loop so an operator override still wins.
+        if (instanceName != null && !instanceName.isBlank()) {
+            attrs.put("db2.instance.name", instanceName);
+        }
 
         // resource_attributes overrides win last — applied after G1 fields
         // server.port must stay a long to match semconv type
