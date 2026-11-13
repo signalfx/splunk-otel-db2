@@ -305,6 +305,68 @@ class MainStartupTest {
         verify(late, never()).start();
     }
 
+    /**
+     * The in-progress-start case, which blocking inside the factory does not reach: there the
+     * pre-start abort branch handles it and {@code start()} is never called. Here {@code start()}
+     * itself is still running when rollback gives up, so only the post-start abort check can stop
+     * the pipeline.
+     *
+     * <p>Because the pipeline is published only after {@code start()} returns, rollback cannot stop
+     * it mid-start and spend the one-shot guard — the worker owns it until then.
+     */
+    @Test
+    void aWorkerBlockedInsideStartPastAnExpiredDrainStopsItsOwnPipeline() throws Exception {
+        CountDownLatch startEntered = new CountDownLatch(1);
+        CountDownLatch releaseStart = new CountDownLatch(1);
+        CountDownLatch pipelineStopped = new CountDownLatch(1);
+        Db2Pipeline blocked = mock(Db2Pipeline.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            startEntered.countDown();
+            // Ignores interruption, so the drain below cannot cut it short.
+            while (true) {
+                try {
+                    releaseStart.await();
+                    return null;
+                } catch (InterruptedException ignored) {
+                    // keep going: this is the point of the test
+                }
+            }
+        }).when(blocked).start();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            pipelineStopped.countDown();
+            return null;
+        }).when(blocked).stop();
+
+        AtomicReference<Throwable> thrown = new AtomicReference<>();
+        Thread starter = new Thread(() -> {
+            try {
+                Main.startAll(receivers(1), otlp(), (rc, otlpConfig) -> blocked, 1);
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        }, "startAll-blocked-start");
+        starter.start();
+
+        try {
+            assertThat(startEntered.await(10, TimeUnit.SECONDS))
+                .as("start() should have been entered").isTrue();
+            starter.interrupt();
+
+            // The one-second drain expires while start() is still blocked, so startAll returns
+            // before the worker does — which is exactly the window the post-start check covers.
+            starter.join(TimeUnit.SECONDS.toMillis(15));
+            assertThat(starter.isAlive())
+                .as("startAll should have returned once the drain expired").isFalse();
+            assertThat(thrown.get()).isInstanceOf(InterruptedException.class);
+        } finally {
+            releaseStart.countDown();
+        }
+
+        assertThat(pipelineStopped.await(15, TimeUnit.SECONDS))
+            .as("start() completed after rollback, so the worker must stop its own pipeline")
+            .isTrue();
+    }
+
     @Test
     void stoppingAnEmptyListIsANoOp() {
         Main.stopAll(List.of(), 1);

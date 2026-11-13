@@ -58,7 +58,13 @@ public class Main {
         // driver that ignores its own. A worker that outlives rollback reads this and disposes of
         // its own pipeline, so nothing leaks even when the wait gives up.
         AtomicBoolean aborted = new AtomicBoolean();
-        ExecutorService startExecutor = Executors.newFixedThreadPool(receivers.size());
+        // Daemon threads: a startup task wedged in a connect that ignores interruption would
+        // otherwise be a live non-daemon thread and keep the JVM from terminating normally.
+        ExecutorService startExecutor = Executors.newFixedThreadPool(receivers.size(), runnable -> {
+            Thread t = new Thread(runnable, "db2-pipeline-start");
+            t.setDaemon(true);
+            return t;
+        });
         List<Future<?>> futures = new ArrayList<>(receivers.size());
         try {
             for (Db2ReceiverConfig rc : receivers) {
@@ -70,13 +76,31 @@ public class Main {
                         pipeline.stop();
                         return null;
                     }
-                    // Registered before start() so a pipeline that throws midway through starting
-                    // is still rolled back — its schedulers and SDK may already be live.
+                    // Kept worker-owned until start() terminates. Publishing first let rollback
+                    // call stop() while start() was still running, which consumes Db2Pipeline's
+                    // one-shot stopped guard — start() then carried on creating schedulers that no
+                    // later stop() could reach, because the guard was already spent.
+                    boolean started = false;
+                    try {
+                        pipeline.start();
+                        started = true;
+                    } finally {
+                        if (!started) {
+                            // start() threw: its schedulers and SDK may be partly live, and the
+                            // pipeline was never published, so this worker is the only thing that
+                            // can clean it up. Caught so it cannot mask the original failure.
+                            try {
+                                pipeline.stop();
+                            } catch (RuntimeException suppressed) {
+                                log.warn("Error stopping a pipeline that failed to start: {}",
+                                    suppressed.getMessage());
+                            }
+                        }
+                    }
                     pipelines.add(pipeline);
-                    pipeline.start();
-                    // The flag can be raised while start() runs. Rollback sets it before taking its
-                    // snapshot, so either that snapshot contains this pipeline, or this check sees
-                    // the flag — one of the two always stops it, and stop() is idempotent.
+                    // Rollback raises the flag before taking its snapshot, so either the snapshot
+                    // contains this pipeline or this check sees the flag. stop() is idempotent, so
+                    // being stopped by both is harmless.
                     if (aborted.get()) {
                         pipeline.stop();
                     }
@@ -140,11 +164,14 @@ public class Main {
      * legitimate work and turn a slow startup into a reported leak.
      */
     private static int drainTimeoutSeconds(List<Db2ReceiverConfig> receivers) {
-        int slowestConnect = receivers.stream()
-            .mapToInt(Db2ReceiverConfig::getConnectTimeoutSeconds)
+        long slowestConnect = receivers.stream()
+            .mapToLong(Db2ReceiverConfig::getConnectTimeoutSeconds)
             .max()
-            .orElse(0);
-        return slowestConnect * 2 + DRAIN_GRACE_SECONDS;
+            .orElse(0L);
+        // Widened and saturated: connect_timeout is an unbounded positive int, so doubling it
+        // overflows in int arithmetic and would yield a negative wait.
+        long bound = slowestConnect * 2 + DRAIN_GRACE_SECONDS;
+        return (int) Math.min(bound, Integer.MAX_VALUE);
     }
 
     /**
