@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -130,6 +131,7 @@ class MainStartupTest {
      */
     @Test
     void aWorkerThatOutlivesCancellationIsStillRolledBack() throws Exception {
+        CountDownLatch fastFactoryDone = new CountDownLatch(1);
         CountDownLatch slowFactoryEntered = new CountDownLatch(1);
         CountDownLatch releaseSlowFactory = new CountDownLatch(1);
         Db2Pipeline slow = mock(Db2Pipeline.class);
@@ -140,6 +142,7 @@ class MainStartupTest {
             try {
                 Main.startAll(receivers(2), otlp(), (rc, otlpConfig) -> {
                     if (!"db1".equals(rc.getComponentName())) {
+                        fastFactoryDone.countDown();
                         return fast;
                     }
                     slowFactoryEntered.countDown();
@@ -159,20 +162,28 @@ class MainStartupTest {
         }, "startAll-under-test");
         starter.start();
 
-        assertThat(slowFactoryEntered.await(10, TimeUnit.SECONDS))
-            .as("the slow factory should have been entered").isTrue();
-        starter.interrupt();
+        boolean returnedWhileWorkerStillConstructing;
+        try {
+            // Both workers must be past the point of interest before interrupting, otherwise the
+            // fast one may not yet be registered and the assertions below race scheduler timing.
+            assertThat(fastFactoryDone.await(10, TimeUnit.SECONDS))
+                .as("the fast factory should have completed").isTrue();
+            assertThat(slowFactoryEntered.await(10, TimeUnit.SECONDS))
+                .as("the slow factory should have been entered").isTrue();
+            starter.interrupt();
 
-        // The observable that separates the two implementations, with no reliance on who wins a
-        // race: startAll cannot legitimately return while a worker is still inside the factory,
-        // because that worker is about to add and start a pipeline nobody will stop. Draining the
-        // pool makes returning early impossible, so the thread must still be alive here. Without
-        // the drain it returns in microseconds — these are mocks — and this assertion fails.
-        starter.join(TimeUnit.SECONDS.toMillis(2));
-        boolean returnedWhileWorkerStillConstructing = !starter.isAlive();
-
-        releaseSlowFactory.countDown();
-        starter.join(TimeUnit.SECONDS.toMillis(30));
+            // The observable that separates the two implementations, with no reliance on who wins a
+            // race: startAll cannot legitimately return while a worker is still inside the factory,
+            // because that worker is about to start a pipeline rollback has stopped looking for.
+            // Draining makes returning early impossible, so the thread must still be alive here.
+            // Without it, it returns in microseconds — these are mocks — and this fails.
+            starter.join(TimeUnit.SECONDS.toMillis(2));
+            returnedWhileWorkerStillConstructing = !starter.isAlive();
+        } finally {
+            // In a finally so a failed assertion above cannot leave this thread parked forever.
+            releaseSlowFactory.countDown();
+            starter.join(TimeUnit.SECONDS.toMillis(30));
+        }
 
         assertThat(returnedWhileWorkerStillConstructing)
             .as("startAll returned before its cancelled worker finished; that worker's pipeline "
@@ -180,8 +191,11 @@ class MainStartupTest {
             .isFalse();
         assertThat(starter.isAlive()).as("startAll should have returned once released").isFalse();
         assertThat(thrown.get()).isInstanceOf(InterruptedException.class);
-        verify(slow).stop();
-        verify(fast).stop();
+        // atLeastOnce, not once: a worker that sees the abort flag after start() stops its own
+        // pipeline, and rollback may stop the same one. Db2Pipeline.stop() is idempotent, so the
+        // contract is "gets stopped", not "stopped exactly once".
+        verify(slow, atLeastOnce()).stop();
+        verify(fast, atLeastOnce()).stop();
     }
 
     // The barrier above proves construction overlaps; this proves start() does too, which is where
@@ -203,8 +217,14 @@ class MainStartupTest {
         assertThat(pipelines).hasSize(count);
     }
 
-    // Rollback must overlap too: stop() can block for connect_timeout, so a serial unwind
-    // reintroduces the delay the parallel start removed.
+    /**
+     * Rollback must overlap too: {@code stop()} can block for {@code connect_timeout}, so a serial
+     * unwind reintroduces the delay the parallel start removed.
+     *
+     * <p>Asserting only the startup exception was not enough — {@code stopAll} swallows whatever
+     * {@code stop()} throws, so a timed-out barrier left no trace and the test passed under serial
+     * rollback. The barrier's own broken state is the observable that cannot be swallowed.
+     */
     @Test
     void rollbackStopsPipelinesConcurrently() {
         int healthy = 3;
@@ -223,6 +243,66 @@ class MainStartupTest {
                 return p;
             }))
             .isInstanceOf(IllegalStateException.class);
+
+        assertThat(allStopping.isBroken())
+            .as("a stop() timed out on the barrier, so rollback stopped pipelines one at a time")
+            .isFalse();
+        assertThat(allStopping.getNumberWaiting())
+            .as("every stop() should have passed through the barrier")
+            .isZero();
+    }
+
+    /**
+     * The guarantee that does not depend on the drain succeeding. No timeout can outlast a driver
+     * that ignores its own, so the drain is expired deliberately here: the worker finishes
+     * afterwards and must dispose of its own pipeline rather than start one that rollback has
+     * already stopped looking for.
+     *
+     * <p>Only reachable through the interrupt path. On the failure path {@code startAll} drains
+     * every future before rolling back, so no worker can outlive it there.
+     */
+    @Test
+    void aWorkerOutlivingAnExpiredDrainStopsItsOwnPipeline() throws Exception {
+        CountDownLatch lateFactoryEntered = new CountDownLatch(1);
+        CountDownLatch lateStopped = new CountDownLatch(1);
+        Db2Pipeline late = mock(Db2Pipeline.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            lateStopped.countDown();
+            return null;
+        }).when(late).stop();
+        AtomicReference<Throwable> thrown = new AtomicReference<>();
+
+        Thread starter = new Thread(() -> {
+            try {
+                // One-second drain: the worker below stays busy for longer, so the wait expires
+                // while it is still inside the factory.
+                Main.startAll(receivers(1), otlp(), (rc, otlpConfig) -> {
+                    lateFactoryEntered.countDown();
+                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                    while (System.nanoTime() < until) {
+                        try {
+                            TimeUnit.MILLISECONDS.sleep(50);
+                        } catch (InterruptedException ignored) {
+                            // Ignores interruption, the way DriverManager.getConnection does.
+                        }
+                    }
+                    return late;
+                }, 1);
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        }, "startAll-expired-drain");
+        starter.start();
+
+        assertThat(lateFactoryEntered.await(10, TimeUnit.SECONDS)).isTrue();
+        starter.interrupt();
+        starter.join(TimeUnit.SECONDS.toMillis(20));
+
+        assertThat(thrown.get()).isInstanceOf(InterruptedException.class);
+        assertThat(lateStopped.await(15, TimeUnit.SECONDS))
+            .as("the worker finished after rollback gave up, so it must stop its own pipeline")
+            .isTrue();
+        verify(late, never()).start();
     }
 
     @Test
