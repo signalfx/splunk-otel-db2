@@ -41,7 +41,8 @@ public class Db2Pipeline {
         // Resolve once: loopback → collector hostname so co-located sidecars have unique identities.
         // Remote targets are returned unchanged. Never triggers DNS on the configured host.
         String identityHost = ResourceIdentity.resolveIdentityHost(rc.getHost());
-        Resource resource = buildResource(rc, identityHost, lookUpInstanceName(rc, name));
+        Resource resource = buildResource(rc, identityHost,
+            resolveInstanceName(rc, name, Db2Pipeline::lookUpInstanceName));
         // instanceId mirrors service.instance.id so logs and backend agree
         String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
             identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
@@ -83,6 +84,22 @@ public class Db2Pipeline {
      * <p>Costs one connect attempt at startup, bounded by {@code connect_timeout}. A failure is not
      * fatal: the attribute is dropped and startup continues.
      */
+    static final String INSTANCE_NAME = "db2.instance.name";
+
+    /**
+     * The configured override, or null when absent or blank.
+     *
+     * <p>A blank override is treated as unset rather than honoured. Honouring it would export an
+     * empty dimension, which reads downstream as a real value — the same reason a failed lookup
+     * omits the attribute instead of emitting an empty string. It would also be the one way to get
+     * a blank `db2.instance.name` into the data, having gone to the trouble of preventing it
+     * everywhere else.
+     */
+    private static String instanceNameOverride(Db2ReceiverConfig rc) {
+        String configured = rc.getResourceAttributes().get(INSTANCE_NAME);
+        return configured != null && !configured.isBlank() ? configured : null;
+    }
+
     /**
      * False when {@code resource_attributes} already names the instance. The override replaces
      * whatever is collected, so connecting to collect it is pure waste — and the waste is not just
@@ -90,13 +107,21 @@ public class Db2Pipeline {
      * up every later receiver for its {@code connect_timeout}.
      */
     static boolean instanceNameLookupNeeded(Db2ReceiverConfig rc) {
-        return !rc.getResourceAttributes().containsKey("db2.instance.name");
+        return instanceNameOverride(rc) == null;
+    }
+
+    /** Reads the instance name unless an override makes it pointless. */
+    static String resolveInstanceName(Db2ReceiverConfig rc, String label, InstanceNameLookup lookup) {
+        return instanceNameLookupNeeded(rc) ? lookup.read(rc, label) : null;
+    }
+
+    /** Seam for tests: production passes {@link #lookUpInstanceName}. */
+    @FunctionalInterface
+    interface InstanceNameLookup {
+        String read(Db2ReceiverConfig rc, String label);
     }
 
     private static String lookUpInstanceName(Db2ReceiverConfig rc, String label) {
-        if (!instanceNameLookupNeeded(rc)) {
-            return null;
-        }
         Db2Connection conn = new Db2Connection(rc, rc.getComponentName());
         try {
             return InstanceInfoQuery.fetchInstanceName(
@@ -136,12 +161,18 @@ public class Db2Pipeline {
         // Read from the server, so absent when the lookup failed. Placed before the
         // resource_attributes loop so an operator override still wins.
         if (instanceName != null && !instanceName.isBlank()) {
-            attrs.put("db2.instance.name", instanceName);
+            attrs.put(INSTANCE_NAME, instanceName);
         }
 
         // resource_attributes overrides win last — applied after G1 fields
         // server.port must stay a long to match semconv type
         for (Map.Entry<String, String> e : rc.getResourceAttributes().entrySet()) {
+            // A blank instance name is treated as unset, so it must not overwrite a collected one
+            // here either — otherwise the override path is the single way to export the empty
+            // dimension the rest of this class exists to avoid.
+            if (INSTANCE_NAME.equals(e.getKey()) && e.getValue().isBlank()) {
+                continue;
+            }
             if (e.getKey().equals("server.port")) {
                 try {
                     attrs.put(AttributeKey.longKey("server.port"), Long.parseLong(e.getValue()));

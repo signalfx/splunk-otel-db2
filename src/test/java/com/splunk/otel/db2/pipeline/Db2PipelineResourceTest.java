@@ -23,6 +23,7 @@ import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -85,17 +86,63 @@ class Db2PipelineResourceTest {
             .isNull();
     }
 
-    // The collected value is put before the resource_attributes loop, so an operator can still
-    // name the instance themselves — the only option available before this was collected.
+    // Supplies a collected value AND a conflicting override, which is the only arrangement that
+    // pins the precedence: with one side null, reversing the order still passes.
     @Test
-    void resourceAttributesCanOverrideInstanceName() throws Exception {
-        Db2Config cfg = minimalConfig("db2.example.com", 50000, "TESTDB");
-        cfg.getReceivers().get(0).setResourceAttributes(Map.of("db2.instance.name", "db2inst9"));
+    void anOverrideBeatsACollectedInstanceName() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        rc.setResourceAttributes(Map.of("db2.instance.name", "from-config"));
 
-        Resource resource = resourceOf(cfg);
+        Resource resource = Db2Pipeline.buildResource(rc, "db2.example.com", "from-server");
 
         assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
-            .isEqualTo("db2inst9");
+            .as("the operator's override must win over the collected value")
+            .isEqualTo("from-config");
+    }
+
+    // A blank override is treated as unset rather than honoured: exporting an empty dimension
+    // would undo the reason a failed lookup omits the attribute entirely.
+    @Test
+    void aBlankOverrideNeitherWinsNorErasesTheCollectedName() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        rc.setResourceAttributes(Map.of("db2.instance.name", "   "));
+
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", "from-server")
+            .getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("a blank override must not overwrite a collected name")
+            .isEqualTo("from-server");
+
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", null)
+            .getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("and must not be exported as an empty dimension on its own")
+            .isNull();
+
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc))
+            .as("a blank override must not suppress the lookup either")
+            .isTrue();
+    }
+
+    // Exercises the caller, not just the predicate: deleting the guard inside resolveInstanceName
+    // leaves a predicate-only test green.
+    @Test
+    void theLookupIsNotInvokedWhenAnOverrideIsPresent() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        AtomicInteger invocations = new AtomicInteger();
+        Db2Pipeline.InstanceNameLookup counting = (config, label) -> {
+            invocations.incrementAndGet();
+            return "from-server";
+        };
+
+        assertThat(Db2Pipeline.resolveInstanceName(rc, "", counting)).isEqualTo("from-server");
+        assertThat(invocations.get()).as("no override, so the server must be asked").isEqualTo(1);
+
+        rc.setResourceAttributes(Map.of("db2.instance.name", "from-config"));
+        assertThat(Db2Pipeline.resolveInstanceName(rc, "", counting))
+            .as("the override is applied later by buildResource, so nothing is collected here")
+            .isNull();
+        assertThat(invocations.get())
+            .as("the override makes the connect pure waste, so it must not happen")
+            .isEqualTo(1);
     }
 
     // Pipelines are constructed serially, so a lookup against an unreachable database delays every

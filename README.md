@@ -168,7 +168,7 @@ exporters:
     endpoint: "http://localhost:4317"
 ```
 
-Standard attributes (`service.name`, `service.instance.id`, `server.address`, `db.system.name`, `db.namespace`, `db2.instance.name`) can be overridden. `server.port` must be an integer value. All overrides are applied on top of the defaults — unspecified attributes keep their automatically derived values.
+Standard attributes (`service.name`, `service.instance.id`, `server.address`, `db.system.name`, `db.namespace`) can be overridden, as can the Db2-specific `db2.instance.name`. `server.port` must be an integer value. All overrides are applied on top of the defaults — unspecified attributes keep their automatically derived values. A blank value for `db2.instance.name` is treated as unset rather than exported as an empty attribute.
 
 Credential values can be literals or `${env:VAR_NAME}` references.
 
@@ -1090,7 +1090,7 @@ The instance name — the `db2inst1` an administrator knows the instance by — 
 
 It cannot be derived from configuration. A Db2 URL is `jdbc:db2://host:port/DATABASE`: the trailing token is the database, and the instance is identified only implicitly by the port, since each instance listens on its own `SVCENAME`. Asking the server is the only way to learn the name it goes by.
 
-The attribute is omitted when the value cannot be read — an unreachable Db2, or a user without access to the view — and the receiver starts normally either way. The resource is built once per process, so a name missed at startup stays missing until the receiver restarts; set it through `resource_attributes` if you need it guaranteed.
+The attribute is omitted when the value cannot be read — an unreachable Db2, or a user without access to the view — and the receiver starts normally either way. Each receiver builds its resource once, when its pipeline is constructed, so a name missed at startup stays missing until the receiver restarts; set it through `resource_attributes` if you need it guaranteed.
 
 ## Releases
 

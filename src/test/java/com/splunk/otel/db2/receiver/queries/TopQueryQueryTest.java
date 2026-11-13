@@ -425,8 +425,13 @@ class TopQueryQueryTest {
         assertThat(InstanceInfoQuery.SQL)
             .as("the lookup still targets ENV_INST_INFO; if retargeted, update the filter below")
             .contains("ENV_INST_INFO");
-        assertThat(topQuerySql).contains("ENV_INST_INFO");
-        assertThat(topQuerySql).contains("ENV_GET_INST_INFO");
+
+        // The whole predicate, not just the object name: asserting the name alone passed even with
+        // both clauses flipped from NOT LIKE to LIKE, which inverts the filter into a whitelist.
+        assertThat(topQuerySql)
+            .as("the instance lookup must be excluded, not selected")
+            .contains("STMT_TEXT NOT LIKE '%%ENV_INST_INFO%%'")
+            .contains("STMT_TEXT NOT LIKE '%%ENV_GET_INST_INFO%%'");
     }
 
     @Test

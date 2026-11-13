@@ -19,7 +19,8 @@ import java.sql.Statement;
  *
  * <p>Returns null rather than throwing. The attribute is omitted when the value cannot be read, so a
  * Db2 that is unreachable or a monitoring user without access to the view costs the attribute and
- * nothing else. Note the resource is built once per process, so a name missed at startup stays
+ * nothing else. Note a receiver builds its resource once, when its pipeline is constructed, so a
+ * name missed at startup stays
  * missing until restart.
  */
 public final class InstanceInfoQuery {
