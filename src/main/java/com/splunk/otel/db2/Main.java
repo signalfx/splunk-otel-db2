@@ -25,11 +25,12 @@ public class Main {
     /**
      * Builds and starts every pipeline in parallel, mirroring the shutdown path below.
      *
-     * <p>Startup touches the database twice per receiver: the instance-name lookup while the
-     * Resource is assembled, and the Db2 version probe in {@code start()} when query sampling is
-     * on. Both are bounded by {@code connect_timeout} and both degrade gracefully, but run serially
-     * they compound — one unreachable database used to hold up every healthy receiver behind it, so
-     * N stalled databases cost roughly N x connect_timeout before the healthy ones scraped anything.
+     * <p>Startup does blocking database work per receiver — today the Db2 version probe in
+     * {@code start()} whenever query sampling is on, and any further connect a pipeline makes while
+     * being built. Each is bounded by {@code connect_timeout} and degrades gracefully on its own,
+     * but run from a sequential loop they compound: one unreachable database held up every healthy
+     * receiver behind it, so N stalled databases cost roughly N x connect_timeout before the
+     * healthy ones scraped anything.
      *
      * <p>Sized to the receiver count on purpose: a smaller pool would queue receivers behind those
      * blocking connects and reintroduce the problem for whatever did not get a thread.
@@ -159,9 +160,10 @@ public class Main {
 
     /**
      * Derived from configuration rather than fixed: {@code connect_timeout} has no upper bound, and
-     * startup spends it twice in sequence — once on the instance-name lookup during construction,
-     * once on the version probe inside {@code start()} — so any constant could be shorter than
-     * legitimate work and turn a slow startup into a reported leak.
+     * a receiver can spend it more than once in sequence — on the version probe inside
+     * {@code start()}, and on any connect made while the pipeline is built — so any constant could
+     * be shorter than legitimate work and turn a slow startup into a reported leak. Doubling it is
+     * the allowance for that; the margin above absorbs the rest.
      */
     private static int drainTimeoutSeconds(List<Db2ReceiverConfig> receivers) {
         long slowestConnect = receivers.stream()
