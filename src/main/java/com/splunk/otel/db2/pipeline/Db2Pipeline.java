@@ -170,7 +170,11 @@ public class Db2Pipeline {
             // A blank instance name is treated as unset, so it must not overwrite a collected one
             // here either — otherwise the override path is the single way to export the empty
             // dimension the rest of this class exists to avoid.
-            if (INSTANCE_NAME.equals(e.getKey()) && e.getValue().isBlank()) {
+            // Null-guarded as well as blank-guarded: the map is public API via
+            // setResourceAttributes, so a caller can put a null value even though config loading
+            // now drops them.
+            if (INSTANCE_NAME.equals(e.getKey())
+                && (e.getValue() == null || e.getValue().isBlank())) {
                 continue;
             }
             if (e.getKey().equals("server.port")) {

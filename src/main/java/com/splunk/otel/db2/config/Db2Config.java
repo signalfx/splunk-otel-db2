@@ -230,6 +230,12 @@ public class Db2Config {
             Map<?, ?> raw = (Map<?, ?>) raNode;
             Map<String, String> attrs = new java.util.LinkedHashMap<>();
             for (Map.Entry<?, ?> e : raw.entrySet()) {
+                // A key written with no value — "db2.instance.name:" — parses as null. Passing that
+                // through String.valueOf yields the literal "null", which would be exported as a
+                // real attribute value. An absent value means unset.
+                if (e.getValue() == null) {
+                    continue;
+                }
                 attrs.put(String.valueOf(e.getKey()), expandEnv(String.valueOf(e.getValue())));
             }
             rc.setResourceAttributes(attrs);

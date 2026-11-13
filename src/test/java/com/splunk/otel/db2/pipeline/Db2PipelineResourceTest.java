@@ -2,6 +2,7 @@ package com.splunk.otel.db2.pipeline;
 
 import com.splunk.otel.db2.config.Db2Config;
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.receiver.Db2Receiver;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.metrics.Meter;
@@ -192,6 +193,53 @@ class Db2PipelineResourceTest {
         rc.setResourceAttributes(Map.of("deployment.environment", "production"));
 
         assertThat(Db2Pipeline.instanceNameLookupNeeded(rc)).isTrue();
+    }
+
+    /**
+     * Covers the production constructor's own call site, not just the resolver it should use.
+     * Pointing the constructor back at the unguarded lookup leaves every other test here green,
+     * because with an unreachable database the lookup returns null and the override wins either
+     * way — the only difference is the connection attempt.
+     *
+     * <p>So the connection attempt is the observable. Asserted from {@code Db2Connection}'s own log
+     * rather than through another injection seam: the point is to pin the real wiring, and a seam
+     * would just move the untested call site one level up.
+     */
+    @Test
+    void theRealConstructorDoesNotConnectWhenAnOverrideIsPresent() throws Exception {
+        ch.qos.logback.classic.Logger connectionLog = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(com.splunk.otel.db2.receiver.Db2Connection.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> captured =
+            new ch.qos.logback.core.read.ListAppender<>();
+        captured.start();
+        connectionLog.addAppender(captured);
+
+        Db2ReceiverConfig rc = new Db2ReceiverConfig();
+        rc.setHostname("192.0.2.1");          // TEST-NET-1: a connect would block, then fail
+        rc.setHostport(50000);
+        rc.setUsername("user");
+        rc.setPassword("pass");
+        rc.setDatabase("TESTDB");
+        rc.setConnectTimeoutSeconds(1);
+        rc.setResourceAttributes(Map.of("db2.instance.name", "from-config"));
+
+        OtlpExporterConfig otlp = new OtlpExporterConfig();
+        otlp.setEndpoint("http://127.0.0.1:4317");
+
+        Db2Pipeline pipeline = null;
+        try {
+            pipeline = new Db2Pipeline(rc, otlp);
+
+            assertThat(captured.list)
+                .as("an override makes the lookup pointless, so the constructor must not connect")
+                .noneMatch(event -> event.getFormattedMessage().contains("Connecting to DB2"));
+        } finally {
+            connectionLog.detachAppender(captured);
+            captured.stop();
+            if (pipeline != null) {
+                try { pipeline.stop(); } catch (Exception ignored) { }
+            }
+        }
     }
 
     /** Builds a pipeline and returns the Resource stamped on its metrics. */
