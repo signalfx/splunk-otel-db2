@@ -77,6 +77,15 @@ public class Main {
                     // Abandoning the wait would leak every pipeline started so far, each holding
                     // JDBC connections and live schedulers.
                     futures.forEach(pending -> pending.cancel(true));
+                    // A cancelled task is not a finished task. cancel(true) interrupts the worker,
+                    // but a JDBC connect does not answer interruption, so a worker can still be
+                    // inside the factory. Draining the pool first is what makes the rollback list
+                    // final — otherwise a late worker adds and starts its pipeline after stopAll
+                    // has already returned and nothing is left to stop it. It also settles the
+                    // start()/stop() race: once the pool is quiet no worker is inside start(), so
+                    // stop() cannot set the idempotent guard while schedulers are still being
+                    // created.
+                    drain(startExecutor);
                     stopAll(pipelines, 30);
                     Thread.currentThread().interrupt();
                     throw e;
@@ -90,6 +99,27 @@ public class Main {
             startExecutor.shutdown();
         }
         return new ArrayList<>(pipelines);
+    }
+
+    /**
+     * How long to let in-flight startup workers finish after cancellation. Generous because the
+     * work being waited on is a JDBC connect bounded by {@code connect_timeout}, not an unbounded
+     * operation — and finishing the wait is what makes rollback complete.
+     */
+    private static final int DRAIN_TIMEOUT_SECONDS = 60;
+
+    /** Waits for cancelled startup workers to actually stop running. */
+    private static void drain(ExecutorService startExecutor) {
+        startExecutor.shutdownNow();
+        try {
+            if (!startExecutor.awaitTermination(DRAIN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                // Nothing further can be done: the worker owns a pipeline this thread cannot see.
+                log.error("Startup tasks still running after {}s — their pipelines cannot be rolled "
+                    + "back and may keep connections and schedulers open", DRAIN_TIMEOUT_SECONDS);
+            }
+        } catch (InterruptedException secondInterrupt) {
+            log.warn("Interrupted again while draining startup tasks; rollback may be incomplete");
+        }
     }
 
     /**
