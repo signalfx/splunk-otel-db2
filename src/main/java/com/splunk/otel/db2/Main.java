@@ -37,24 +37,25 @@ public class Main {
      * first exception is rethrown once every task has finished, rather than leaving the process
      * half-initialised.
      */
-    static List<Db2Pipeline> startAll(List<Db2ReceiverConfig> receivers, OtlpExporterConfig otlpConfig)
-            throws Exception {
-        if (receivers.size() == 1) {
-            Db2ReceiverConfig rc = receivers.get(0);
-            Db2Pipeline pipeline = new Db2Pipeline(rc, otlpConfig);
-            pipeline.start();
-            return new ArrayList<>(List.of(pipeline));
-        }
+    /** Seam for tests: production passes {@code Db2Pipeline::new}. */
+    @FunctionalInterface
+    interface PipelineFactory {
+        Db2Pipeline create(Db2ReceiverConfig rc, OtlpExporterConfig otlpConfig);
+    }
 
+    static List<Db2Pipeline> startAll(List<Db2ReceiverConfig> receivers, OtlpExporterConfig otlpConfig,
+                                      PipelineFactory factory) throws Exception {
         List<Db2Pipeline> pipelines = new CopyOnWriteArrayList<>();
         ExecutorService startExecutor = Executors.newFixedThreadPool(receivers.size());
         List<Future<?>> futures = new ArrayList<>(receivers.size());
         try {
             for (Db2ReceiverConfig rc : receivers) {
                 futures.add(startExecutor.submit(() -> {
-                    Db2Pipeline pipeline = new Db2Pipeline(rc, otlpConfig);
-                    pipeline.start();
+                    Db2Pipeline pipeline = factory.create(rc, otlpConfig);
+                    // Added before start() so a pipeline that throws midway through starting is
+                    // still rolled back — its schedulers and SDK may already be live.
                     pipelines.add(pipeline);
+                    pipeline.start();
                     return null;
                 }));
             }
@@ -72,18 +73,51 @@ public class Main {
                             ? (Exception) cause
                             : new RuntimeException(cause);
                     }
+                } catch (InterruptedException e) {
+                    // Abandoning the wait would leak every pipeline started so far, each holding
+                    // JDBC connections and live schedulers.
+                    futures.forEach(pending -> pending.cancel(true));
+                    stopAll(pipelines, 30);
+                    Thread.currentThread().interrupt();
+                    throw e;
                 }
             }
             if (firstFailure != null) {
-                for (Db2Pipeline started : pipelines) {
-                    try { started.stop(); } catch (Exception ignored) {}
-                }
+                stopAll(pipelines, 30);
                 throw firstFailure;
             }
         } finally {
             startExecutor.shutdown();
         }
         return new ArrayList<>(pipelines);
+    }
+
+    /**
+     * Stops every pipeline concurrently. {@code stop()} drains the SDK, which triggers a final
+     * metric collection and so can block for {@code connect_timeout} against an unresponsive
+     * database — serially that compounds across pipelines exactly as startup did. A pool sized to
+     * the pipeline count means no pipeline waits behind another's timeout.
+     */
+    static void stopAll(List<Db2Pipeline> pipelines, int timeoutSeconds) {
+        if (pipelines.isEmpty()) {
+            return;
+        }
+        ExecutorService stopExecutor = Executors.newFixedThreadPool(pipelines.size());
+        for (Db2Pipeline p : pipelines) {
+            stopExecutor.submit(() -> {
+                try { p.stop(); } catch (Exception e) { log.warn("Error stopping pipeline: {}", e.getMessage()); }
+            });
+        }
+        stopExecutor.shutdown();
+        try {
+            if (!stopExecutor.awaitTermination(timeoutSeconds, TimeUnit.SECONDS)) {
+                log.warn("Some pipelines did not finish shutdown within {}s — forcing stop", timeoutSeconds);
+                stopExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            stopExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -106,30 +140,12 @@ public class Main {
         List<Db2ReceiverConfig> receivers = config.getReceivers();
         log.info("Starting {} database pipeline(s)", receivers.size());
 
-        List<Db2Pipeline> pipelines = startAll(receivers, otlpConfig);
+        List<Db2Pipeline> pipelines = startAll(receivers, otlpConfig, Db2Pipeline::new);
 
         CountDownLatch shutdown = new CountDownLatch(1);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("Shutdown signal received — stopping {} pipeline(s)", pipelines.size());
-            // Use a dedicated executor sized to the pipeline count so every stop() task
-            // starts immediately — the common fork-join pool is bounded and can queue tasks
-            // behind blocking scheduler timeouts when there are many databases.
-            ExecutorService stopExecutor = Executors.newFixedThreadPool(pipelines.size());
-            for (Db2Pipeline p : pipelines) {
-                stopExecutor.submit(() -> {
-                    try { p.stop(); } catch (Exception e) { log.warn("Error stopping pipeline: {}", e.getMessage()); }
-                });
-            }
-            stopExecutor.shutdown();
-            try {
-                if (!stopExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-                    log.warn("Some pipelines did not finish shutdown within 30s — forcing stop");
-                    stopExecutor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                stopExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
+            stopAll(pipelines, 30);
             shutdown.countDown();
         }));
 

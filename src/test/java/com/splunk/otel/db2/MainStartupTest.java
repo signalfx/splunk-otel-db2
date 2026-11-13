@@ -7,83 +7,133 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
+/**
+ * Concurrency is asserted with a barrier rather than wall-clock timing. An earlier version timed
+ * connects to a black-holed address, which a runner that answers ENETUNREACH immediately would let
+ * a serial implementation pass — a test that cannot fail. A barrier cannot be satisfied serially at
+ * all, so it holds regardless of the runner's network or load.
+ */
 class MainStartupTest {
 
-    // TEST-NET-1 (RFC 5737). Routed nowhere, so a connect attempt blocks until it times out
-    // instead of being refused immediately — which is what makes the serial-vs-parallel
-    // difference measurable.
-    private static final String BLACKHOLE_HOST = "192.0.2.1";
+    private static final int BARRIER_TIMEOUT_SECONDS = 10;
 
-    private static Db2ReceiverConfig unreachableReceiver(String name, int connectTimeoutSeconds) {
+    private static Db2ReceiverConfig receiver(String name) {
         Db2ReceiverConfig rc = new Db2ReceiverConfig();
         rc.setComponentName(name);
-        rc.setHostname(BLACKHOLE_HOST);
+        rc.setHostname("db2-" + name + ".example.com");
         rc.setHostport(50000);
         rc.setUsername("user");
         rc.setPassword("pass");
         rc.setDatabase("TESTDB");
-        rc.setConnectTimeoutSeconds(connectTimeoutSeconds);
-        rc.getTls().setInsecure(true);
         return rc;
     }
 
-    /**
-     * Four unreachable databases, each allowed 3s to connect. Serially that is ~12s of instance-name
-     * lookups before any healthy receiver could start; in parallel it is ~3s.
-     *
-     * <p>The threshold is 8s — comfortably above one timeout plus JVM and SDK setup, and well below
-     * the 12s a serial implementation needs. It asserts the shape of the startup path, not a
-     * performance target, so the margin is deliberately wide rather than tight.
-     */
-    @Test
-    void unreachableDatabasesDoNotDelayEachOther() throws Exception {
-        int receiverCount = 4;
-        int connectTimeoutSeconds = 3;
-        List<Db2ReceiverConfig> receivers = new ArrayList<>();
-        for (int i = 0; i < receiverCount; i++) {
-            receivers.add(unreachableReceiver("db" + i, connectTimeoutSeconds));
+    private static List<Db2ReceiverConfig> receivers(int count) {
+        List<Db2ReceiverConfig> list = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            list.add(receiver("db" + i));
         }
+        return list;
+    }
 
+    private static OtlpExporterConfig otlp() {
         OtlpExporterConfig otlp = new OtlpExporterConfig();
         otlp.setEndpoint("http://127.0.0.1:4317");
+        return otlp;
+    }
 
-        List<Db2Pipeline> pipelines = List.of();
-        long startedAt = System.nanoTime();
-        try {
-            pipelines = Main.startAll(receivers, otlp);
-            long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+    /**
+     * Every receiver must be building at the same moment. A serial implementation parks the first
+     * task on the barrier forever, which trips the timeout and fails — so this cannot pass unless
+     * startup genuinely overlaps.
+     */
+    @Test
+    void everyPipelineIsBuiltConcurrently() throws Exception {
+        int count = 4;
+        CyclicBarrier allBuilding = new CyclicBarrier(count);
 
-            assertThat(pipelines).hasSize(receiverCount);
-            assertThat(elapsedMs)
-                .as("%d unreachable databases at %ds each took %dms; serial startup would need ~%dms",
-                    receiverCount, connectTimeoutSeconds, elapsedMs,
-                    receiverCount * connectTimeoutSeconds * 1000)
-                .isLessThan(8_000);
-        } finally {
-            for (Db2Pipeline p : pipelines) {
-                try { p.stop(); } catch (Exception ignored) {}
+        List<Db2Pipeline> pipelines = Main.startAll(receivers(count), otlp(), (rc, otlpConfig) -> {
+            try {
+                allBuilding.await(BARRIER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new IllegalStateException(
+                    "startup is serialised: only some receivers reached the barrier", e);
+            } catch (InterruptedException | BrokenBarrierException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
             }
+            return mock(Db2Pipeline.class);
+        });
+
+        assertThat(pipelines).hasSize(count);
+    }
+
+    /**
+     * One bad receiver among several: startup aborts, and the pipelines that did come up are
+     * stopped rather than left holding JDBC connections and live schedulers.
+     */
+    @Test
+    void aFailedReceiverRollsBackTheOnesThatStarted() {
+        int count = 4;
+        List<Db2Pipeline> created = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        assertThatThrownBy(() ->
+            Main.startAll(receivers(count), otlp(), (rc, otlpConfig) -> {
+                if ("db2".equals(rc.getComponentName())) {
+                    throw new IllegalStateException("boom: " + rc.getComponentName());
+                }
+                Db2Pipeline p = mock(Db2Pipeline.class);
+                created.add(p);
+                return p;
+            }))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("boom: db2");
+
+        assertThat(created).as("the three healthy receivers were built").hasSize(count - 1);
+        for (Db2Pipeline p : created) {
+            verify(p).stop();
         }
     }
 
-    // An unreachable database must not prevent startup: the instance name is dropped and the
-    // receiver still comes up to retry on its own schedule.
+    // The failure must surface even when it happens in start() rather than construction, and the
+    // half-started pipeline must be stopped too.
     @Test
-    void anUnreachableDatabaseStillYieldsAStartedPipeline() throws Exception {
-        OtlpExporterConfig otlp = new OtlpExporterConfig();
-        otlp.setEndpoint("http://127.0.0.1:4317");
+    void aPipelineThatThrowsFromStartIsAlsoRolledBack() {
+        Db2Pipeline failing = mock(Db2Pipeline.class);
+        org.mockito.Mockito.doThrow(new IllegalStateException("start failed")).when(failing).start();
 
-        List<Db2Pipeline> pipelines = List.of();
-        try {
-            pipelines = Main.startAll(List.of(unreachableReceiver("solo", 2)), otlp);
-            assertThat(pipelines).hasSize(1);
-        } finally {
-            for (Db2Pipeline p : pipelines) {
-                try { p.stop(); } catch (Exception ignored) {}
-            }
-        }
+        assertThatThrownBy(() -> Main.startAll(receivers(1), otlp(), (rc, otlpConfig) -> failing))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("start failed");
+
+        verify(failing).stop();
+    }
+
+    @Test
+    void stoppingAnEmptyListIsANoOp() {
+        Main.stopAll(List.of(), 1);
+    }
+
+    // A single receiver still goes through the same path; nothing is stopped on success.
+    @Test
+    void aSingleHealthyReceiverStartsAndIsNotStopped() throws Exception {
+        Db2Pipeline healthy = mock(Db2Pipeline.class);
+
+        List<Db2Pipeline> pipelines = Main.startAll(receivers(1), otlp(), (rc, otlpConfig) -> healthy);
+
+        assertThat(pipelines).containsExactly(healthy);
+        verify(healthy).start();
+        verify(healthy, never()).stop();
     }
 }
