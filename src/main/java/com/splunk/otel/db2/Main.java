@@ -159,6 +159,15 @@ public class Main {
     private static final int DRAIN_GRACE_SECONDS = 30;
 
     /**
+     * Ceiling on the drain, independent of configuration. Scaling the wait with
+     * {@code connect_timeout} alone meant an interrupt was withheld for as long as the slowest
+     * receiver was allowed to connect — a 3600s setting delays cancellation past two hours, and the
+     * largest accepted value for decades. Since a late worker is a daemon thread that stops its own
+     * pipeline, waiting longer than this buys nothing but an unresponsive shutdown.
+     */
+    private static final int DRAIN_CEILING_SECONDS = 120;
+
+    /**
      * Derived from configuration rather than fixed: {@code connect_timeout} has no upper bound, and
      * a receiver can spend it more than once in sequence — on the version probe inside
      * {@code start()}, and on any connect made while the pipeline is built — so any constant could
@@ -173,7 +182,7 @@ public class Main {
         // Widened and saturated: connect_timeout is an unbounded positive int, so doubling it
         // overflows in int arithmetic and would yield a negative wait.
         long bound = slowestConnect * 2 + DRAIN_GRACE_SECONDS;
-        return (int) Math.min(bound, Integer.MAX_VALUE);
+        return (int) Math.min(bound, DRAIN_CEILING_SECONDS);
     }
 
     /**

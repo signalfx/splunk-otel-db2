@@ -264,6 +264,7 @@ class MainStartupTest {
     @Test
     void aWorkerOutlivingAnExpiredDrainStopsItsOwnPipeline() throws Exception {
         CountDownLatch lateFactoryEntered = new CountDownLatch(1);
+        CountDownLatch releaseLateFactory = new CountDownLatch(1);
         CountDownLatch lateStopped = new CountDownLatch(1);
         Db2Pipeline late = mock(Db2Pipeline.class);
         org.mockito.Mockito.doAnswer(invocation -> {
@@ -274,19 +275,21 @@ class MainStartupTest {
 
         Thread starter = new Thread(() -> {
             try {
-                // One-second drain: the worker below stays busy for longer, so the wait expires
-                // while it is still inside the factory.
+                // One-second drain, and the worker below is held until the test releases it, so
+                // the wait necessarily expires while it is still inside the factory.
                 Main.startAll(receivers(1), otlp(), (rc, otlpConfig) -> {
                     lateFactoryEntered.countDown();
-                    long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-                    while (System.nanoTime() < until) {
+                    // Latch rather than a timed sleep: the test releases this only after it has
+                    // seen startAll return, so the drain is proven to have expired instead of
+                    // being raced against a duration.
+                    while (true) {
                         try {
-                            TimeUnit.MILLISECONDS.sleep(50);
+                            releaseLateFactory.await();
+                            return late;
                         } catch (InterruptedException ignored) {
                             // Ignores interruption, the way DriverManager.getConnection does.
                         }
                     }
-                    return late;
                 }, 1);
             } catch (Throwable t) {
                 thrown.set(t);
@@ -294,11 +297,21 @@ class MainStartupTest {
         }, "startAll-expired-drain");
         starter.start();
 
-        assertThat(lateFactoryEntered.await(10, TimeUnit.SECONDS)).isTrue();
-        starter.interrupt();
-        starter.join(TimeUnit.SECONDS.toMillis(20));
+        try {
+            assertThat(lateFactoryEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            starter.interrupt();
 
-        assertThat(thrown.get()).isInstanceOf(InterruptedException.class);
+            // startAll returning while the factory is still blocked is what proves the drain
+            // expired, rather than inferring it from elapsed time.
+            starter.join(TimeUnit.SECONDS.toMillis(20));
+            assertThat(starter.isAlive())
+                .as("startAll should have returned once the one-second drain expired").isFalse();
+            assertThat(thrown.get()).isInstanceOf(InterruptedException.class);
+            verify(late, never()).stop();
+        } finally {
+            releaseLateFactory.countDown();
+        }
+
         assertThat(lateStopped.await(15, TimeUnit.SECONDS))
             .as("the worker finished after rollback gave up, so it must stop its own pipeline")
             .isTrue();
@@ -358,6 +371,13 @@ class MainStartupTest {
             assertThat(starter.isAlive())
                 .as("startAll should have returned once the drain expired").isFalse();
             assertThat(thrown.get()).isInstanceOf(InterruptedException.class);
+
+            // The assertion that actually proves ownership. Rollback has finished by now, and
+            // start() has not returned, so a correct implementation cannot have stopped this
+            // pipeline — it was never published. Publishing before start() instead lets rollback
+            // stop it here, which both consumes the one-shot guard and satisfies the latch below
+            // early, so without this the test passes against the broken ordering.
+            verify(blocked, never()).stop();
         } finally {
             releaseStart.countDown();
         }
