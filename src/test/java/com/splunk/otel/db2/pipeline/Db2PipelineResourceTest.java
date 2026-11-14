@@ -2,6 +2,7 @@ package com.splunk.otel.db2.pipeline;
 
 import com.splunk.otel.db2.config.Db2Config;
 import com.splunk.otel.db2.config.Db2ReceiverConfig;
+import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.receiver.Db2Receiver;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.metrics.Meter;
@@ -22,6 +23,8 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -70,6 +73,188 @@ class Db2PipelineResourceTest {
             .as("service.instance.id should be qualified with the resolved hostname, not 'localhost'")
             .startsWith(expectedHost)
             .doesNotStartWith("localhost:");
+    }
+
+    // The test constructor does not run the instance-name lookup, so this also covers the
+    // production path where the lookup failed: the attribute must be absent rather than empty,
+    // since an empty dimension reads as a real value.
+    @Test
+    void instanceNameIsAbsentWhenItWasNotCollected() throws Exception {
+        Resource resource = resourceOf(minimalConfig("db2.example.com", 50000, "TESTDB"));
+
+        assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("db2.instance.name must be omitted, not blank, when the lookup yielded nothing")
+            .isNull();
+    }
+
+    // Supplies a collected value AND a conflicting override, which is the only arrangement that
+    // pins the precedence: with one side null, reversing the order still passes.
+    @Test
+    void anOverrideBeatsACollectedInstanceName() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        rc.setResourceAttributes(Map.of("db2.instance.name", "from-config"));
+
+        Resource resource = Db2Pipeline.buildResource(rc, "db2.example.com", "from-server");
+
+        assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("the operator's override must win over the collected value")
+            .isEqualTo("from-config");
+    }
+
+    // A blank override is treated as unset rather than honoured: exporting an empty dimension
+    // would undo the reason a failed lookup omits the attribute entirely.
+    @Test
+    void aBlankOverrideNeitherWinsNorErasesTheCollectedName() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        rc.setResourceAttributes(Map.of("db2.instance.name", "   "));
+
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", "from-server")
+            .getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("a blank override must not overwrite a collected name")
+            .isEqualTo("from-server");
+
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", null)
+            .getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .as("and must not be exported as an empty dimension on its own")
+            .isNull();
+
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc))
+            .as("a blank override must not suppress the lookup either")
+            .isTrue();
+    }
+
+    // Exercises the caller, not just the predicate: deleting the guard inside resolveInstanceName
+    // leaves a predicate-only test green.
+    @Test
+    void theLookupIsNotInvokedWhenAnOverrideIsPresent() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        AtomicInteger invocations = new AtomicInteger();
+        Db2Pipeline.InstanceNameLookup counting = (config, label) -> {
+            invocations.incrementAndGet();
+            return "from-server";
+        };
+
+        assertThat(Db2Pipeline.resolveInstanceName(rc, "", counting)).isEqualTo("from-server");
+        assertThat(invocations.get()).as("no override, so the server must be asked").isEqualTo(1);
+
+        rc.setResourceAttributes(Map.of("db2.instance.name", "from-config"));
+        assertThat(Db2Pipeline.resolveInstanceName(rc, "", counting))
+            .as("the override is applied later by buildResource, so nothing is collected here")
+            .isNull();
+        assertThat(invocations.get())
+            .as("the override makes the connect pure waste, so it must not happen")
+            .isEqualTo(1);
+    }
+
+    // Pipelines are constructed serially, so a lookup against an unreachable database delays every
+    // later receiver by its connect_timeout. When the value would be discarded anyway, the connect
+    // must not happen at all.
+    @Test
+    void anOverrideSkipsTheLookupEntirely() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc))
+            .as("no override configured, so the instance name has to be collected")
+            .isTrue();
+
+        rc.setResourceAttributes(Map.of("db2.instance.name", "db2inst9"));
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc))
+            .as("override present, so connecting to collect a value we would discard is waste")
+            .isFalse();
+    }
+
+    // Without this the attrs.put wiring could be deleted and every other test would still pass:
+    // the production path needs a live Db2, and the override test goes through the
+    // resource_attributes loop rather than the collected value.
+    @Test
+    void aCollectedNameReachesTheResource() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+
+        Resource resource = Db2Pipeline.buildResource(rc, "db2.example.com", "db2inst1");
+
+        assertThat(resource.getAttribute(AttributeKey.stringKey("db2.instance.name")))
+            .isEqualTo("db2inst1");
+    }
+
+    // A blank or absent name must not reach the Resource as an empty dimension.
+    @Test
+    void aBlankCollectedNameIsNotPutOnTheResource() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", "   ")
+            .getAttribute(AttributeKey.stringKey("db2.instance.name"))).isNull();
+        assertThat(Db2Pipeline.buildResource(rc, "db2.example.com", null)
+            .getAttribute(AttributeKey.stringKey("db2.instance.name"))).isNull();
+    }
+
+    // An unrelated override must not suppress the lookup.
+    @Test
+    void anUnrelatedOverrideStillLeavesTheLookupNeeded() {
+        Db2ReceiverConfig rc = minimalConfig("db2.example.com", 50000, "TESTDB").getReceivers().get(0);
+        rc.setResourceAttributes(Map.of("deployment.environment", "production"));
+
+        assertThat(Db2Pipeline.instanceNameLookupNeeded(rc)).isTrue();
+    }
+
+    /**
+     * Covers the production constructor's own call site, not just the resolver it should use.
+     * Pointing the constructor back at the unguarded lookup leaves every other test here green,
+     * because with an unreachable database the lookup returns null and the override wins either
+     * way — the only difference is the connection attempt.
+     *
+     * <p>So the connection attempt is the observable. Asserted from {@code Db2Connection}'s own log
+     * rather than through another injection seam: the point is to pin the real wiring, and a seam
+     * would just move the untested call site one level up.
+     */
+    @Test
+    void theRealConstructorDoesNotConnectWhenAnOverrideIsPresent() throws Exception {
+        ch.qos.logback.classic.Logger connectionLog = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(com.splunk.otel.db2.receiver.Db2Connection.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> captured =
+            new ch.qos.logback.core.read.ListAppender<>();
+        captured.start();
+        connectionLog.addAppender(captured);
+
+        Db2ReceiverConfig rc = new Db2ReceiverConfig();
+        rc.setHostname("192.0.2.1");          // TEST-NET-1: a connect would block, then fail
+        rc.setHostport(50000);
+        rc.setUsername("user");
+        rc.setPassword("pass");
+        rc.setDatabase("TESTDB");
+        rc.setConnectTimeoutSeconds(1);
+        rc.setResourceAttributes(Map.of("db2.instance.name", "from-config"));
+
+        OtlpExporterConfig otlp = new OtlpExporterConfig();
+        otlp.setEndpoint("http://127.0.0.1:4317");
+
+        Db2Pipeline pipeline = null;
+        try {
+            pipeline = new Db2Pipeline(rc, otlp);
+
+            assertThat(captured.list)
+                .as("an override makes the lookup pointless, so the constructor must not connect")
+                .noneMatch(event -> event.getFormattedMessage().contains("Connecting to DB2"));
+        } finally {
+            connectionLog.detachAppender(captured);
+            captured.stop();
+            if (pipeline != null) {
+                try { pipeline.stop(); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    /** Builds a pipeline and returns the Resource stamped on its metrics. */
+    private static Resource resourceOf(Db2Config cfg) throws Exception {
+        InMemoryMetricReader reader = InMemoryMetricReader.create();
+        Db2Pipeline pipeline = new Db2Pipeline(cfg, reader);
+
+        Field mpField = Db2Pipeline.class.getDeclaredField("meterProvider");
+        mpField.setAccessible(true);
+        SdkMeterProvider meterProvider = (SdkMeterProvider) mpField.get(pipeline);
+        meterProvider.get("splunk-otel-db2").counterBuilder("test.counter").build().add(1);
+
+        Collection<MetricData> metrics = reader.collectAllMetrics();
+        assertThat(metrics).isNotEmpty();
+        return metrics.iterator().next().getResource();
     }
 
     /**

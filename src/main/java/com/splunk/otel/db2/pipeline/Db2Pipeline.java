@@ -5,7 +5,9 @@ import com.splunk.otel.db2.config.Db2ReceiverConfig;
 import com.splunk.otel.db2.config.OtlpExporterConfig;
 import com.splunk.otel.db2.exporter.Db2Exporter;
 import com.splunk.otel.db2.processor.Db2Processor;
+import com.splunk.otel.db2.receiver.Db2Connection;
 import com.splunk.otel.db2.receiver.Db2Receiver;
+import com.splunk.otel.db2.receiver.queries.InstanceInfoQuery;
 import com.splunk.otel.db2.util.ResourceIdentity;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -39,7 +41,8 @@ public class Db2Pipeline {
         // Resolve once: loopback → collector hostname so co-located sidecars have unique identities.
         // Remote targets are returned unchanged. Never triggers DNS on the configured host.
         String identityHost = ResourceIdentity.resolveIdentityHost(rc.getHost());
-        Resource resource = buildResource(rc, identityHost);
+        Resource resource = buildResource(rc, identityHost,
+            resolveInstanceName(rc, name, Db2Pipeline::lookUpInstanceName));
         // instanceId mirrors service.instance.id so logs and backend agree
         String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
             identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
@@ -64,7 +67,7 @@ public class Db2Pipeline {
         String effectiveInstanceId = firstNonBlank(rc.getServiceInstanceId(),
             identityHost + ":" + rc.getPort() + "/" + rc.getDatabase());
         this.instanceId = effectiveInstanceId;
-        Resource resource   = buildResource(rc, identityHost);
+        Resource resource   = buildResource(rc, identityHost, null);
         this.meterProvider  = buildMeterProvider(testReader, resource);
         this.loggerProvider = null;
 
@@ -72,7 +75,71 @@ public class Db2Pipeline {
         this.receiver = new Db2Receiver(rc, meter, (Logger) null);
     }
 
-    private static Resource buildResource(Db2ReceiverConfig rc, String identityHost) {
+    /**
+     * Reads the instance name over a connection of its own, discarded immediately. The receiver's
+     * connections do not exist yet — they are created with the Meter and Logger, which need the
+     * Resource this feeds — and the resource is immutable once built, so the lookup cannot be
+     * deferred into the receiver's lifecycle.
+     *
+     * <p>Costs one connect attempt at startup, bounded by {@code connect_timeout}. A failure is not
+     * fatal: the attribute is dropped and startup continues.
+     */
+    static final String INSTANCE_NAME = "db2.instance.name";
+
+    /**
+     * The configured override, or null when absent or blank.
+     *
+     * <p>A blank override is treated as unset rather than honoured. Honouring it would export an
+     * empty dimension, which reads downstream as a real value — the same reason a failed lookup
+     * omits the attribute instead of emitting an empty string. It would also be the one way to get
+     * a blank `db2.instance.name` into the data, having gone to the trouble of preventing it
+     * everywhere else.
+     */
+    private static String instanceNameOverride(Db2ReceiverConfig rc) {
+        String configured = rc.getResourceAttributes().get(INSTANCE_NAME);
+        return configured != null && !configured.isBlank() ? configured : null;
+    }
+
+    /**
+     * False when {@code resource_attributes} already names the instance. The override replaces
+     * whatever is collected, so connecting to collect it is pure waste — and the waste is not just
+     * a connection: pipelines are constructed one after another, so an unreachable database holds
+     * up every later receiver for its {@code connect_timeout}.
+     */
+    static boolean instanceNameLookupNeeded(Db2ReceiverConfig rc) {
+        return instanceNameOverride(rc) == null;
+    }
+
+    /** Reads the instance name unless an override makes it pointless. */
+    static String resolveInstanceName(Db2ReceiverConfig rc, String label, InstanceNameLookup lookup) {
+        return instanceNameLookupNeeded(rc) ? lookup.read(rc, label) : null;
+    }
+
+    /** Seam for tests: production passes {@link #lookUpInstanceName}. */
+    @FunctionalInterface
+    interface InstanceNameLookup {
+        String read(Db2ReceiverConfig rc, String label);
+    }
+
+    private static String lookUpInstanceName(Db2ReceiverConfig rc, String label) {
+        Db2Connection conn = new Db2Connection(rc, rc.getComponentName());
+        try {
+            return InstanceInfoQuery.fetchInstanceName(
+                conn.getOrConnect(), rc.getConnectTimeoutSeconds(), label);
+        } catch (Exception e) {
+            log.warn("{}Could not connect to read the Db2 instance name ({}); "
+                + "db2.instance.name omitted", label, e.getMessage());
+            return null;
+        } finally {
+            conn.close();
+        }
+    }
+
+    // Package-private so a test can assert a collected name actually reaches the Resource. The
+    // production path needs a live Db2, and the override path exercises the resource_attributes
+    // loop instead, so neither would catch this wiring being dropped.
+    static Resource buildResource(Db2ReceiverConfig rc, String identityHost,
+                                  String instanceName) {
         // G1: explicit overrides take precedence over generated values
         String serviceName       = firstNonBlank(rc.getServiceName(), "splunk-otel-db2");
         String serviceInstanceId = firstNonBlank(rc.getServiceInstanceId(),
@@ -91,9 +158,25 @@ public class Db2Pipeline {
         String ns = rc.getServiceNamespace();
         if (ns != null && !ns.isBlank()) attrs.put("service.namespace", ns);
 
+        // Read from the server, so absent when the lookup failed. Placed before the
+        // resource_attributes loop so an operator override still wins.
+        if (instanceName != null && !instanceName.isBlank()) {
+            attrs.put(INSTANCE_NAME, instanceName);
+        }
+
         // resource_attributes overrides win last — applied after G1 fields
         // server.port must stay a long to match semconv type
         for (Map.Entry<String, String> e : rc.getResourceAttributes().entrySet()) {
+            // A blank instance name is treated as unset, so it must not overwrite a collected one
+            // here either — otherwise the override path is the single way to export the empty
+            // dimension the rest of this class exists to avoid.
+            // Null-guarded as well as blank-guarded: the map is public API via
+            // setResourceAttributes, so a caller can put a null value even though config loading
+            // now drops them.
+            if (INSTANCE_NAME.equals(e.getKey())
+                && (e.getValue() == null || e.getValue().isBlank())) {
+                continue;
+            }
             if (e.getKey().equals("server.port")) {
                 try {
                     attrs.put(AttributeKey.longKey("server.port"), Long.parseLong(e.getValue()));

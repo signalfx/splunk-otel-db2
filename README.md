@@ -168,7 +168,7 @@ exporters:
     endpoint: "http://localhost:4317"
 ```
 
-Standard attributes (`service.name`, `service.instance.id`, `server.address`, `db.system.name`, `db.namespace`) can be overridden. `server.port` must be an integer value. All overrides are applied on top of the defaults — unspecified attributes keep their automatically derived values.
+Standard attributes (`service.name`, `service.instance.id`, `server.address`, `db.system.name`, `db.namespace`) can be overridden, as can the Db2-specific `db2.instance.name`. `server.port` must be an integer value. All overrides are applied on top of the defaults — unspecified attributes keep their automatically derived values. A blank value for `db2.instance.name` is treated as unset rather than exported as an empty attribute.
 
 Credential values can be literals or `${env:VAR_NAME}` references.
 
@@ -208,6 +208,14 @@ GRANT CONNECT ON DATABASE TO USER db2mon;
 
 -- Stored procedure called unconditionally on every connection
 GRANT EXECUTE ON PROCEDURE SYSPROC.WLM_SET_CLIENT_INFO TO USER db2mon;
+
+-- Instance name (db2.instance.name), read once at startup.
+-- Only needed where PUBLIC grants on the administrative views have been revoked: Db2 grants
+-- SELECT on this view to PUBLIC by default, so a stock install needs nothing here. Without it
+-- the query fails with SQL0551N and the attribute is omitted — nothing else is affected.
+-- EXECUTE on SYSPROC.ENV_GET_INST_INFO is NOT required: the view's definer chain covers the
+-- table function it wraps (verified on 11.5.9.0 with PUBLIC EXECUTE revoked).
+GRANT SELECT ON TABLE SYSIBMADM.ENV_INST_INFO TO USER db2mon;
 
 -- Core metrics scrapers
 GRANT EXECUTE ON FUNCTION SYSPROC.MON_GET_DATABASE TO USER db2mon;
@@ -1074,6 +1082,15 @@ The receiver sets the following OTel resource attributes on all telemetry. Any a
 | `server.port` | configured port (integer) |
 | `db.system.name` | `ibm.db2` |
 | `db.namespace` | configured database name |
+| `db2.instance.name` | Db2 instance name, read from the server at startup; omitted when unavailable (see below) |
+
+### `db2.instance.name`
+
+The instance name — the `db2inst1` an administrator knows the instance by — is read from `SYSIBMADM.ENV_INST_INFO` once at startup, so the receiver's user needs `SELECT` on that view.
+
+It cannot be derived from configuration. A Db2 URL is `jdbc:db2://host:port/DATABASE`: the trailing token is the database, and the instance is identified only implicitly by the port, since each instance listens on its own `SVCENAME`. Asking the server is the only way to learn the name it goes by.
+
+The attribute is omitted when the value cannot be read — an unreachable Db2, or a user without access to the view — and the receiver starts normally either way. Each receiver builds its resource once, when its pipeline is constructed, so a name missed at startup stays missing until the receiver restarts; set it through `resource_attributes` if you need it guaranteed.
 
 ## Releases
 

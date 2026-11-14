@@ -6,6 +6,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -605,6 +606,38 @@ class Db2ConfigTest {
         assertThatThrownBy(() -> Db2Config.load(f.toString()))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("resource_attributes must be a map");
+    }
+
+    /**
+     * A key written with no value is the natural YAML spelling of "unset", but it parses as null
+     * and {@code String.valueOf} would turn it into the literal string {@code "null"} — exported as
+     * a real attribute value, and for {@code db2.instance.name} also enough to look like an
+     * override and suppress collection.
+     */
+    @Test
+    void aResourceAttributeWithNoValueIsDroppedRatherThanBecomingTheStringNull() throws Exception {
+        Path f = writeConfig(tmp,
+            "receivers:\n" +
+            "  db2:\n" +
+            "    hostname: mydb.example.com\n" +
+            "    username: db2inst1\n" +
+            "    password: secret\n" +
+            "    database: SAMPLE\n" +
+            "    resource_attributes:\n" +
+            "      db2.instance.name:\n" +
+            "      deployment.environment: production\n" +
+            "exporters:\n" +
+            "  otlp:\n" +
+            "    endpoint: http://collector:4317\n"
+        );
+
+        Map<String, String> attrs =
+            Db2Config.load(f.toString()).getReceivers().get(0).getResourceAttributes();
+
+        assertThat(attrs)
+            .as("a valueless key must not survive as the string \"null\"")
+            .doesNotContainKey("db2.instance.name");
+        assertThat(attrs).containsEntry("deployment.environment", "production");
     }
 
     @Test
