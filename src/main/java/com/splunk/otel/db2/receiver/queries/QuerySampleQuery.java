@@ -425,7 +425,15 @@ public class QuerySampleQuery {
                             if (execIdBytes != null) execIdHex = bytesToHex(execIdBytes);
                         }
 
-                        String sessionStatus = deriveSessionStatus(state);
+                        // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
+                        // HLD_APPLICATION_HANDLE is NULL (global lock or unidentified holder).
+                        boolean isBlocked = !useSnapshotMonitor && rs.getInt("IS_BLOCKED") == 1;
+
+                        // MON_CURRENT_SQL has no lock-wait state: a session waiting on a lock reports
+                        // ACTIVITY_STATE 'EXECUTING' (measured on 11.5.9.0 and 12.1.5.0), so deriving
+                        // the status from the state alone labels every blocked session 'active'. The
+                        // MON_LOCKWAITS match is the only signal that it is waiting.
+                        String sessionStatus = isBlocked ? "waiting" : deriveSessionStatus(state);
 
                         QuerySampleEvent ev = QuerySampleEvent.of(dbName, obfuscated, elapsedSec, member)
                             .spanContext(linksToTrace(sessionStatus)
@@ -443,9 +451,7 @@ public class QuerySampleQuery {
                             .planHash(execIdHex);
 
                         // Blocking columns only on the default (MON_CURRENT) paths.
-                        // IS_BLOCKED is 1 whenever a MON_LOCKWAITS row matched — even when
-                        // HLD_APPLICATION_HANDLE is NULL (global lock or unidentified holder).
-                        if (!useSnapshotMonitor && rs.getInt("IS_BLOCKED") == 1) {
+                        if (isBlocked) {
                             // getLong turns SQL NULL into 0, and 0 clears waitDurationSeconds'
                             // >= 0 guard — which would set the attribute, escalate the record to
                             // WARN and report a zero-second lock wait that never happened.

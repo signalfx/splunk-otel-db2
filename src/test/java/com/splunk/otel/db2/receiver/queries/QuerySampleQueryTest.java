@@ -91,7 +91,7 @@ class QuerySampleQueryTest {
                                 String lockObjectType, String lockMode,
                                 long waitElapsedSec, boolean blockerIsIdle) throws Exception {
         when(rs.getString("STMT_TEXT")).thenReturn(stmtText);
-        when(rs.getString("ACTIVITY_STATE")).thenReturn("LOCKWAIT DML");
+        when(rs.getString("ACTIVITY_STATE")).thenReturn("EXECUTING WRITE_DML");
         when(rs.getString("OPERATION_NAME")).thenReturn("READ");
         when(rs.getString("LOCAL_START_TIME")).thenReturn(null);
         when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(waitElapsedSec);
@@ -551,7 +551,7 @@ class QuerySampleQueryTest {
         // the holder cannot be identified. IS_BLOCKED = 1 is the authoritative signal.
         when(rs.next()).thenReturn(true, false);
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT ID FROM T WHERE ID = 1");
-        when(rs.getString("ACTIVITY_STATE")).thenReturn("LOCKWAIT DML");
+        when(rs.getString("ACTIVITY_STATE")).thenReturn("EXECUTING WRITE_DML");
         when(rs.getString("OPERATION_NAME")).thenReturn("READ");
         when(rs.getString("LOCAL_START_TIME")).thenReturn(null);
         when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(2L);
@@ -783,7 +783,7 @@ class QuerySampleQueryTest {
         // is_idle=true in this ambiguous case.
         when(rs.next()).thenReturn(true, false);
         when(rs.getString("STMT_TEXT")).thenReturn("SELECT 1 FROM T");
-        when(rs.getString("ACTIVITY_STATE")).thenReturn("LOCKWAIT DML");
+        when(rs.getString("ACTIVITY_STATE")).thenReturn("EXECUTING WRITE_DML");
         when(rs.getString("OPERATION_NAME")).thenReturn("READ");
         when(rs.getString("LOCAL_START_TIME")).thenReturn(null);
         when(rs.getLong("WALL_ELAPSED_SEC")).thenReturn(5L);
@@ -884,7 +884,7 @@ class QuerySampleQueryTest {
 
     @Test
     void blockedSessionHasWaitingSessionStatus() throws Exception {
-        // stubBlockedRow uses ACTIVITY_STATE "LOCKWAIT DML" — deriveSessionStatus must map it to "waiting".
+        // Db2 reports a lock-waiting session as EXECUTING; only the MON_LOCKWAITS match (IS_BLOCKED) says it is waiting.
         when(rs.next()).thenReturn(true, false);
         stubBlockedRow(
             "SELECT ID FROM ORDERS WHERE ID = 1",
@@ -900,6 +900,32 @@ class QuerySampleQueryTest {
             ArgumentCaptor.forClass(io.opentelemetry.api.common.Attributes.class);
         verify(logBuilder).setAllAttributes(cap.capture());
         assertThat(cap.getValue().get(QuerySampleEvent.DB2_SESSION_STATUS)).isEqualTo("waiting");
+        // The raw state is still reported as Db2 gave it; only the derived status changes.
+        assertThat(cap.getValue().get(QuerySampleEvent.DB2_ACTIVITY)).isEqualTo("EXECUTING WRITE_DML");
+    }
+
+    // The status override must not cost a blocked session its trace link: it is mid-statement,
+    // so its traceparent is current — and blocked records are where the link matters most.
+    @Test
+    void blockedExecutingSessionStillLinksItsTraceparent() throws Exception {
+        when(rs.next()).thenReturn(true, false);
+        stubBlockedRow(
+            "SELECT ID FROM ORDERS WHERE ID = 1",
+            "111", 0L, 222L, 0L,
+            "UPDATE ORDERS SET STATUS = 'X' WHERE ID = 1",
+            "user2", "host2",
+            "DB2INST1", "ORDERS", "ROW", "X",
+            3L, false);
+        when(rs.getString("CLIENT_ACCTNG"))
+            .thenReturn("traceparent=00-" + TRACE_ID + "-" + SPAN_ID + "-01");
+
+        query(false).collect();
+
+        ArgumentCaptor<io.opentelemetry.context.Context> cap =
+            ArgumentCaptor.forClass(io.opentelemetry.context.Context.class);
+        verify(logBuilder).setContext(cap.capture());
+        assertThat(io.opentelemetry.api.trace.Span.fromContext(cap.getValue())
+            .getSpanContext().getTraceId()).isEqualTo(TRACE_ID);
     }
 
     @Test

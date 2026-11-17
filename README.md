@@ -860,7 +860,7 @@ on the parent, or they are collected and then dropped — see option 1B, step 4b
 | `db.operation.name` | SQL operation type (`READ`, `WRITE`, `DDL`, …); omitted on snapshot path |
 | `db2.session_id` | Session identifier (DB2 application handle) |
 | `db2.activity_state` | Activity state (`EXECUTING`, `LOCKWAIT`, …) |
-| `db2.session_status` | Coarse session lifecycle state derived from `ACTIVITY_STATE`: `active`, `waiting`, or `idle` |
+| `db2.session_status` | Coarse session lifecycle state: `active`, `waiting`, or `idle`. `waiting` means the session is blocked on a lock (it matched a `MON_LOCKWAITS` row); Db2 reports such sessions as `EXECUTING`, so the status is not derived from `ACTIVITY_STATE` alone |
 | `db2.query_start` | Statement start timestamp |
 | `db2.session.duration` | Wall-clock elapsed time in seconds |
 | `db2.member` | Db2 member number |
